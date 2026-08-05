@@ -1,0 +1,43 @@
+# @package _global_
+# Strict-parity variant of the AWML single-stage j6gen2 recipe:
+#   projects/StreamPETR/configs/t4dataset/
+#     t4_base_vov_flash_480x640_bev_2_8_traffic_barrier_j6gen2_partialignore.py
+# run as:  bash tools/detection3d/dist_script.sh <cfg> 2 train
+#
+# That AWML run is: 2 GPUs, batch_size 8/GPU -> total batch 16, num_epochs 10,
+# base lr 5e-5 auto-scaled by total_batch/8 = 16/8 -> 1.0e-4 (img_backbone
+# lr_mult 0.1 -> 1.0e-5). autoware-ml has no auto_scale_lr, so the scaled LRs
+# and the GPU count are pinned here. Everything else (partial-ignore, 2D aux
+# head, pc_range, augmentation, warmup+cosine scheduler, grad clip, seed) is
+# inherited from the j6gen2 base + _awml_parity.
+#
+# Data (override on the CLI or add a datamodule block here if fixed):
+#   datamodule.data_root=/workspace/data/t4datasets
+#   datamodule.train_ann_file=info/kokseang_2_8/t4dataset_j6gen2_base_infos_train.pkl
+#   datamodule.val_ann_file=info/kokseang_2_8/t4dataset_j6gen2_base_infos_val.pkl
+#   datamodule.test_ann_file=info/kokseang_2_8/t4dataset_j6gen2_base_infos_test.pkl
+# Init weights: --weights /workspace/pretrained/nuscenes_vov99_baseline_320x800_converted.pth
+defaults:
+  - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2_base
+  - _self_
+
+batch_size: 8          # per-GPU; 2 GPUs -> total batch 16
+# 8 per GPU. The SerializedSampleList fork-shared buffer removed the
+# copy-on-write OOM, but 2x32 workers still oversubscribe the shared host's
+# CPU (measured 2026-07-27: load ~209, GPUs starved at 0%, ~10 s/batch vs
+# 0.8 s/batch at 2x8). Raise only together with per-worker thread pinning
+# (cv2.setNumThreads(0), OMP_NUM_THREADS=1) and measure.
+num_workers: 8
+
+model:
+  optimizer:
+    lr: 1.0e-4         # AWML 5.0e-5 auto-scaled by total_batch/8 (16/8)
+  optimizer_group_overrides:
+    img_backbone:
+      lr: 1.0e-5       # lr_mult 0.1
+
+trainer:
+  # Pin to 2 GPUs so total batch stays 16 and the hard-coded LRs above match.
+  # Lightning would otherwise grab every visible GPU and change the batch size.
+  devices: 2
+  max_epochs: 10       # AWML num_epochs=10 (NOT the 35-epoch baseline default)

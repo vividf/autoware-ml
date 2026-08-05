@@ -1,0 +1,50 @@
+# @package _global_
+# Recipe-parity BASE training of StreamPETR on T4/j6gen2, mirroring the AWML
+# baseline projects/StreamPETR/configs/default/vov_flash_480x640_baseline.py:
+# 35 epochs, batch size 4, base LR 1.0e-4 auto-scaled by batch/8.
+# AWML's production base run (t4_base_vov_flash_480x640_bev_2_8_traffic_
+# barrier_base_partialignore.py) uses batch_size=8 with lr=5e-5 — the same
+# effective LR as here; add `batch_size=8` on the CLI for strict parity with
+# that recipe (LR stays 5e-5; autoware-ml has no auto_scale_lr, so rescale
+# the LRs yourself for any other total batch size).
+# Shared parity settings (pc_range, augmentation, 2D aux head, partial-ignore,
+# scheduler, callbacks) live in _awml_parity.yaml.
+#
+# Initialize from the nuScenes model-zoo pretrain (AWML downloads it
+# automatically via load_from; here download + convert it once):
+#   wget https://download.autoware-ml-model-zoo.tier4.jp/autoware-ml/models/streampetr/streampetr-vov99/nuscenes/v1.0/nuscenes_vov99_baseline_320x800.pth
+#   python -m autoware_ml.tools.convert_streampetr_checkpoint \
+#     --input nuscenes_vov99_baseline_320x800.pth \
+#     --output nuscenes_vov99_baseline_320x800_converted.pth \
+#     --bgr-to-rgb \
+#     --drop-pattern 'cls_branches\.\d+\.6\.' \
+#     --drop-pattern 'img_roi_head\.cls\.'
+# The --drop-pattern flags strip the 10-class nuScenes classification layers;
+# the 7-class T4 layers start from their focal-prior initialization, exactly
+# like AWML's strict=False load. Then train with
+#   --weights nuscenes_vov99_baseline_320x800_converted.pth
+defaults:
+  - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2
+  - /tasks/detection3d/streampetr/_reset_scheduler
+  - /tasks/detection3d/streampetr/_awml_parity
+  - _self_
+
+batch_size: 4
+num_workers: 16
+
+model:
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    # AWML trains with auto_scale_lr(base_batch_size=8): effective LR =
+    # 1.0e-4 * total_batch_size / 8. With batch_size=4 on a single GPU that is
+    # 5.0e-5; scale this value by total_batch_size/8 for other setups.
+    lr: 5.0e-5
+    weight_decay: 0.01
+  optimizer_group_overrides:
+    img_backbone:
+      # AWML applies lr_mult=0.1 to the image backbone.
+      lr: 5.0e-6
+
+trainer:
+  max_epochs: 35

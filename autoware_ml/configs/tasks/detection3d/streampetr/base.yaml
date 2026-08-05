@@ -26,6 +26,7 @@ datamodule:
     ego_pose_inv: list
     gt_boxes: list
     gt_labels: list
+    traffic_cone_barrier_status: list
 model:
   _target_: autoware_ml.models.detection3d.streampetr.StreamPETRDetectionModel
   metrics: ${dataset.detection3d.metrics}

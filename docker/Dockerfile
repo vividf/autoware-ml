@@ -71,7 +71,7 @@ RUN mkdir -p /workspace /ccache /etc/pixi /opt/pixi/bin /opt/pixi/envs \
   && tar -xzf "/tmp/${PIXI_ARCHIVE}" -C /opt/pixi/bin pixi \
   && chmod +x /opt/pixi/bin/pixi \
   && rm -f "/tmp/${PIXI_ARCHIVE}" "/tmp/${PIXI_ARCHIVE}.sha256" \
-  && printf 'detached-environments = "/opt/pixi/envs"\n[shell]\nchange-ps1 = false\n' > /etc/pixi/config.toml
+  && printf 'detached-environments = "/opt/pixi/envs"\n[shell]\nchange-ps1 = false\n[concurrency]\ndownloads = 4\n' > /etc/pixi/config.toml
 
 # Resolve and install the locked environment first for better layer
 # reuse. Docker build stages do not expose the host NVIDIA driver, so pixi
@@ -79,7 +79,16 @@ RUN mkdir -p /workspace /ccache /etc/pixi /opt/pixi/bin /opt/pixi/envs \
 # repository's pinned CUDA stack during image build.
 COPY LICENSE README.md pyproject.toml setup.py pixi.lock /workspace/
 WORKDIR /workspace
-RUN CONDA_OVERRIDE_CUDA=12.8 /opt/pixi/bin/pixi install --locked --environment dev && \
+# pixi does not expose an HTTP timeout knob for its embedded uv (fixed 30s),
+# so large PyPI wheels can time out on congested links. Keep download
+# concurrency low (see /etc/pixi/config.toml) and retry: uv caches completed
+# wheels, so each retry makes forward progress.
+RUN ok=0 && \
+    for i in 1 2 3 4 5; do \
+      if CONDA_OVERRIDE_CUDA=12.8 /opt/pixi/bin/pixi install --locked --environment dev; then ok=1; break; fi; \
+      echo "pixi install failed (attempt $i), retrying..."; sleep 5; \
+    done && \
+    [ "$ok" -eq 1 ] && \
     PIXI_HOME=/opt/pixi PIXI_BIN_DIR=/opt/pixi/bin /opt/pixi/bin/pixi shell-hook --manifest-path /workspace --environment dev --change-ps1 false > /etc/profile.d/autoware-ml.sh
 
 # Install the project itself in editable mode inside the environment

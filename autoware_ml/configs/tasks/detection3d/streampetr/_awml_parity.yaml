@@ -1,0 +1,140 @@
+# @package _global_
+# Shared AWML-recipe-parity settings for StreamPETR on T4/j6gen2, mirroring
+# projects/StreamPETR/configs/default/vov_flash_480x640_baseline.py in AWML:
+# pc_range +-51.2, full train-time augmentation, the auxiliary 2D FocalHead,
+# traffic_cone/barrier partial-ignore, iteration warmup + epoch cosine LR,
+# seed 0, and mAP-based checkpoint selection.
+#
+# Not a runnable config on its own: compose it after the j6gen2 base config
+# and after _reset_scheduler (which clears the inherited scheduler node), then
+# set batch_size / learning rates / trainer.max_epochs in the variant.
+seed: 0
+
+point_cloud_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+
+partial_ignore_classes: [traffic_cone, barrier]
+
+t4dataset:
+  detection3d:
+    eval_class_range:
+      car: 51.2
+      truck: 51.2
+      bus: 51.2
+      bicycle: 51.2
+      pedestrian: 51.2
+      traffic_cone: 51.2
+      barrier: 51.2
+    metric_ranges:
+      - { _target_: autoware_ml.metrics.base.MetricRange, name: 0-50m, min_distance: 0.0, max_distance: 50.0 }
+      - { _target_: autoware_ml.metrics.base.MetricRange, name: 0-51.2m, min_distance: 0.0, max_distance: 51.2 }
+
+datamodule:
+  # Produced by LoadAnnotations2DFromBoxes3D in train_transforms below for the
+  # auxiliary 2D FocalHead; val/test/predict pipelines never carry these keys,
+  # so they are declared train-only.
+  train_collation_map:
+    gt_bboxes_2d: list
+    gt_labels_2d: list
+    centers_2d: list
+    depths_2d: list
+  train_transforms:
+    _target_: autoware_ml.transforms.base.TransformsCompose
+    pipeline:
+      - _target_: autoware_ml.transforms.boxes3d.merge.MergeObjects3D
+        merge_objects: ${dataset.detection3d.merge_objects}
+        name_mapping: ${dataset.detection3d.name_mapping}
+      - _target_: autoware_ml.transforms.boxes3d.loading.LoadAnnotations3D
+        name_mapping: ${dataset.detection3d.name_mapping}
+        filter_attributes: ${dataset.detection3d.filter_attributes}
+        use_valid_flag: ${dataset.detection3d.use_valid_flag}
+      - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
+        # AWML shuffles the camera order every training frame
+        # (StreamPETRDataset shuffle_cameras=True); train-time only.
+        shuffle_order: true
+      - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
+        data_aug_conf:
+          resize_lim: 0.02
+          final_dim: [480, 640]
+          bot_pct_lim: [0.0, 0.0]
+          rot_lim: [0.0, 0.0]
+          rand_flip: true
+        training: true
+      - _target_: autoware_ml.transforms.camera.geometry.GlobalRotScaleTrans
+        rot_range: [-0.3925, 0.3925]
+        scale_ratio_range: [0.95, 1.05]
+      - _target_: autoware_ml.transforms.camera.resize.PadMultiViewImage
+        size_divisor: 32
+      - _target_: autoware_ml.transforms.camera.normalize.NormalizeMultiviewImage
+        mean: ${img_norm_cfg.mean}
+        std: ${img_norm_cfg.std}
+        to_rgb: ${img_norm_cfg.to_rgb}
+      # 2D annotations are projected from the augmented 3D boxes BEFORE the
+      # range filter (matching AWML): the auxiliary 2D head supervises every
+      # visible object even outside the 3D detection range.
+      - _target_: autoware_ml.transforms.camera.annotations2d.LoadAnnotations2DFromBoxes3D
+      - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeFilter
+        point_cloud_range: ${point_cloud_range}
+
+model:
+  # CPFPN is the reference StreamPETR neck and is weight-compatible with AWML
+  # checkpoints; GeneralizedLSSFPN (concat + BN + ReLU) is not.
+  img_neck:
+    _target_: autoware_ml.models.common.necks.cp_fpn.CPFPN
+    in_channels: [768, 1024]
+    out_channels: 256
+  bbox_head:
+    class_names: ${dataset.detection3d.class_names}
+    partial_ignore_classes: ${partial_ignore_classes}
+  img_roi_head:
+    _target_: autoware_ml.models.detection3d.heads.focal2d.FocalHead2D
+    num_classes: ${dataset.detection3d.num_classes}
+    in_channels: 256
+    embed_dims: 256
+    stride: 16
+    loss_cls_weight: 2.0
+    loss_bbox_weight: 5.0
+    loss_iou_weight: 2.0
+    loss_centers2d_weight: 10.0
+    loss_centerness_weight: 1.0
+    class_names: ${dataset.detection3d.class_names}
+    partial_ignore_classes: ${partial_ignore_classes}
+    assigner:
+      _target_: autoware_ml.models.detection3d.task_modules.assigners2d.HungarianAssigner2D
+      cls_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.match_costs.ClassificationCost
+        weight: 2.0
+      reg_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.BBoxL1Cost2D
+        weight: 5.0
+        box_format: xywh
+      iou_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.IoUCost2D
+        weight: 2.0
+        iou_mode: giou
+      centers2d_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.Center2DL1Cost
+        weight: 10.0
+  scheduler:
+    _target_: autoware_ml.utils.schedulers.iter_warmup_epoch_cosine.IterWarmupEpochCosineLR
+    _partial_: true
+    max_epochs: ${trainer.max_epochs}
+    warmup_iters: 500
+    warmup_start_factor: 0.3333333333333333
+    eta_min_factor: 1.0e-4
+  scheduler_config:
+    interval: step
+
+callbacks:
+  # AWML selects the best checkpoint by detection mAP, not validation loss.
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    monitor: val/det3d/mAP
+    dirpath: ${hydra:run.dir}/checkpoints
+    filename: best
+    save_top_k: 1
+    mode: max
+    verbose: true
+  # The AWML recipes always train the configured number of epochs.
+  early_stopping: null

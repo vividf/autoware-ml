@@ -32,7 +32,7 @@ datamodule:
   data_root: ${dataset.data_root}
   train_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_train.pkl
   val_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_val.pkl
-  test_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_val.pkl
+  test_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_test.pkl
   class_names: ${dataset.detection3d.class_names}
   camera_order: ${dataset.camera.camera_order}
   name_mapping: ${dataset.detection3d.name_mapping}
@@ -60,6 +60,8 @@ datamodule:
         filter_attributes: ${dataset.detection3d.filter_attributes}
         use_valid_flag: ${dataset.detection3d.use_valid_flag}
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02
@@ -90,6 +92,8 @@ datamodule:
         filter_attributes: ${dataset.detection3d.filter_attributes}
         use_valid_flag: ${dataset.detection3d.use_valid_flag}
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02
@@ -111,6 +115,8 @@ datamodule:
     _target_: autoware_ml.transforms.base.TransformsCompose
     pipeline:
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02

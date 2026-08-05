@@ -26,3 +26,8 @@ callbacks:
   lr_monitor:
     _target_: lightning.pytorch.callbacks.LearningRateMonitor
     logging_interval: step
+
+  # Epoch-end train/val metric summaries into the text log (train.log), so the
+  # curves are reconstructable without the MLflow UI.
+  metrics_text_logger:
+    _target_: autoware_ml.callbacks.metrics_text_logger.MetricsTextLogger

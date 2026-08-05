@@ -13,6 +13,28 @@ import torch
 import torch.nn as nn
 
 
+def reduce_mean_count(value: torch.Tensor) -> torch.Tensor:
+    """Average a scalar sample count across DDP ranks.
+
+    Loss terms normalized as ``sum / count`` need the count averaged across
+    ranks: DDP averages gradients, so with every rank dividing by the same
+    global mean count the effective gradient equals the true per-object mean
+    over the whole effective batch (global sum / global count). Normalizing by
+    the rank-local count instead makes each GPU an equal vote regardless of how
+    many objects it holds, and is biased upward (Jensen) — the standard fix
+    used by DETR (``num_boxes`` all-reduce / world size) and mmdetection's
+    ``reduce_mean``.
+
+    Identity when distributed is unavailable or uninitialized, so single-GPU
+    behavior is bitwise unchanged. Collective: every rank in the default group
+    must call this the same number of times per step.
+    """
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        value = value.float().clone()
+        torch.distributed.all_reduce(value.div_(torch.distributed.get_world_size()))
+    return value
+
+
 def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """Apply the inverse sigmoid transform with clamping for stability."""
     dtype = x.dtype
