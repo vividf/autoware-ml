@@ -26,3 +26,6 @@ callbacks:
   lr_monitor:
     _target_: lightning.pytorch.callbacks.LearningRateMonitor
     logging_interval: step
+
+  metrics_text_logger:
+    _target_: autoware_ml.callbacks.metrics_text_logger.MetricsTextLogger

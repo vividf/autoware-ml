@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 import cv2
@@ -49,15 +50,34 @@ class LoadMultiViewImagesFromFiles(BaseTransform):
 
     _required_keys = ["images", "camera_order"]
 
-    def __init__(self, *, to_float32: bool = True, normalize_to_unit: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        to_float32: bool = True,
+        normalize_to_unit: bool = True,
+        color_type: str = "rgb",
+        shuffle_order: bool = False,
+    ) -> None:
         """Initialize the LoadMultiViewImagesFromFiles transform.
 
         Args:
             to_float32: Whether to cast images to ``float32``.
             normalize_to_unit: Whether to divide pixel values by ``255``.
+            color_type: Output color format, ``"rgb"`` or ``"bgr"``. The
+                normalization statistics fed to ``NormalizeMultiviewImage``
+                must follow the same channel order.
+            shuffle_order: Shuffle the camera order per sample (train-time
+                regularization for camera-order-agnostic models). Every
+                emitted per-camera array follows the shuffled order, so the
+                sample stays internally consistent. Enable only in training
+                pipelines.
         """
+        if color_type.lower() not in ("rgb", "bgr"):
+            raise ValueError(f"color_type must be 'rgb' or 'bgr', got '{color_type}'.")
         self.to_float32 = to_float32
         self.normalize_to_unit = normalize_to_unit
+        self.color_type = color_type.lower()
+        self.shuffle_order = shuffle_order
 
     def transform(self, input_dict: dict[str, Any]) -> dict[str, Any]:
         """Load images and camera matrices for all configured views.
@@ -73,7 +93,10 @@ class LoadMultiViewImagesFromFiles(BaseTransform):
         lidar2cam = []
         lidar2img = []
         camera_names = []
-        for camera_name in input_dict["camera_order"]:
+        camera_order = list(input_dict["camera_order"])
+        if self.shuffle_order:
+            random.shuffle(camera_order)
+        for camera_name in camera_order:
             camera_info = input_dict["images"].get(camera_name)
             if camera_info is None:
                 raise ValueError(
@@ -85,7 +108,8 @@ class LoadMultiViewImagesFromFiles(BaseTransform):
             image = cv2.imread(camera_info["img_path"], cv2.IMREAD_COLOR)
             if image is None:
                 raise FileNotFoundError(f"Image not found: {camera_info['img_path']}")
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if self.color_type == "rgb":
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             if self.to_float32:
                 image = image.astype(np.float32)
             if self.normalize_to_unit:

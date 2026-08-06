@@ -1,0 +1,6 @@
+# @package _global_
+# Clears the inherited scheduler node so a config later in the defaults list
+# can replace it wholesale (OmegaConf merges dicts key-by-key; merging onto
+# null replaces the node instead).
+model:
+  scheduler: null

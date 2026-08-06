@@ -27,14 +27,122 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+from torch.utils.data import DataLoader
 
-from autoware_ml.datamodule.base import Dataset
+from autoware_ml.datamodule.base import DataModule, Dataset
 from autoware_ml.datamodule.common.detection3d import (
     build_label_to_category,
     load_detection_data_infos,
 )
+from autoware_ml.datamodule.common.serialization import SerializedSampleList
+from autoware_ml.datamodule.samplers import GroupStreamingSampler
 
 logger = logging.getLogger(__name__)
+
+
+def build_streaming_dataloader(
+    dataset: Dataset,
+    dataloader_cfg: Any,
+    collate_fn: Any,
+    *,
+    shuffle_scenes: bool,
+) -> DataLoader:
+    """Build a dataloader driven by scene-streaming sampling.
+
+    Every dataloader lane walks whole scenes frame by frame, so stateful
+    temporal models see contiguous streams in training and evaluation alike.
+    The :class:`GroupStreamingSampler` owns the sample order, so the
+    dataloader configuration must not request shuffling.
+
+    Args:
+        dataset: Dataset exposing ``scene_index_groups()``.
+        dataloader_cfg: Split dataloader configuration.
+        collate_fn: Batch collation callable.
+        shuffle_scenes: Whether the scene order is reshuffled every epoch.
+
+    Returns:
+        Streaming dataloader for the split.
+    """
+    dataloader_kwargs = dataloader_cfg.to_dataloader_kwargs()
+    if dataloader_kwargs.pop("shuffle"):
+        raise ValueError(
+            "Streaming datamodules own the sample order; set dataloader shuffle to false."
+        )
+    sampler = GroupStreamingSampler(
+        dataset, batch_size=dataloader_cfg.batch_size, shuffle=shuffle_scenes
+    )
+    return DataLoader(dataset=dataset, sampler=sampler, collate_fn=collate_fn, **dataloader_kwargs)
+
+
+class MultiviewDetection3DDataModule(DataModule):
+    """Shared datamodule scaffolding for multiview 3D detection datasets.
+
+    Subclasses provide ``_create_dataset``; annotation-file resolution and the
+    scene-streaming dataloader policy live here so every multiview dataset
+    behaves identically.
+    """
+
+    def __init__(
+        self,
+        data_root: str,
+        train_ann_file: str,
+        val_ann_file: str,
+        test_ann_file: str,
+        class_names: list[str],
+        camera_order: list[str],
+        name_mapping: dict[str, str] | None = None,
+        filter_frames_with_camera_order: bool = True,
+        require_image_files: bool = False,
+        streaming: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the multiview detection datamodule.
+
+        Args:
+            data_root: Dataset root directory.
+            train_ann_file: Training annotation file path.
+            val_ann_file: Validation annotation file path.
+            test_ann_file: Test annotation file path.
+            class_names: Ordered detector class names.
+            camera_order: Ordered camera names expected by the model.
+            name_mapping: Optional mapping from dataset labels to detector labels.
+            filter_frames_with_camera_order: Drop frames missing any camera in
+                ``camera_order`` so image loading always sees a complete set.
+            require_image_files: Also verify camera image files exist on disk
+                while filtering (slower; off by default).
+            streaming: Whether every dataloader streams scene-contiguous
+                frames per batch lane for stateful temporal models.
+            **kwargs: Additional base datamodule configuration.
+        """
+        super().__init__(**kwargs)
+        self.data_root = data_root
+        self.class_names = class_names
+        self.camera_order = camera_order
+        self.name_mapping = {} if name_mapping is None else dict(name_mapping)
+        self.filter_frames_with_camera_order = filter_frames_with_camera_order
+        self.require_image_files = require_image_files
+        self.streaming = streaming
+
+        def resolve_ann_file(ann_file: str) -> str:
+            return ann_file if os.path.isabs(ann_file) else os.path.join(data_root, ann_file)
+
+        self.ann_files = {
+            "train": resolve_ann_file(train_ann_file),
+            "val": resolve_ann_file(val_ann_file),
+            "test": resolve_ann_file(test_ann_file),
+            "predict": resolve_ann_file(test_ann_file),
+        }
+
+    def _create_dataloader(self, split: str):
+        """Create the split dataloader, streaming scenes on every split."""
+        if not self.streaming:
+            return super()._create_dataloader(split)
+        return build_streaming_dataloader(
+            getattr(self, f"{split}_dataset"),
+            getattr(self, f"{split}_dataloader_cfg"),
+            self._collate_fn_for(split),
+            shuffle_scenes=split == "train",
+        )
 
 
 def _quaternion_to_rotation_matrix(quaternion: Sequence[float]) -> np.ndarray:
@@ -58,7 +166,7 @@ def _build_ego_pose(sample: Mapping[str, Any]) -> np.ndarray | None:
     matrix = sample.get("ego2global")
     if matrix is not None:
         return np.asarray(matrix, dtype=np.float32)
-    # Fallback: separate translation + quaternion rotation fields.
+    # Annotation schema variant: separate translation + quaternion fields.
     translation = sample.get("ego2global_translation")
     rotation = sample.get("ego2global_rotation")
     if translation is None or rotation is None:
@@ -110,11 +218,14 @@ class MultiviewDetection3DDataset(Dataset):
         self.require_image_files = require_image_files
         with open(ann_file, "rb") as file:
             data = pickle.load(file)
-        self.data_infos = load_detection_data_infos(data)
+        data_infos = load_detection_data_infos(data)
         if filter_frames_with_camera_order:
-            self.data_infos = self._filter_frames_with_camera_order(self.data_infos)
-        self.prev_exists = self._build_prev_exists(self.data_infos)
+            data_infos = self._filter_frames_with_camera_order(data_infos)
+        self.prev_exists = self._build_prev_exists(data_infos)
         self.label_to_category = build_label_to_category(data.get("metainfo", {}))
+        # Serialize last: the full passes above must run on the live list.
+        self._scene_index_groups = self._build_scene_index_groups(data_infos)
+        self.data_infos = SerializedSampleList(data_infos)
 
     @staticmethod
     def _build_prev_exists(data_infos: list[dict[str, Any]]) -> np.ndarray:
@@ -170,6 +281,23 @@ class MultiviewDetection3DDataset(Dataset):
             Number of samples available in the annotation file.
         """
         return len(self.data_infos)
+
+    @staticmethod
+    def _build_scene_index_groups(data_infos: list[dict[str, Any]]) -> list[list[int]]:
+        """Group dataset indices by scene, preserving frame order."""
+        groups: dict[str, list[int]] = {}
+        for index, sample in enumerate(data_infos):
+            groups.setdefault(sample["scene_token"], []).append(index)
+        return list(groups.values())
+
+    def scene_index_groups(self) -> list[list[int]]:
+        """Group dataset indices by scene, preserving frame order.
+
+        Returns:
+            One list of scene-contiguous dataset indices per scene. A fresh
+            copy is returned so callers may mutate it freely.
+        """
+        return [list(group) for group in self._scene_index_groups]
 
     def _resolve_path(self, relative_path: str) -> str:
         """Resolve a path relative to the dataset root.
@@ -264,6 +392,7 @@ class MultiviewDetection3DDataset(Dataset):
         sample = self.data_infos[index]
         lidar_path = self._resolve_lidar_path(sample)
         camera_infos = self._get_camera_infos(sample)
+        timestamp = sample.get("timestamp")
 
         data_info = {
             "instances": sample.get("instances", []),
@@ -273,7 +402,9 @@ class MultiviewDetection3DDataset(Dataset):
             "images": camera_infos,
             "camera_order": self.camera_order,
             "sample_token": sample["token"],
-            "timestamp": sample.get("timestamp"),
+            # Epoch-second timestamps exceed float32 resolution (256 s steps at
+            # 1.7e9), so the value must stay float64 through batch collation.
+            "timestamp": None if timestamp is None else np.float64(timestamp),
             "lidar_path": lidar_path,
             "num_pts_feats": int(
                 sample.get("num_features", sample.get("lidar_points", {}).get("num_pts_feats", 5))
@@ -281,6 +412,11 @@ class MultiviewDetection3DDataset(Dataset):
             "sweeps": self._resolve_sweeps(sample),
             "scene_token": sample["scene_token"],
             "prev_exists": self.prev_exists[index],
+            # Per-frame annotation-completeness flag: False means the frame's
+            # scene was not annotated for traffic_cone/barrier, so background
+            # predictions of those classes must not be punished
+            # (partial-ignore). Frames without the field count as annotated.
+            "traffic_cone_barrier_status": bool(sample.get("traffic_cone_barrier_status", True)),
         }
         ego_pose = _build_ego_pose(sample)
         if ego_pose is not None:

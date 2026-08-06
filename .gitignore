@@ -2,6 +2,8 @@
 data/
 mlruns/
 outputs/
+docs/onboarding/
+docs/framework/
 
 # Model files and artifacts
 *.bin
