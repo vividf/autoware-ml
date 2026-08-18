@@ -18,6 +18,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from autoware_ml.transforms.camera.annotations2d import LoadAnnotations2DFromBoxes3D
 from autoware_ml.transforms.camera.distortion import UndistortImage
 from autoware_ml.transforms.camera.masking import GridMask
 from autoware_ml.transforms.camera.normalize import NormalizeMultiviewImage
@@ -281,3 +282,51 @@ def test_grid_mask_handles_chw_stack() -> None:
 
     assert output["img"].shape == images.shape
     assert (output["img"] == 0).any()
+
+
+def test_load_annotations_2d_treats_box_z_as_gravity_center() -> None:
+    """The projected 2D box and center must straddle z, not sit above it.
+
+    ``gt_boxes`` stores the gravity center. Treating that z as the bottom face
+    (building corners from z upward, or adding dz/2 before projecting the
+    center) silently lifts every 2D auxiliary target by half an object height,
+    which is invisible in the loss but wrong everywhere.
+    """
+    # Pinhole camera: fx = fy = 100, principal point at (50, 50).
+    cam2img = np.eye(4)
+    cam2img[0, 0] = cam2img[1, 1] = 100.0
+    cam2img[0, 2] = cam2img[1, 2] = 50.0
+    # Lidar (x forward, y left, z up) -> camera (x right, y down, z forward).
+    lidar2cam = np.array(
+        [
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    # One 2 m cube centered on the optical axis, 10 m ahead.
+    gt_boxes = np.array([[10.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    output = LoadAnnotations2DFromBoxes3D()(
+        {
+            "img": np.zeros((1, 3, 100, 100), dtype=np.float32),
+            "gt_boxes": gt_boxes,
+            "gt_labels": np.array([0]),
+            "lidar2cam": [lidar2cam],
+            "camera_intrinsics": [cam2img],
+        }
+    )
+
+    center = output["centers_2d"][0][0]
+    x1, y1, x2, y2 = output["gt_bboxes_2d"][0][0]
+    # z = 0 is on the optical axis, so the center projects to the principal
+    # point. The bottom-face reading would put it at y = 40.
+    assert center == pytest.approx([50.0, 50.0], abs=1e-3)
+    # The cube spans 9-11 m in depth, so its near face projects largest and
+    # sets the extent: 100 * 1 / 9 either side of the principal point.
+    extent = 100.0 / 9.0
+    assert (y1, y2) == pytest.approx((50.0 - extent, 50.0 + extent), abs=1e-3)
+    assert (x1, x2) == pytest.approx((50.0 - extent, 50.0 + extent), abs=1e-3)
+    # The center sits at the middle of the box, not on its top edge.
+    assert center[1] == pytest.approx((y1 + y2) / 2, abs=1e-3)

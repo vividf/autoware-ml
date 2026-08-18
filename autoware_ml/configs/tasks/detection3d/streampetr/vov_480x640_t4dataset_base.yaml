@@ -1,0 +1,33 @@
+# @package _global_
+# Stage 2 of the AWML three-stage StreamPETR recipe
+# (nuScenes pretrain -> T4 base -> j6gen2 fine-tune), reproducing
+#   projects/StreamPETR/configs/t4dataset/
+#     t4_base_vov_flash_480x640_bev_2_8_traffic_barrier_base_partialignore.py
+#
+# The model, augmentation, auxiliary 2D head, traffic_cone/barrier
+# partial-ignore, LR schedule and 2 GPUs x batch 8 (total 16) are all
+# inherited from the j6gen2 default; this stage only swaps the split to the
+# full T4 base DB and trains 35 epochs.
+#
+# Initialize from the converted nuScenes model-zoo pretrain:
+#   --weights nuscenes_vov99_baseline_320x800_converted.pth
+# (see docs/models/streampetr.md for the conversion command).
+#
+# AWML validates every 5 epochs (val_interval=5) and switches to every epoch
+# for the last 5 (dynamic_intervals). Lightning has no dynamic interval, so
+# validation is pinned to every 5 epochs; the mAP-monitored ModelCheckpoint
+# still picks the best of those. Override
+# trainer.check_val_every_n_epoch=1 for finer selection at ~35x the
+# validation cost (the base val split is ~12.6k frames).
+defaults:
+  - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2
+  - _self_
+
+datamodule:
+  train_ann_file: info/detection3d/t4dataset_base_infos_train.pkl
+  val_ann_file: info/detection3d/t4dataset_base_infos_val.pkl
+  test_ann_file: info/detection3d/t4dataset_base_infos_test.pkl
+
+trainer:
+  max_epochs: 35
+  check_val_every_n_epoch: 5

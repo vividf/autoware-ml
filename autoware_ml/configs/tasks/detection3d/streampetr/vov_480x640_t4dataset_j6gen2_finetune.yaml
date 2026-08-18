@@ -1,0 +1,25 @@
+# @package _global_
+# Stage 3 of the AWML three-stage StreamPETR recipe
+# (nuScenes pretrain -> T4 base -> j6gen2 fine-tune), reproducing
+#   projects/StreamPETR/configs/t4dataset/
+#     t4_base_vov_flash_480x640_bev_2_7_traffic_barrier_j6gen2_partialignore.py
+# whose `load_from` points at the stage-2 base run
+# (`..._2_8_traffic_barrier_base_partialignore/epoch_32.pth`).
+#
+# Same split and recipe as the single-stage j6gen2 default; the differences
+# are only the initialization (pass the stage-2 checkpoint via --weights) and
+# the 35-epoch schedule AWML uses for this stage:
+#   --weights mlruns/detection3d/streampetr/vov_480x640_t4dataset_base/<run_id>/artifacts/checkpoints/best.ckpt
+#
+# The LR is unchanged from stage 2 (AWML keeps base lr 5e-5 auto-scaled by
+# total_batch/8 -> 1.0e-4 at 2 GPUs x batch 8, img_backbone lr_mult 0.1).
+# Validation every 5 epochs mirrors AWML's val_interval; the j6gen2 val split
+# is small (~3.6k frames), so trainer.check_val_every_n_epoch=1 is cheap if
+# finer best-checkpoint selection is wanted.
+defaults:
+  - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2
+  - _self_
+
+trainer:
+  max_epochs: 35
+  check_val_every_n_epoch: 5

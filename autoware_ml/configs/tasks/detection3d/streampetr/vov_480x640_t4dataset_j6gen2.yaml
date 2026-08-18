@@ -1,38 +1,85 @@
 # @package _global_
+# StreamPETR on T4/j6gen2, reproducing the reference (AWML) production recipe
+#   projects/StreamPETR/configs/t4dataset/
+#     t4_base_vov_flash_480x640_bev_2_8_traffic_barrier_j6gen2_partialignore.py
+#   run as: bash tools/detection3d/dist_script.sh <cfg> 2 train
+# i.e. 2 GPUs x batch 8 (total 16), 10 epochs, base LR 5e-5 auto-scaled by
+# total_batch/8 -> 1.0e-4 (img_backbone lr_mult 0.1 -> 1.0e-5), pc_range
+# +-51.2, full train-time augmentation, auxiliary 2D FocalHead,
+# traffic_cone/barrier partial-ignore, iteration warmup + epoch cosine LR,
+# seed 0, and mAP-based checkpoint selection.
+#
+# autoware-ml has no auto_scale_lr: the LRs and the GPU count are pinned
+# here so total batch stays 16. For any other total batch size N rescale
+# both LRs by N/16 (and expect slightly different results).
+#
+# Initialize from the nuScenes model-zoo pretrain (AWML downloads it
+# automatically via load_from; here download + convert it once):
+#   wget https://download.autoware-ml-model-zoo.tier4.jp/autoware-ml/models/streampetr/streampetr-vov99/nuscenes/v1.0/nuscenes_vov99_baseline_320x800.pth
+#   python -m autoware_ml.tools.convert_streampetr_checkpoint \
+#     --input nuscenes_vov99_baseline_320x800.pth \
+#     --output nuscenes_vov99_baseline_320x800_converted.pth \
+#     --bgr-to-rgb \
+#     --drop-pattern 'cls_branches\.\d+\.6\.' \
+#     --drop-pattern 'img_roi_head\.cls\.'
+# The --drop-pattern flags strip the 10-class nuScenes classification layers;
+# the 7-class T4 layers start from their focal-prior initialization, exactly
+# like AWML's strict=False load. Then train with
+#   --weights nuscenes_vov99_baseline_320x800_converted.pth
 defaults:
   - /tasks/detection3d/streampetr/base
   - /datasets/t4dataset/detection3d
   - /datasets/t4dataset/camera
   - _self_
 
-batch_size: 8
-num_workers: 16
+batch_size: 8          # per-GPU; 2 GPUs -> total batch 16
+# 8 per GPU. The SerializedSampleList fork-shared buffer removed the
+# copy-on-write OOM, but 2x32 workers still oversubscribe a shared host's
+# CPU (measured 2026-07-27: load ~209, GPUs starved at 0%, ~10 s/batch vs
+# 0.8 s/batch at 2x8). Raise only together with per-worker thread pinning
+# (cv2.setNumThreads(0), OMP_NUM_THREADS=1) and measure.
+# TODO(vividf): I think this can also be fixed!!!
+num_workers: 8
 
 dataset: ${t4dataset}
 
-point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+point_cloud_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 post_center_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
 
+partial_ignore_classes: [traffic_cone, barrier]
+
+# Evaluation ranges: the GT is already limited to the +-51.2 m pc_range
+# SQUARE by the pipeline ObjectRangeFilter. Earlier revisions additionally
+# capped eval_class_range RADIALLY at the pc_range - that removed the
+# square's corners from the GT while corner predictions stayed and became
+# guaranteed FPs, a semantics AWML's T4MetricV2 (bev buckets, radial on both
+# GT and predictions) cannot reproduce. Restate the dataset-level 121 m
+# default instead: 121 m is a no-op inside the 51.2 m square, making the
+# headline mAP directly comparable to T4MetricV2's bev_center_0.0-121.0
+# evaluator - the pairing validated by BEVFusion parity. Buckets mirror
+# T4MetricV2's.
 t4dataset:
   detection3d:
     eval_class_range:
-      car: 54.0
-      truck: 54.0
-      bus: 54.0
-      bicycle: 54.0
-      pedestrian: 54.0
-      traffic_cone: 54.0
-      barrier: 54.0
+      car: 121.0
+      truck: 121.0
+      bus: 121.0
+      bicycle: 121.0
+      pedestrian: 121.0
+      traffic_cone: 121.0
+      barrier: 121.0
     metric_ranges:
       - { _target_: autoware_ml.metrics.base.MetricRange, name: 0-50m, min_distance: 0.0, max_distance: 50.0 }
-      - { _target_: autoware_ml.metrics.base.MetricRange, name: 0-54m, min_distance: 0.0, max_distance: 54.0 }
+      - { _target_: autoware_ml.metrics.base.MetricRange, name: 50-90m, min_distance: 50.0, max_distance: 90.0 }
+      - { _target_: autoware_ml.metrics.base.MetricRange, name: 90-121m, min_distance: 90.0, max_distance: 121.0 }
+      - { _target_: autoware_ml.metrics.base.MetricRange, name: 0-121m, min_distance: 0.0, max_distance: 121.0 }
 
 datamodule:
   _target_: autoware_ml.datamodule.t4dataset.multiview_detection3d.T4MultiviewDetection3DDataModule
   data_root: ${dataset.data_root}
   train_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_train.pkl
   val_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_val.pkl
-  test_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_val.pkl
+  test_ann_file: info/detection3d/t4dataset_j6gen2_base_infos_test.pkl
   class_names: ${dataset.detection3d.class_names}
   camera_order: ${dataset.camera.camera_order}
   name_mapping: ${dataset.detection3d.name_mapping}
@@ -49,6 +96,13 @@ datamodule:
   test_dataloader_cfg:
     batch_size: 1
     num_workers: ${num_workers}
+  # Produced by LoadAnnotations2DFromBoxes3D in train_transforms below for the
+  # auxiliary 2D FocalHead; val/test/predict pipelines never carry these keys,
+  # so they are declared train-only.
+  train_collation_map:
+    gt_bboxes_2d: list
+    gt_labels_2d: list
+    centers_2d: list
   train_transforms:
     _target_: autoware_ml.transforms.base.TransformsCompose
     pipeline:
@@ -60,23 +114,32 @@ datamodule:
         filter_attributes: ${dataset.detection3d.filter_attributes}
         use_valid_flag: ${dataset.detection3d.use_valid_flag}
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
+        # The reference recipe shuffles the camera order every training frame
+        # (StreamPETRDataset shuffle_cameras=True); train-time only.
+        shuffle_order: true
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02
           final_dim: [480, 640]
           bot_pct_lim: [0.0, 0.0]
           rot_lim: [0.0, 0.0]
-          rand_flip: false
+          rand_flip: true
         training: true
       - _target_: autoware_ml.transforms.camera.geometry.GlobalRotScaleTrans
-        rot_range: [0.0, 0.0]
-        scale_ratio_range: [1.0, 1.0]
+        rot_range: [-0.3925, 0.3925]
+        scale_ratio_range: [0.95, 1.05]
       - _target_: autoware_ml.transforms.camera.resize.PadMultiViewImage
         size_divisor: 32
       - _target_: autoware_ml.transforms.camera.normalize.NormalizeMultiviewImage
         mean: ${img_norm_cfg.mean}
         std: ${img_norm_cfg.std}
         to_rgb: ${img_norm_cfg.to_rgb}
+      # 2D annotations are projected from the augmented 3D boxes BEFORE the
+      # range filter (matching the reference): the auxiliary 2D head
+      # supervises every visible object even outside the 3D detection range.
+      - _target_: autoware_ml.transforms.camera.annotations2d.LoadAnnotations2DFromBoxes3D
       - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeFilter
         point_cloud_range: ${point_cloud_range}
   val_transforms:
@@ -90,6 +153,8 @@ datamodule:
         filter_attributes: ${dataset.detection3d.filter_attributes}
         use_valid_flag: ${dataset.detection3d.use_valid_flag}
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02
@@ -111,6 +176,8 @@ datamodule:
     _target_: autoware_ml.transforms.base.TransformsCompose
     pipeline:
       - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
+        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
+        normalize_to_unit: false
       - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
         data_aug_conf:
           resize_lim: 0.02
@@ -133,9 +200,56 @@ model:
     out_features: [stage4, stage5]
     frozen_stages: -1
     norm_eval: true
+  # CPFPN is the reference StreamPETR neck and is weight-compatible with AWML
+  # checkpoints; GeneralizedLSSFPN (concat + BN + ReLU) is not.
   img_neck:
-    _target_: autoware_ml.models.common.necks.lss_fpn.GeneralizedLSSFPN
+    _target_: autoware_ml.models.common.necks.cp_fpn.CPFPN
     in_channels: [768, 1024]
     out_channels: 256
   bbox_head:
     num_queries: 644
+    class_names: ${dataset.detection3d.class_names}
+    partial_ignore_classes: ${partial_ignore_classes}
+  img_roi_head:
+    _target_: autoware_ml.models.detection3d.heads.focal2d.FocalHead2D
+    num_classes: ${dataset.detection3d.num_classes}
+    in_channels: 256
+    embed_dims: 256
+    stride: 16
+    loss_cls_weight: 2.0
+    loss_bbox_weight: 5.0
+    loss_iou_weight: 2.0
+    loss_centers2d_weight: 10.0
+    loss_centerness_weight: 1.0
+    class_names: ${dataset.detection3d.class_names}
+    partial_ignore_classes: ${partial_ignore_classes}
+    assigner:
+      _target_: autoware_ml.models.detection3d.task_modules.assigners2d.HungarianAssigner2D
+      cls_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.match_costs.ClassificationCost
+        weight: 2.0
+      reg_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.BBoxL1Cost2D
+        weight: 5.0
+        box_format: xywh
+      iou_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.IoUCost2D
+        weight: 2.0
+        iou_mode: giou
+      centers2d_cost:
+        _target_: autoware_ml.models.detection3d.task_modules.assigners2d.Center2DL1Cost
+        weight: 10.0
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 1.0e-4         # reference base LR 5.0e-5 auto-scaled by total_batch/8 (16/8)
+    weight_decay: 0.01
+  optimizer_group_overrides:
+    img_backbone:
+      lr: 1.0e-5       # lr_mult 0.1
+
+trainer:
+  # Pin to 2 GPUs so total batch stays 16 and the hard-coded LRs above match.
+  # Lightning would otherwise grab every visible GPU and change the batch size.
+  devices: 2
+  max_epochs: 10

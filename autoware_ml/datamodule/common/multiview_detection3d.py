@@ -34,6 +34,7 @@ from autoware_ml.datamodule.common.detection3d import (
     build_label_to_category,
     load_detection_data_infos,
 )
+from autoware_ml.datamodule.common.serialization import SerializedSampleList
 from autoware_ml.datamodule.samplers import GroupStreamingSampler
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ class MultiviewDetection3DDataModule(DataModule):
         return build_streaming_dataloader(
             getattr(self, f"{split}_dataset"),
             getattr(self, f"{split}_dataloader_cfg"),
-            self.collate_fn,
+            self._collate_fn_for(split),
             shuffle_scenes=split == "train",
         )
 
@@ -217,11 +218,14 @@ class MultiviewDetection3DDataset(Dataset):
         self.require_image_files = require_image_files
         with open(ann_file, "rb") as file:
             data = pickle.load(file)
-        self.data_infos = load_detection_data_infos(data)
+        data_infos = load_detection_data_infos(data)
         if filter_frames_with_camera_order:
-            self.data_infos = self._filter_frames_with_camera_order(self.data_infos)
-        self.prev_exists = self._build_prev_exists(self.data_infos)
+            data_infos = self._filter_frames_with_camera_order(data_infos)
+        self.prev_exists = self._build_prev_exists(data_infos)
         self.label_to_category = build_label_to_category(data.get("metainfo", {}))
+        # Serialize last: the full passes above must run on the live list.
+        self._scene_index_groups = self._build_scene_index_groups(data_infos)
+        self.data_infos = SerializedSampleList(data_infos)
 
     @staticmethod
     def _build_prev_exists(data_infos: list[dict[str, Any]]) -> np.ndarray:
@@ -278,16 +282,22 @@ class MultiviewDetection3DDataset(Dataset):
         """
         return len(self.data_infos)
 
+    @staticmethod
+    def _build_scene_index_groups(data_infos: list[dict[str, Any]]) -> list[list[int]]:
+        """Group dataset indices by scene, preserving frame order."""
+        groups: dict[str, list[int]] = {}
+        for index, sample in enumerate(data_infos):
+            groups.setdefault(sample["scene_token"], []).append(index)
+        return list(groups.values())
+
     def scene_index_groups(self) -> list[list[int]]:
         """Group dataset indices by scene, preserving frame order.
 
         Returns:
-            One list of scene-contiguous dataset indices per scene.
+            One list of scene-contiguous dataset indices per scene. A fresh
+            copy is returned so callers may mutate it freely.
         """
-        groups: dict[str, list[int]] = {}
-        for index, sample in enumerate(self.data_infos):
-            groups.setdefault(sample["scene_token"], []).append(index)
-        return list(groups.values())
+        return [list(group) for group in self._scene_index_groups]
 
     def _resolve_path(self, relative_path: str) -> str:
         """Resolve a path relative to the dataset root.
@@ -402,6 +412,11 @@ class MultiviewDetection3DDataset(Dataset):
             "sweeps": self._resolve_sweeps(sample),
             "scene_token": sample["scene_token"],
             "prev_exists": self.prev_exists[index],
+            # Per-frame annotation-completeness flag: False means the frame's
+            # scene was not annotated for traffic_cone/barrier, so background
+            # predictions of those classes must not be punished
+            # (partial-ignore). Frames without the field count as annotated.
+            "traffic_cone_barrier_status": bool(sample.get("traffic_cone_barrier_status", True)),
         }
         ego_pose = _build_ego_pose(sample)
         if ego_pose is not None:

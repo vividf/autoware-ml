@@ -199,7 +199,8 @@ def transform_boxes(
     if boxes.shape[1] > 6:
         boxes[:, 6] += rotation_angle
     if boxes.shape[1] >= 9:
-        boxes[:, 7:9] = boxes[:, 7:9] @ rotation[:2, :2].T
+        # Velocities live in the same scaled world as the centers: v' = s * R @ v.
+        boxes[:, 7:9] = (boxes[:, 7:9] @ rotation[:2, :2].T) * scale
     input_dict["gt_boxes"] = boxes
 
 
@@ -223,6 +224,33 @@ def flip_boxes(input_dict: dict[str, Any], axis: int) -> None:
         if boxes.shape[1] >= 9:
             boxes[:, 7] *= -1.0
     input_dict["gt_boxes"] = boxes
+
+
+def update_ego_poses(
+    input_dict: dict[str, Any],
+    aug: npt.NDArray[np.float32],
+    aug_inv: npt.NDArray[np.float32],
+) -> None:
+    """Fold a lidar-frame augmentation into ``ego_pose`` / ``ego_pose_inv``.
+
+    Streaming temporal models (StreamPETR) warp the previous frame's memory
+    with ``ego_pose_inv(t) @ ego_pose(t-1)``, so after augmenting frame ``t``
+    the pose pair must map between the *augmented* lidar frame and the global
+    frame — otherwise the memory is misaligned by the sampled augmentation:
+
+    ``ego_pose ← ego_pose @ aug_inv``, ``ego_pose_inv ← aug @ ego_pose_inv``.
+
+    No-op for samples without ego poses (single-frame models).
+    """
+    if "ego_pose" not in input_dict:
+        return
+    ego_pose = np.asarray(input_dict["ego_pose"])
+    input_dict["ego_pose"] = (ego_pose @ aug_inv.astype(ego_pose.dtype)).astype(ego_pose.dtype)
+    if "ego_pose_inv" in input_dict:
+        ego_pose_inv = np.asarray(input_dict["ego_pose_inv"])
+        input_dict["ego_pose_inv"] = (aug.astype(ego_pose_inv.dtype) @ ego_pose_inv).astype(
+            ego_pose_inv.dtype
+        )
 
 
 def update_camera_matrices(input_dict: dict[str, Any], aug_inv: npt.NDArray[np.float32]) -> None:

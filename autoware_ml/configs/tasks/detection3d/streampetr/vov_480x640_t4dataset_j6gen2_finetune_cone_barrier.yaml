@@ -1,0 +1,33 @@
+# @package _global_
+# Fine-tune of StreamPETR on j6gen2 with traffic_cone/barrier partial-ignore,
+# mirroring the AWML config
+# t4_base_vov_flash_480x640_bev_2_7_traffic_barrier_j6gen2_partialignore.py:
+# 40 epochs, batch size 1 on a single GPU, base LR 5.0e-5 auto-scaled by
+# total_batch/8 -> 6.25e-6. Everything else (pc_range, augmentation, 2D aux
+# head, partial-ignore, scheduler, callbacks) is inherited from the j6gen2
+# default.
+#
+# Start from a converted AWML checkpoint via
+#   --weights <streampetr_2_7_epoch_20_converted.pth>
+# (see autoware_ml/tools/convert_streampetr_checkpoint.py) and point the
+# annotation files at the machine's original infos:
+#   datamodule.train_ann_file=info2/t4dataset_j6gen2_base_infos_train.pkl ...
+defaults:
+  - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2
+  - _self_
+
+batch_size: 1
+num_workers: 16
+
+model:
+  optimizer:
+    # 5.0e-5 auto-scaled by total_batch/8 with batch_size=1 on one GPU;
+    # rescale by total_batch/8 for other setups.
+    lr: 6.25e-6
+  optimizer_group_overrides:
+    img_backbone:
+      lr: 6.25e-7    # lr_mult 0.1
+
+trainer:
+  devices: 1
+  max_epochs: 40
