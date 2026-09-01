@@ -71,6 +71,10 @@ deploy:
   # the release/ab experiment variants enable them explicitly.
   tensorrt:
     enabled: false
+    # The sparse graph's autoware::ImplicitGemm / GetIndicePairsImplicitGemm nodes are
+    # plugin operators; TensorRT must load their library before parsing the ONNX. The
+    # image builds it (docker/tensorrt_plugins).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   verification:
     # Raw positional comparison is meaningless for BEVFusion's packed outputs: the
     # dense graph selects top-500 proposals, and the zero-padded heatmap borders

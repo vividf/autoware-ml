@@ -57,7 +57,9 @@ def test_declaration_is_valid_with_the_awml_split_abi() -> None:
     assert sparse.inputs == ("voxels", "coors", "num_points_per_voxel")
     assert sparse.outputs == (LIDAR_BEV,) and dense.inputs == (LIDAR_BEV,)
     assert dense.outputs == ("bbox_pred", "score", "label_pred")
-    assert sparse.torch_fallback_backends == (Backend.ONNX, Backend.TENSORRT)
+    # TensorRT executes the sparse graph's plugin ops (deploy.tensorrt.plugin_libraries);
+    # ONNX Runtime has no implementation for them, so only that backend falls back.
+    assert sparse.torch_fallback_backends == (Backend.ONNX,)
     # Both graphs are exported by the framework; the sparse one needs the runtime's
     # spconv plugin to execute, not a separate exporter.
     assert sparse.external_onnx is False and dense.external_onnx is False

@@ -32,6 +32,23 @@ trainer:
 
 deploy:
   stages:
+    bevfusion_sparse:
+      tensorrt:
+        input_shapes:
+          # Voxel count varies per frame; the max matches the evaluation pillar budget
+          # (eval_max_voxels), which is the largest the runtime can hand the engine.
+          voxels:
+            min_shape: [1000, 32, 5]
+            opt_shape: [80000, 32, 5]
+            max_shape: [160000, 32, 5]
+          coors:
+            min_shape: [1000, 3]
+            opt_shape: [80000, 3]
+            max_shape: [160000, 3]
+          num_points_per_voxel:
+            min_shape: [1000]
+            opt_shape: [80000]
+            max_shape: [160000]
     bevfusion_dense:
       tensorrt:
         input_shapes:

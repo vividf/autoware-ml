@@ -26,11 +26,10 @@ Runtime ABI carried over from the AWML split artifacts:
   which swaps the native spconv layers for the wrappers in
   :mod:`autoware_ml.ops.spconv`; their symbolics emit the runtime's libspconv
   ABI (``autoware::GetIndicePairsImplicitGemm`` / ``autoware::ImplicitGemm`` with
-  the rulebook tensors as graph inputs). Executing that graph needs
-  ``libautoware_tensorrt_plugins.so``: ONNX Runtime has no implementation at all,
-  and TensorRT only with the plugin loaded, so both backends fall back to PyTorch
-  for this stage today (see ``torch_fallback_backends``) and the tensorrt backend
-  effectively measures torch-sparse + TRT-dense.
+  the rulebook tensors as graph inputs). TensorRT executes those nodes through
+  ``libautoware_tensorrt_plugins.so``, which the image builds and every deploy
+  config lists in ``deploy.tensorrt.plugin_libraries``; ONNX Runtime has no
+  implementation for them, so only that backend falls back to PyTorch here.
 - ``bevfusion_dense``: ``lidar_bev`` in; ``bbox_pred`` / ``score`` / ``label_pred``
   out — the AWML dense graph DECODES in-graph (unlike CenterPoint's raw-map ABI),
   so the wrapper ends at the head's export decode.
@@ -190,11 +189,10 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             inputs=(VOXELS, COORS, NUM_POINTS_PER_VOXEL),
             outputs=(LIDAR_BEV,),
             # The exported graph carries autoware::GetIndicePairsImplicitGemm /
-            # autoware::ImplicitGemm custom ops. ONNX Runtime has no implementation for
-            # them at all; TensorRT needs libautoware_tensorrt_plugins.so, so it also
-            # falls back until that plugin ships in the image (pass it through
-            # deploy.tensorrt.plugin_libraries and drop tensorrt from this tuple).
-            torch_fallback_backends=(Backend.ONNX, Backend.TENSORRT),
+            # autoware::ImplicitGemm custom ops. TensorRT executes them through
+            # libautoware_tensorrt_plugins.so (deploy.tensorrt.plugin_libraries); ONNX
+            # Runtime has no implementation at all, so only that backend falls back.
+            torch_fallback_backends=(Backend.ONNX,),
         ),
         GraphStage(
             DENSE_STAGE,
