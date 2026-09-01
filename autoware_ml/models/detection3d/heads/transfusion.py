@@ -762,14 +762,44 @@ class TransFusionHead(nn.Module):
         if batch_vel is not None:
             batch_vel = batch_vel[..., -self.num_proposals :]
 
+        return self.decode_detections(
+            batch_score, batch_rot, batch_dim, batch_center, batch_height, batch_vel
+        )
+
+    def decode_detections(
+        self,
+        score: torch.Tensor,
+        rot: torch.Tensor,
+        dim: torch.Tensor,
+        center: torch.Tensor,
+        height: torch.Tensor,
+        vel: torch.Tensor | None,
+    ) -> list[dict[str, torch.Tensor]]:
+        """Turn per-proposal predictions into final detections.
+
+        The post-processing every consumer must agree on: metric-space decoding with the
+        configured bbox coder (which also applies the per-class score thresholds and the
+        post-center range filter), then NMS. Split out of :meth:`predict` because a
+        deployment whose graph performs the proposal selection itself arrives with the
+        same per-proposal tensors and must run exactly this tail — sharing it is what
+        keeps the deployed behavior tied to the model's.
+
+        Args:
+            score: Per-class proposal scores, shape ``(B, num_classes, P)``.
+            rot: Rotation channels, shape ``(B, 2, P)``.
+            dim: Dimension channels, shape ``(B, 3, P)``.
+            center: BEV center channels, shape ``(B, 2, P)``.
+            height: Height channel, shape ``(B, 1, P)``.
+            vel: Velocity channels, shape ``(B, 2, P)``, or ``None``.
+
+        Returns:
+            One ``{bboxes_3d, scores_3d, labels_3d}`` dict per batch element.
+
+        Raises:
+            RuntimeError: If the configured NMS type has no runtime implementation.
+        """
         decoded = self.bbox_coder.decode(
-            batch_score,
-            batch_rot,
-            batch_dim,
-            batch_center,
-            batch_height,
-            batch_vel,
-            filter_predictions=True,
+            score, rot, dim, center, height, vel, filter_predictions=True
         )
 
         results = []

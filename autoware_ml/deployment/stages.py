@@ -100,16 +100,12 @@ class GraphStage:
         inputs: Context names fed to the module — these ARE the ONNX input names.
         outputs: Names the module's outputs are written under — the ONNX output names,
             in the module's return order (a single tensor return maps to one name).
-        output_fields: Only on the final stage: ``(output_name, field_name)`` pairs
-            mapping ONNX outputs to the fields of the model's typed outputs, consumed by
-            the model's ``assemble_outputs``. Empty on intermediate stages.
+        output_fields: Only on the final stage: ``(output_name, key)`` pairs naming what
+            the model's ``assemble_predictions`` receives each ONNX output under. Empty on
+            intermediate stages.
         torch_fallback_backends: Backends on which this stage runs its PyTorch module
             instead of an artifact (and needs no artifact for availability) — for graphs
             a backend cannot execute, e.g. a spconv graph on ONNX Runtime.
-        external_onnx: The ``.onnx`` comes from an external exporter, not
-            ``torch.onnx.export`` (e.g. the libspconv INT8 format); the export stage
-            skips this graph and expects the file to be placed in the artifact
-            directory before a TensorRT build.
         onnx_transforms: Rewrites applied to this stage's exported ``.onnx``, in order,
             each taking and returning the file path. For fusions intrinsic to the
             deployed form of this graph — folding a bias and an activation into a
@@ -123,7 +119,6 @@ class GraphStage:
     outputs: tuple[str, ...]
     output_fields: tuple[tuple[str, str], ...] = ()
     torch_fallback_backends: tuple[Backend, ...] = ()
-    external_onnx: bool = False
     onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     @property
@@ -164,7 +159,7 @@ def validate_stages(stages: Sequence[Stage]) -> tuple[Stage, ...]:
     if not graph[-1].output_fields:
         raise ValueError(
             f"The final GraphStage {graph[-1].name!r} must declare output_fields so the "
-            "pipeline can rebuild the model's typed outputs."
+            "pipeline can hand its outputs to the model's assemble_predictions."
         )
     for stage in graph[:-1]:
         if stage.output_fields:

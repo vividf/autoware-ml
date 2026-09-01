@@ -389,10 +389,12 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
     def assemble_outputs(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskOutputs:
         """Wrap the final stage's named output tensors into the model's typed outputs.
 
-        Deployment runs the stage graph on a backend and gets back the final
-        ``GraphStage``'s tensors keyed by dataclass *field* name (the stage declares the
-        ONNX-name -> field mapping). This hook rebuilds the :class:`MultiTaskOutputs`
-        that :meth:`decode_outputs` / :meth:`build_eval_output` consume.
+        For a deployed graph that emits the head's raw output maps: the backend returns
+        the final ``GraphStage``'s tensors keyed by dataclass *field* name (the stage
+        declares the ONNX-name -> field mapping), and this hook rebuilds the
+        :class:`MultiTaskOutputs` the model's own decode consumes. A graph that performs
+        the decoding itself never produces head outputs — such a model overrides
+        :meth:`assemble_predictions` instead and leaves this hook alone.
 
         Args:
             outputs: Field name -> tensor, as declared by the final stage.
@@ -400,3 +402,45 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
         raise NotImplementedError(
             f"{type(self).__name__} does not support deployment: assemble_outputs() is not implemented."
         )
+
+    def assemble_predictions(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskPredictions:
+        """Turn a deployed graph's raw output tensors into task-level predictions.
+
+        The one hook deployment needs, because predictions are what evaluation consumes.
+        The default covers graphs that emit the head's raw maps by composing the model's
+        own two steps, so those models implement nothing extra. A graph whose runtime ABI
+        decodes in-graph overrides this and skips :meth:`assemble_outputs` entirely —
+        there is no intermediate head output to fabricate.
+
+        Args:
+            outputs: Field name -> tensor, as declared by the final stage.
+
+        Returns:
+            Task-level predictions, as :meth:`decode_outputs` would produce.
+        """
+        return self.decode_outputs(self.assemble_outputs(outputs))
+
+    def build_eval_output_from_predictions(
+        self, batch: MultiTaskBatchInputs, predictions: MultiTaskPredictions
+    ) -> dict[str, Any]:
+        """Pair decoded predictions with ground truth for the metric suites.
+
+        Both evaluation paths converge here: training and validation reach it through
+        :meth:`build_eval_output` after decoding the model's outputs, and deployment
+        reaches it directly with the predictions a backend produced. Keeping the pairing
+        in one place is what lets the two paths be scored identically.
+
+        Args:
+            batch: The preprocessed batch holding the ground truth.
+            predictions: Decoded predictions from either path.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not report metrics: "
+            "build_eval_output_from_predictions() is not implemented."
+        )
+
+    def build_eval_output(  # type: ignore[override]
+        self, batch: MultiTaskBatchInputs, outputs: MultiTaskOutputs
+    ) -> dict[str, Any]:
+        """Decode model outputs and pair them with ground truth (training / validation)."""
+        return self.build_eval_output_from_predictions(batch, self.decode_outputs(outputs))

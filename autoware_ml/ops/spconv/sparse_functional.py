@@ -12,7 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Autograd bridges and ONNX symbolics for deployment-aware sparse ops."""
+"""Autograd bridges and ONNX symbolics for deployment-aware sparse ops.
+
+Export-only: the eager path mirrors spconv's implicit-GEMM execution so a traced
+graph matches what the engine will do, and anything outside that subset raises rather
+than silently diverging (see :func:`_validate_implicit_gemm_export_arguments`).
+
+These bridges subclass spconv internals (``SpconvOps``, ``ConvGemmOps``,
+``AllocKeys``, ``TorchAllocator``) and emit the operator set the runtime plugin
+consumes, so they are pinned to two external contracts:
+
+- **spconv 2.3.6** (``spconv-cu120`` in ``pyproject.toml``). A version bump can move or
+  rename any internal used here; treat it as a review item, not a routine upgrade.
+- **the plugin's attribute set** (autoware_universe
+  ``perception/autoware_tensorrt_plugins``), pinned by
+  ``tests/deployment/test_sparse_graph_contract.py``.
+"""
 
 from collections.abc import Sequence
 from typing import Any

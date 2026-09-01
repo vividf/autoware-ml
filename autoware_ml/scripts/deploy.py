@@ -381,7 +381,7 @@ def _run_deployment(
 
     available = available_backends(stages, output_dir)
     logger.info("Available backends: %s", sorted(b.value for b in available))
-    pipelines = PipelineCache(stages, output_dir, assemble=model.assemble_outputs)
+    pipelines = PipelineCache(stages, output_dir, assemble=model.assemble_predictions)
 
     verify(deploy_cfg, pipelines, datamodule, model, device, available)
 

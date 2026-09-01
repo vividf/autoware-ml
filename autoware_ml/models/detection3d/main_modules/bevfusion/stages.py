@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BEVFusion (lidar-only) deployment stage graph — declared ahead of the migration.
+"""BEVFusion (lidar-only) deployment stage graph.
 
 Split form (the INT8 deployment line, mirroring AWML's
 ``bevfusion_split_int8_deployment`` artifacts):
@@ -41,11 +41,9 @@ Contract with the interface migration:
 - **Batch inputs**: ``MultiTaskBatchInputs.voxels_data`` provides voxel features,
   coordinates and per-voxel point counts (the ``_first_sample_voxel_inputs``
   tensors of the legacy export).
-- **Backend evaluation decode**: ``assemble_bevfusion_outputs`` must rebuild
-  per-sample predictions from the packed runtime outputs (the runtime-side decode
-  of ``bbox_pred``'s raw channels) — lands with the evaluate milestone; until then
-  verification (raw-output comparison) and trainer.test (pytorch forward) cover
-  correctness.
+- **Backend evaluation decode**: because the graph decodes in-graph, a backend returns
+  detections rather than head outputs, so the model implements ``assemble_predictions``
+  (not ``assemble_outputs``) and reaches it through :func:`decode_packed_detections`.
 
 .. todo:: TODO(vividf): INT8 for the sparse stage needs the quantized libspconv ABI
    (``ImplicitGemmInt8`` with per-layer ``*_channel_scale`` / ``*_bias_scaled``
@@ -80,7 +78,8 @@ BBOX_PRED = "bbox_pred"
 SCORE = "score"
 LABEL_PRED = "label_pred"
 
-# ONNX output name -> typed-outputs field (draft until the outputs dataclass lands).
+# ONNX output name -> the key ``decode_packed_detections`` reads it under. This graph
+# emits detections, not head outputs, so the names simply carry through.
 OUTPUT_FIELDS: tuple[tuple[str, str], ...] = (
     (BBOX_PRED, "bbox_pred"),
     (SCORE, "score"),
@@ -210,60 +209,35 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
 
 
 def decode_packed_detections(
-    bbox_head: Any, packed: Any
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Decode packed runtime detections into (boxes, scores, labels).
+    bbox_head: Any, outputs: Mapping[str, torch.Tensor]
+) -> list[dict[str, torch.Tensor]]:
+    """Turn the deployed graph's packed tensors into the head's detection dicts.
 
-    Mirrors the second half of ``TransFusionHead.predict``: the packed tensors
-    already carry the fused per-proposal score and winning label, so the class
-    scores are re-scattered for the bbox coder and the same score/range filter
-    and circle NMS apply.
+    Only the unpacking is deployment-specific. The graph already fused the per-proposal
+    score and picked the winning label, so the class scores are re-scattered into the
+    per-class layout the head's post-processing expects, and that post-processing —
+    metric-space decoding, score and range filtering, NMS — is the head's own
+    :meth:`TransFusionHead.decode_detections`, not a copy of it.
+
+    Args:
+        bbox_head: The model's detection head, providing the post-processing.
+        outputs: Field name -> tensor for the final stage (``bbox_pred`` / ``score`` /
+            ``label_pred``), single sample.
+
+    Returns:
+        One ``{bboxes_3d, scores_3d, labels_3d}`` dict, matching the head's own return.
     """
-    bbox_pred = packed.bbox_pred
-    scores = packed.score
-    labels = packed.label_pred.long()
+    bbox_pred = outputs[BBOX_PRED]
+    scores = outputs[SCORE]
+    labels = outputs[LABEL_PRED].long()
     num_proposals = scores.shape[0]
-    heatmap = bbox_pred.new_zeros((1, bbox_head.num_classes, num_proposals))
-    heatmap[0, labels, torch.arange(num_proposals, device=bbox_pred.device)] = scores
-    decoded = bbox_head.bbox_coder.decode(
-        heatmap,
+    score_matrix = bbox_pred.new_zeros((1, bbox_head.num_classes, num_proposals))
+    score_matrix[0, labels, torch.arange(num_proposals, device=bbox_pred.device)] = scores
+    return bbox_head.decode_detections(
+        score_matrix,
         bbox_pred[6:8].unsqueeze(0),
         bbox_pred[3:6].unsqueeze(0),
         bbox_pred[0:2].unsqueeze(0),
         bbox_pred[2:3].unsqueeze(0),
         bbox_pred[8:10].unsqueeze(0),
-        filter_predictions=True,
-    )[0]
-    boxes = decoded["bboxes"]
-    kept_scores = decoded["scores"]
-    kept_labels = decoded["labels"]
-    if boxes.numel() and bbox_head.nms_type == "circle":
-        kept = bbox_head._apply_circle_nms(boxes, kept_scores, kept_labels)
-        boxes, kept_scores, kept_labels = boxes[kept], kept_scores[kept], kept_labels[kept]
-    return boxes, kept_scores, kept_labels
-
-
-def assemble_bevfusion_outputs(outputs: Mapping[str, torch.Tensor]) -> Any:
-    """Wrap the packed runtime tensors into typed outputs for backend evaluation.
-
-    The packed tensors are the runtime ABI, not the head's dict — decoding them
-    (bbox coder + NMS, mirroring the runtime) happens in
-    :meth:`BEVFusionLidarDetectionModel.decode_outputs`.
-    """
-    from autoware_ml.dataclasses.detection3d.head_outputs import (
-        Detection3DHeadOutputs,
-        TransFusionPackedDetections,
-    )
-    from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
-
-    return MultiTaskOutputs(
-        detection3d_head_outputs=Detection3DHeadOutputs(
-            center_head_outputs=None,
-            transfusion_head_outputs=None,
-            transfusion_packed_detections=TransFusionPackedDetections(
-                bbox_pred=outputs["bbox_pred"],
-                score=outputs["score"],
-                label_pred=outputs["label_pred"],
-            ),
-        )
     )

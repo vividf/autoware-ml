@@ -42,7 +42,6 @@ from torch.optim.lr_scheduler import LRScheduler
 from autoware_ml.dataclasses.detection3d.head_outputs import (
     Detection3DHeadOutputs,
     TransFusionHeadOutputs,
-    TransFusionPackedDetections,
 )
 from autoware_ml.dataclasses.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
@@ -56,7 +55,6 @@ from autoware_ml.models.detection3d.main_modules.bevfusion.quantization import (
     build_bevfusion_quantization_plan,
 )
 from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
-    assemble_bevfusion_outputs,
     build_bevfusion_lidar_stages,
     decode_packed_detections,
 )
@@ -81,6 +79,20 @@ _HEAD_DICT_KEYS = (
 def head_dict_to_outputs(outputs: Mapping[str, torch.Tensor]) -> TransFusionHeadOutputs:
     """Wrap the TransFusion head's output dict into the typed container."""
     return TransFusionHeadOutputs(**{key: outputs.get(key) for key in _HEAD_DICT_KEYS})
+
+
+def _as_predictions(samples: Sequence[Mapping[str, torch.Tensor]]) -> MultiTaskPredictions:
+    """Wrap the head's per-sample detection dicts into the typed predictions container."""
+    return MultiTaskPredictions(
+        detection3d_predictions=[
+            Detection3DSamplePredictions(
+                bboxes_3d=sample["bboxes_3d"],
+                scores_3d=sample["scores_3d"],
+                labels_3d=sample["labels_3d"],
+            )
+            for sample in samples
+        ]
+    )
 
 
 def outputs_to_head_dict(outputs: TransFusionHeadOutputs) -> dict[str, torch.Tensor]:
@@ -191,45 +203,15 @@ class BEVFusionLidarDetectionModel(MultiTaskBaseModel):
 
     def decode_outputs(self, outputs: MultiTaskOutputs) -> MultiTaskPredictions:
         """Decode predictions through the head's dict API into the typed container."""
-        detection_outputs = outputs.detection3d_head_outputs
-        if (
-            detection_outputs is not None
-            and detection_outputs.transfusion_packed_detections is not None
-        ):
-            return self._decode_packed_detections(detection_outputs.transfusion_packed_detections)
         head_outputs = self._transfusion_outputs(outputs)
-        sample_predictions = self.bbox_head.predict(outputs_to_head_dict(head_outputs))
-        return MultiTaskPredictions(
-            detection3d_predictions=[
-                Detection3DSamplePredictions(
-                    bboxes_3d=sample["bboxes_3d"],
-                    scores_3d=sample["scores_3d"],
-                    labels_3d=sample["labels_3d"],
-                )
-                for sample in sample_predictions
-            ]
-        )
+        return _as_predictions(self.bbox_head.predict(outputs_to_head_dict(head_outputs)))
 
-    # TODO(KokSeang): same temporary signature deviation as CenterPoint — unify once the
-    # detection metric accepts MultiTaskPredictions directly.
-    def build_eval_output(  # type: ignore[override]
-        self, batch: MultiTaskBatchInputs, outputs: MultiTaskOutputs
+    def build_eval_output_from_predictions(
+        self, batch: MultiTaskBatchInputs, predictions: MultiTaskPredictions
     ) -> dict[str, Any]:
-        """Decode detections and pair them with ground truth for metrics."""
+        """Pair decoded detections with ground truth for the metric suites."""
         return multi_task_eval_output(
-            multi_task_predictions=self.decode_outputs(outputs),
-            multi_task_batch_inputs=batch,
-        )
-
-    def _decode_packed_detections(
-        self, packed: TransFusionPackedDetections
-    ) -> MultiTaskPredictions:
-        """Decode the deployed graph's packed detections the way the runtime does."""
-        boxes, scores, labels = decode_packed_detections(self.bbox_head, packed)
-        return MultiTaskPredictions(
-            detection3d_predictions=[
-                Detection3DSamplePredictions(bboxes_3d=boxes, scores_3d=scores, labels_3d=labels)
-            ]
+            multi_task_predictions=predictions, multi_task_batch_inputs=batch
         )
 
     @staticmethod
@@ -251,6 +233,13 @@ class BEVFusionLidarDetectionModel(MultiTaskBaseModel):
         """Declare the BEVFusion lidar split stage graph (see :mod:`.stages`)."""
         return build_bevfusion_lidar_stages(self)
 
-    def assemble_outputs(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskOutputs:
-        """Wrap the runtime-named output tensors into :class:`MultiTaskOutputs`."""
-        return assemble_bevfusion_outputs(outputs)
+    def assemble_predictions(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskPredictions:
+        """Decode the deployed graph's packed tensors the way the runtime does.
+
+        The dense graph performs the proposal selection itself, so a backend returns
+        detections rather than head outputs — there is no :meth:`assemble_outputs` step
+        for this model. The unpacking is BEVFusion's runtime ABI; the post-processing
+        that follows is the head's own :meth:`decode_detections`, so the deployed
+        behaviour cannot drift from the model's.
+        """
+        return _as_predictions(decode_packed_detections(self.bbox_head, outputs))

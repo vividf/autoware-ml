@@ -134,7 +134,7 @@ class TestStagedPipeline:
     def test_assemble_without_hook_raises(self):
         pipeline = StagedPipeline(_toy_stages(), backend="pytorch", device=torch.device("cpu"))
         result = pipeline.infer(SimpleNamespace(x=torch.tensor([1.0])))
-        with pytest.raises(RuntimeError, match="assemble_outputs"):
+        with pytest.raises(RuntimeError, match="assemble_predictions"):
             pipeline.assemble(result)
 
     def test_non_pytorch_backend_requires_artifacts_dir(self):

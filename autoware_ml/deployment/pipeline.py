@@ -39,7 +39,7 @@ import torch
 from torch import nn
 
 from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
-from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
+from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
 from autoware_ml.deployment.stages import (
     GraphStage,
     Stage,
@@ -52,7 +52,7 @@ from autoware_ml.deployment.stages import (
 )
 from autoware_ml.types.backend import Backend
 
-AssembleFn = Callable[[Mapping[str, torch.Tensor]], MultiTaskOutputs]
+AssembleFn = Callable[[Mapping[str, torch.Tensor]], MultiTaskPredictions]
 
 
 @dataclass
@@ -148,7 +148,7 @@ class StagedPipeline:
         device: Device the exportable stages execute on; glue stages hand their results
             over on this device.
         artifacts_dir: Directory holding ``<stage>.onnx`` / ``.engine`` (non-pytorch backends).
-        assemble: The model's ``assemble_outputs`` hook, used by :meth:`assemble`.
+        assemble: The model's ``assemble_predictions`` hook, used by :meth:`assemble`.
     """
 
     def __init__(
@@ -214,16 +214,16 @@ class StagedPipeline:
 
     def assemble(
         self, result: PipelineResult, device: torch.device | None = None
-    ) -> MultiTaskOutputs:
-        """Rebuild the model's typed outputs from a result (for decode / metrics).
+    ) -> MultiTaskPredictions:
+        """Turn a result into the model's predictions (what metrics consume).
 
         Args:
             result: Output of :meth:`infer`.
-            device: Optional device to move the outputs to first (e.g. the metrics device).
+            device: Optional device to move the tensors to first (e.g. the metrics device).
         """
         if self._assemble is None:
             raise RuntimeError(
-                "StagedPipeline was built without the model's assemble_outputs hook."
+                "StagedPipeline was built without the model's assemble_predictions hook."
             )
         fields: dict[str, torch.Tensor] = {}
         for onnx_name, field_name in self.final_stage.output_fields:

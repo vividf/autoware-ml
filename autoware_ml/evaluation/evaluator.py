@@ -17,7 +17,7 @@
 :func:`evaluate_backend` is the one loop. It is parameterized by a
 :class:`~autoware_ml.deployment.pipeline.StagedPipeline` (which already knows its
 backend), preprocesses through the model's ``preprocess_batch``, decodes through
-the model's ``build_eval_output``, and scores with a fresh clone of the model's own
+the model's ``build_eval_output_from_predictions``, and scores with a fresh clone of its own
 metric suites — so a full-split ``pytorch`` run reproduces ``trainer.test`` and a
 ``tensorrt`` run differs from it only by the backend.
 """
@@ -80,7 +80,8 @@ def evaluate_backend(
     """Score one backend against ground truth and collect its latency breakdown.
 
     Args:
-        model: Model exposing ``preprocess_batch``, ``build_eval_output``, ``clone_metrics``.
+        model: Model exposing ``preprocess_batch``, ``build_eval_output_from_predictions``,
+            ``clone_metrics``.
         dataloader: Batches of the split to evaluate (the predict dataloader).
         pipeline: Backend pipeline built from the model's stages (carries its backend).
         device: Preprocessing / ground-truth / metrics device.
@@ -120,8 +121,8 @@ def evaluate_backend(
         result = pipeline.infer(batch_inputs)
 
         start = time.perf_counter()
-        outputs = pipeline.assemble(result, device=device)
-        eval_out = model.build_eval_output(batch_inputs, outputs)
+        predictions = pipeline.assemble(result, device=device)
+        eval_out = model.build_eval_output_from_predictions(batch_inputs, predictions)
         if index == 0:
             check_required_keys(suites, eval_out, producer=type(model).__name__)
         for suite in suites:

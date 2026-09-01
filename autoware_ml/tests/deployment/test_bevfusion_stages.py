@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BEVFusion split stage graph: declaration validity, ABI names, fallback flags,
-and the per-stage fallback / external-onnx framework semantics."""
+"""BEVFusion split stage graph: declaration validity, ABI names, the per-stage
+fallback semantics, and the packed-output decode's agreement with the head."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import types
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -32,10 +33,10 @@ from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
     DENSE_STAGE,
     LIDAR_BEV,
     SPARSE_STAGE,
-    assemble_bevfusion_outputs,
     build_bevfusion_lidar_stages,
     decode_packed_detections,
 )
+from autoware_ml.models.detection3d.heads.transfusion import TransFusionHead
 from autoware_ml.models.detection3d.task_modules.bbox_coders import TransFusionBBoxCoder
 from autoware_ml.types.backend import Backend
 
@@ -60,9 +61,6 @@ def test_declaration_is_valid_with_the_awml_split_abi() -> None:
     # TensorRT executes the sparse graph's plugin ops (deploy.tensorrt.plugin_libraries);
     # ONNX Runtime has no implementation for them, so only that backend falls back.
     assert sparse.torch_fallback_backends == (Backend.ONNX,)
-    # Both graphs are exported by the framework; the sparse one needs the runtime's
-    # spconv plugin to execute, not a separate exporter.
-    assert sparse.external_onnx is False and dense.external_onnx is False
 
 
 def _fallback_test_stages() -> tuple:
@@ -77,7 +75,6 @@ def _fallback_test_stages() -> tuple:
         inputs=("x",),
         outputs=("mid",),
         torch_fallback_backends=(Backend.ONNX,),
-        external_onnx=True,
     )
     dense_like = GraphStage(
         "dense_like",
@@ -186,20 +183,8 @@ def test_export_skips_engines_for_tensorrt_fallback_stages(tmp_path, monkeypatch
     assert (tmp_path / "plugin_like.onnx").exists()
 
 
-def test_assemble_wraps_packed_runtime_tensors() -> None:
-    outputs = {
-        "bbox_pred": torch.zeros(10, 4),
-        "score": torch.zeros(4),
-        "label_pred": torch.zeros(4),
-    }
-    assembled = assemble_bevfusion_outputs(outputs)
-    packed = assembled.detection3d_head_outputs.transfusion_packed_detections
-    assert packed is not None and packed.bbox_pred.shape == (10, 4)
-    assert assembled.detection3d_head_outputs.transfusion_head_outputs is None
-
-
-def test_packed_decode_applies_coder_math_and_score_filter() -> None:
-    coder = TransFusionBBoxCoder(
+def _coder() -> TransFusionBBoxCoder:
+    return TransFusionBBoxCoder(
         pc_range=[-10.0, -10.0],
         out_size_factor=2,
         voxel_size=[0.5, 0.5],
@@ -207,9 +192,11 @@ def test_packed_decode_applies_coder_math_and_score_filter() -> None:
         score_threshold=0.1,
         code_size=10,
     )
-    head = SimpleNamespace(num_classes=3, bbox_coder=coder, nms_type=None)
-    # Two proposals: the second falls below the score threshold.
-    bbox_pred = torch.tensor(
+
+
+def _packed_channels() -> torch.Tensor:
+    """Two proposals in the runtime's packed channel layout; the second scores low."""
+    return torch.tensor(
         [
             [4.0, 8.0],  # center x (grid)
             [6.0, 2.0],  # center y (grid)
@@ -223,17 +210,67 @@ def test_packed_decode_applies_coder_math_and_score_filter() -> None:
             [0.25, 0.0],  # vel y
         ]
     )
-    packed = SimpleNamespace(
-        bbox_pred=bbox_pred,
-        score=torch.tensor([0.9, 0.05]),
-        label_pred=torch.tensor([1.0, 2.0]),
+
+
+def test_packed_decode_applies_coder_math_and_score_filter() -> None:
+    head = SimpleNamespace(
+        num_classes=3,
+        bbox_coder=_coder(),
+        nms_type=None,
     )
-    boxes, scores, labels = decode_packed_detections(head, packed)
-    assert scores.tolist() == [torch.tensor(0.9).item()]
-    assert labels.tolist() == [1]
-    box = boxes[0]
+    # Borrow the head's real post-processing rather than restating it here.
+    head.decode_detections = types.MethodType(TransFusionHead.decode_detections, head)
+    outputs = {
+        "bbox_pred": _packed_channels(),
+        "score": torch.tensor([0.9, 0.05]),
+        "label_pred": torch.tensor([1.0, 2.0]),
+    }
+
+    detections = decode_packed_detections(head, outputs)
+
+    assert len(detections) == 1
+    sample = detections[0]
+    assert sample["scores_3d"].tolist() == [torch.tensor(0.9).item()]
+    assert sample["labels_3d"].tolist() == [1]
+    box = sample["bboxes_3d"][0]
     assert box[0].item() == 4.0 * 2 * 0.5 - 10.0  # metric x
     assert box[1].item() == 6.0 * 2 * 0.5 - 10.0  # metric y
     assert abs(box[2].item() - 0.5) < 1e-6  # height - h/2 (dim exp(0)=1)
     assert abs(box[6].item() - torch.atan2(torch.tensor(1.0), torch.tensor(0.0)).item()) < 1e-6
     assert abs(box[7].item() - 0.5) < 1e-6 and abs(box[8].item() - 0.25) < 1e-6
+
+
+def test_packed_decode_matches_the_head_on_the_same_proposals() -> None:
+    """The deployed path and the PyTorch path must produce the same detections.
+
+    The graph fuses the per-proposal score and picks the winning label before the
+    framework sees it, so the two paths start from different tensors and can only be
+    compared by construction: feed the head raw maps whose fusion yields exactly the
+    packed score/label the graph would have emitted.
+    """
+    head = SimpleNamespace(num_classes=3, bbox_coder=_coder(), nms_type=None)
+    head.decode_detections = types.MethodType(TransFusionHead.decode_detections, head)
+    channels = _packed_channels()
+    scores = torch.tensor([0.9, 0.4])
+    labels = torch.tensor([1, 2])
+
+    # PyTorch path: a per-class score matrix carrying the same winning scores.
+    score_matrix = torch.zeros((1, 3, 2))
+    score_matrix[0, labels, torch.arange(2)] = scores
+    from_head = head.decode_detections(
+        score_matrix,
+        channels[6:8].unsqueeze(0),
+        channels[3:6].unsqueeze(0),
+        channels[0:2].unsqueeze(0),
+        channels[2:3].unsqueeze(0),
+        channels[8:10].unsqueeze(0),
+    )[0]
+
+    # Deployed path: the packed tensors the graph emits.
+    from_packed = decode_packed_detections(
+        head,
+        {"bbox_pred": channels, "score": scores, "label_pred": labels.float()},
+    )[0]
+
+    for key in ("bboxes_3d", "scores_3d", "labels_3d"):
+        assert torch.equal(from_head[key], from_packed[key]), key

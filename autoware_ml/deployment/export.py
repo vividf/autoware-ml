@@ -114,14 +114,7 @@ def export_stages(
 
         stage_cfg = deploy_cfg.stage(stage.name)
 
-        if deploy_cfg.onnx.enabled and stage.external_onnx:
-            logger.info(
-                "Stage %r declares an externally produced ONNX — skipping torch export "
-                "(place %s before a TensorRT build).",
-                stage.name,
-                onnx_path,
-            )
-        elif deploy_cfg.onnx.enabled:
+        if deploy_cfg.onnx.enabled:
             logger.info("Exporting stage %r -> %s", stage.name, onnx_path)
             export_to_onnx(
                 _bn_folded_for_export(stage),

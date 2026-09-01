@@ -109,21 +109,12 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
         self.pts_neck = pts_neck
         self.bbox_head = bbox_head
 
-    # TODO(KokSeang): This signature is temporary different from the base class,
-    # and will be refactored to match the base class signature once the detection metric is refactored
-    # to accept MultiTaskPredictions and MultiTaskFeatures directly.
-    def build_eval_output(  # type: ignore[override]
-        self, batch: MultiTaskBatchInputs, outputs: MultiTaskOutputs
+    def build_eval_output_from_predictions(
+        self, batch: MultiTaskBatchInputs, predictions: MultiTaskPredictions
     ) -> dict[str, Any]:
-        """Decode detections and pair them with ground truth for metrics."""
-        if outputs.detection3d_head_outputs is None:
-            raise ValueError(
-                "MultiTaskOutputs must contain detection3d_head_outputs for CenterPoint build_eval_output pass."
-            )
-
+        """Pair decoded detections with ground truth for the metric suites."""
         return multi_task_eval_output(
-            multi_task_predictions=self.bbox_head.decode_outputs(outputs.detection3d_head_outputs),
-            multi_task_batch_inputs=batch,
+            multi_task_predictions=predictions, multi_task_batch_inputs=batch
         )
 
     def forward(self, multi_task_batch_inputs: MultiTaskBatchInputs) -> MultiTaskOutputs:
