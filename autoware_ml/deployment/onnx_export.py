@@ -327,6 +327,41 @@ def onnx_custom_op_domains(onnx_path: Path) -> tuple[str, ...]:
     return tuple(sorted(domains))
 
 
+def cast_graph_to_fp16(onnx_path: Path) -> None:
+    """Convert a whole graph to FP16 in place, keeping the I/O tensors FP32.
+
+    The FP16 path for graphs AutoCast cannot process: AutoCast types the graph with
+    TensorRT's parser and calibrates per node, which needs every operator implemented in
+    the exporting process, while a plugin graph's compute lives almost entirely in its
+    plugin nodes anyway — per-node selection has nothing meaningful to keep in FP32. So
+    such graphs get the blunt conversion: every float initializer and internal tensor
+    becomes FP16 (the plugins run FP16 when their tensors are — filters and bias follow
+    the feature dtype), engines still build strongly typed, and ``keep_io_types`` holds
+    the artifact ABI at FP32.
+    """
+    import onnx
+    from onnx import TensorProto
+    from onnxconverter_common import float16
+
+    model = onnx.load(str(onnx_path))
+    converted = float16.convert_float_to_float16(model, keep_io_types=True)
+
+    # The converter rewrites float tensors and initializers but leaves pre-existing
+    # int-to-FLOAT Cast nodes at FLOAT, which then meet FP16 tensors downstream
+    # ("DIV must have same input types"). After a whole-graph conversion the only
+    # legitimate FLOAT casts are the boundary ones feeding the kept-FP32 graph outputs.
+    graph_outputs = {output.name for output in converted.graph.output}
+    for node in converted.graph.node:
+        if node.op_type != "Cast" or node.output[0] in graph_outputs:
+            continue
+        for attribute in node.attribute:
+            if attribute.name == "to" and attribute.i == TensorProto.FLOAT:
+                attribute.i = TensorProto.FLOAT16
+
+    onnx.save(converted, str(onnx_path))
+    logger.info("Cast %s to FP16 (graph I/O kept FP32).", onnx_path.name)
+
+
 def autocast_to_fp16(onnx_path: Path, sample_inputs: Mapping[str, Any]) -> None:
     """Convert an exported FP32 ONNX graph to mixed FP16 in place (ModelOpt AutoCast).
 

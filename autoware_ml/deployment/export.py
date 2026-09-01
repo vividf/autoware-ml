@@ -38,6 +38,7 @@ from autoware_ml.deployment.onnx_export import (
     autocast_to_fp16,
     export_to_onnx,
     modify_onnx_graph,
+    cast_graph_to_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,
     should_modify_graph,
@@ -145,10 +146,11 @@ def export_stages(
                 elif custom_domains:
                     logger.info(
                         "Stage %r uses runtime plugin ops (%s) — AutoCast cannot type such a "
-                        "graph; exporting it as traced.",
+                        "graph, so it gets the whole-graph FP16 cast instead.",
                         stage.name,
                         ", ".join(custom_domains),
                     )
+                    cast_graph_to_fp16(onnx_path)
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})
             for transform in stage.onnx_transforms:

@@ -112,7 +112,6 @@ def test_onnx_has_qdq_detects_quantize_nodes(tmp_path) -> None:
     plain = graph([helper.make_node("Relu", ["x"], ["y"])], "plain")
     assert onnx_has_qdq(plain) is False
 
-    scale = onnx.helper.make_tensor("s", TensorProto.FLOAT, [], [1.0])
     qdq_nodes = [
         onnx.helper.make_node("QuantizeLinear", ["x", "s"], ["q"]),
         onnx.helper.make_node("DequantizeLinear", ["q", "s"], ["y"]),
@@ -145,3 +144,54 @@ def test_export_to_onnx_writes_named_graph(tmp_path) -> None:
     assert [i.name for i in model.graph.input] == ["input"]
     assert [o.name for o in model.graph.output] == ["output"]
     assert model.graph.input[0].type.tensor_type.shape.dim[0].dim_param == "batch"
+
+
+def test_cast_graph_to_fp16_converts_internals_and_keeps_io(tmp_path) -> None:
+    """Plugin graphs go FP16 wholesale: initializers and internal casts become FP16,
+    while the graph I/O (the artifact ABI) stays FP32."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    n = helper.make_tensor_value_info("n", TensorProto.INT32, [2])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    weight = helper.make_tensor("w", TensorProto.FLOAT, [4], np.ones(4, dtype=np.float32))
+    graph = helper.make_graph(
+        [
+            helper.make_node("PluginOp", ["x", "w"], ["mid"], domain="autoware"),
+            # A pre-existing int->float cast: the converter leaves its target FLOAT,
+            # which would meet FP16 tensors downstream.
+            helper.make_node("Cast", ["n"], ["n_float"], to=TensorProto.FLOAT),
+            helper.make_node("Unsqueeze", ["n_float", "axes"], ["n_col"]),
+            helper.make_node("Div", ["mid", "n_col"], ["y"]),
+        ],
+        "plugin_graph",
+        [x, n],
+        [y],
+        [weight, helper.make_tensor("axes", TensorProto.INT64, [1], [1])],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+    )
+    path = tmp_path / "plugin_graph.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    weights = {i.name: i.data_type for i in converted.graph.initializer}
+    assert weights["w"] == TensorProto.FLOAT16
+    casts = {
+        node.output[0]: next(a.i for a in node.attribute if a.name == "to")
+        for node in converted.graph.node
+        if node.op_type == "Cast"
+    }
+    assert casts["n_float"] == TensorProto.FLOAT16
+    # Boundary casts keep the ABI: the output-feeding cast stays FLOAT.
+    assert TensorProto.FLOAT in casts.values()
+    assert converted.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+    assert converted.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
