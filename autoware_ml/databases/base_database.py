@@ -17,14 +17,17 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Sequence
 from types import MappingProxyType
 
 import polars as pl
 
 from autoware_ml.databases.box3d_pipelines.box3d_pipeline import Box3DPipeline
+from autoware_ml.databases.database_task_config import DatabaseTaskConfig
 from autoware_ml.databases.scenarios import Scenarios, ScenarioData
 from autoware_ml.databases.schemas.dataset_schemas import DatasetRecord, DatasetTableSchema
+from autoware_ml.types.tasks import TaskType
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +42,7 @@ class BaseDatabase:
         cache_path: str,
         cache_file_prefix_name: str,
         num_workers: int,
-        class_names: Sequence[str],
-        label_remapper: Mapping[str, str] | None,
-        ignore_label_index: int,
+        database_task_configs: MappingProxyType[TaskType | str, DatabaseTaskConfig],
         box3d_pipelines: Sequence[Box3DPipeline],
     ) -> None:
         """
@@ -53,9 +54,9 @@ class BaseDatabase:
           cache_path: Path to cache the database records.
           cache_file_prefix_name: Prefix name of the cache file, it will be <cache_file_prefix_name>_<database_hash>.parquet
           num_workers: Number of workers to use for processing the database.
-          class_names: List of class names in the database, used for category mapping.
-          label_remapper: Mapping to remap label names, if needed.
-          ignore_label_index: Index to use for ignored labels.
+          database_task_configs: Task configuration for every task the database serves, mapped by
+            task type. Hydra composes the keys as strings (the TaskType values), so string keys
+            are converted to TaskType here.
           box3d_pipelines: List of box 3D pipelines to process the box 3D annotations.
         """
 
@@ -64,9 +65,14 @@ class BaseDatabase:
         self._cache_path = Path(cache_path)
         self._cache_file_prefix_name = cache_file_prefix_name
         self._num_workers = num_workers
-        self._class_names = class_names
-        self._label_remapper = label_remapper
-        self._ignore_label_index = ignore_label_index
+        self._database_task_configs: MappingProxyType[TaskType, DatabaseTaskConfig] = (
+            MappingProxyType(
+                {
+                    TaskType(key) if isinstance(key, str) else key: value
+                    for key, value in database_task_configs.items()
+                }
+            )
+        )
         self._box3d_pipelines = box3d_pipelines
 
         # Create cache output path if it doesn't exist
@@ -76,9 +82,7 @@ class BaseDatabase:
             f"root path: {self._root_path}, "
             f"cache path: {self._cache_path}, "
             f"cache file prefix name: {self._cache_file_prefix_name}, "
-            f"class names: {self._class_names}, "
-            f"label remapper: {self._label_remapper}, "
-            f"ignore label index: {self._ignore_label_index}, "
+            f"database task config: {self._database_task_configs}, "
             f"box3d pipelines: [{', '.join([str(pipeline) for pipeline in self._box3d_pipelines])}]"
         )
 
@@ -115,39 +119,6 @@ class BaseDatabase:
         return hash(str(self))
 
     @property
-    def class_names(self) -> Sequence[str]:
-        """
-        Get the class names in the database.
-
-        Returns:
-          Sequence[str]: Class names in the database.
-        """
-
-        return self._class_names
-
-    @property
-    def label_remapper(self) -> Mapping[str, str] | None:
-        """
-        Get the label remapper in the database.
-
-        Returns:
-          Mapping[str, str] | None: Label remapper in the database.
-        """
-
-        return self._label_remapper
-
-    @property
-    def ignore_label_index(self) -> int:
-        """
-        Get the ignore label index in the database.
-
-        Returns:
-          int: Ignore label index in the database.
-        """
-
-        return self._ignore_label_index
-
-    @property
     def scenarios_string_repr(self) -> str:
         """
         Get string representation of the scenarios.
@@ -163,6 +134,16 @@ class BaseDatabase:
         return string
 
     @property
+    def database_task_configs(self) -> MappingProxyType[TaskType, DatabaseTaskConfig]:
+        """
+        Get the database task configuration.
+
+        Returns:
+          MappingProxyType[TaskType, DatabaseTaskConfig]: Database task configuration.
+        """
+        return self._database_task_configs
+
+    @property
     def version(self) -> str:
         """
         Get the version of the database.
@@ -174,25 +155,63 @@ class BaseDatabase:
         return self._version
 
     @property
-    def scenarios(self) -> Mapping[str, Scenarios]:
+    def scenarios(self) -> MappingProxyType[str, Scenarios]:
         """
         Get the scenarios for each scenario group.
 
         Returns:
-          Mapping[str, Scenarios]: Dictionary of scenario group name to scenarios.
+          MappingProxyType[str, Scenarios]: Dictionary of scenario group name to scenarios.
         """
 
         return self._scenarios
 
     @property
+    def hash_repr(self) -> str:
+        """
+        Get the representation of the database that identifies the content of its cache.
+
+        Only the settings that change what lands in the cached records belong here. Filesystem
+        locations (``root_path``, ``cache_path``, ``cache_file_prefix_name``, and the scenario
+        root path) are deliberately left out: the cached records are re-rooted against the
+        database root path when they are read back, so the same records are valid under any
+        path, and including a path would give every node a different cache file for
+        identical content. Runtime-only settings such as ``num_workers`` are left out for the
+        same reason.
+
+        This is kept separate from :meth:`__str__`, which is a debug representation and free to
+        gain fields without invalidating every cached file in existence.
+
+        Returns:
+          str: Content representation of the database.
+        """
+
+        box3d_pipelines = ", ".join(str(pipeline) for pipeline in self._box3d_pipelines)
+        scenarios = ", ".join(
+            f"{scenario_group}: {scenarios.hash_repr}"
+            for scenario_group, scenarios in self.scenarios.items()
+        )
+        database_task_configs_repr = ", ".join(
+            f"{task_type.value}: {task_config.hash_repr}"
+            for task_type, task_config in self._database_task_configs.items()
+        )
+        return (
+            f"{type(self).__name__}("
+            f"version={self._version}, "
+            f"database_task_configs={database_task_configs_repr}, "
+            f"box3d_pipelines=[{box3d_pipelines}], "
+            f"scenarios=({scenarios})"
+            f")"
+        )
+
+    @property
     def database_hash(self) -> str:
         """
-        Get a hash for the database based on its version and scenarios.
+        Get a hash for the database based on the content of its cache.
 
         Returns:
           str: Hash of the database.
         """
-        hash_str = str(self)
+        hash_str = self.hash_repr
         polars_schema = self.get_polars_schema()
         # Convert the polars schema to a string representation
         schema_str = str(polars_schema)

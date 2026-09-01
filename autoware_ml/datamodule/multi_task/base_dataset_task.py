@@ -58,3 +58,9 @@ class BaseDatasetTask(ABC):
             from a sample.
         """
         raise NotImplementedError("Dataset type must define get_data_sample()!")
+
+    def log_dataset_info(self) -> None:
+        """
+        Log and print dataset information for the specific task.
+        """
+        raise NotImplementedError("Dataset type must define log_dataset_info()!")

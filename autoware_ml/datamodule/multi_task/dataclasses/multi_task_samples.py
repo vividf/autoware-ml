@@ -52,9 +52,31 @@ class PointCloudGTBatch(NamedTuple):
             ],
             dim=0,
         )
+
+        if points.shape[0] != batch_indices.shape[0]:
+            raise ValueError(
+                "Mismatch between number of points and batch indices. "
+                f"Points shape: {points.shape}, Batch indices shape: {batch_indices.shape}"
+            )
+
         return PointCloudGTBatch(
             points=points,
             batch_indices=batch_indices,
+        )
+
+    def to_device(self, device: torch.device) -> PointCloudGTBatch:
+        """
+        Move the PointCloudGTBatch to the specified device.
+
+        Args:
+          device: The target device to move the batch to.
+
+        Returns:
+          PointCloudGTBatch: The batch moved to the specified device.
+        """
+        return PointCloudGTBatch(
+            points=self.points.to(device),
+            batch_indices=self.batch_indices.to(device),
         )
 
 
@@ -93,6 +115,10 @@ class MultiTaskGTSample(NamedTuple):
     # Information about lidar transformation
     lidar_transformation_sample: LiDARTransformationSample | None = None
 
+    # Seconds spent loading this sample and running it through the transform pipeline.
+    # Assigned by the dataset once the pipeline has finished.
+    io_processing_time: float = 0.0
+
 
 class MultiTaskGTBatch(NamedTuple):
     """
@@ -104,6 +130,43 @@ class MultiTaskGTBatch(NamedTuple):
     point_cloud_gt_batch: PointCloudGTBatch | None
     detection3d_gt_batch: Detection3DGTBatch | None
     # TODO (Kok Seang): 3D segmentation
+
+    # Summed io_processing_time of every sample collated into this batch.
+    io_processing_time: float = 0.0
+
+    def to_device(self, device: torch.device) -> MultiTaskGTBatch:
+        """
+        Move the MultiTaskGTBatch to the specified device.
+
+        Args:
+          device: The target device to move the batch to.
+
+        Returns:
+          MultiTaskGTBatch: The batch moved to the specified device.
+        """
+        return MultiTaskGTBatch(
+            point_cloud_gt_batch=self.point_cloud_gt_batch.to_device(device)
+            if self.point_cloud_gt_batch is not None
+            else None,
+            detection3d_gt_batch=self.detection3d_gt_batch.to_device(device)
+            if self.detection3d_gt_batch is not None
+            else None,
+            io_processing_time=self.io_processing_time,
+        )
+
+    def infer_batch_size(self) -> Int32:
+        """
+        Infer the batch size from the collated multi-task GT batch.
+
+        Returns:
+            Batch size if it can be inferred, otherwise raises ValueError.
+        """
+        if self.point_cloud_gt_batch is not None:
+            return torch.max(self.point_cloud_gt_batch.batch_indices) + 1
+        elif self.detection3d_gt_batch is not None:
+            return self.detection3d_gt_batch.gt_bboxes_3d.shape[0]
+        else:
+            raise ValueError("Cannot infer batch size from an empty MultiTaskGTBatch.")
 
     @staticmethod
     def collate_pointcloud_gt_samples(
@@ -194,4 +257,5 @@ class MultiTaskGTBatch(NamedTuple):
         return MultiTaskGTBatch(
             point_cloud_gt_batch=point_cloud_gt_batch,
             detection3d_gt_batch=detection3d_gt_batch,
+            io_processing_time=sum(sample.io_processing_time for sample in gt_samples),
         )

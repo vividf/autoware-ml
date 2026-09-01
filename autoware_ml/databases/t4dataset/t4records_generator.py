@@ -16,6 +16,7 @@ import logging
 
 from pathlib import Path
 from typing import Sequence, Tuple
+from types import MappingProxyType
 
 import numpy as np
 import numpy.typing as npt
@@ -37,6 +38,7 @@ from t4_devkit.common.timestamp import microseconds2seconds
 import torch
 
 from autoware_ml.databases.box3d_pipelines.box3d_pipeline import Box3DPipeline
+from autoware_ml.databases.database_task_config import DatabaseTaskConfig
 from autoware_ml.databases.schemas.frame_basic_metadata import FrameBasicMetadata
 from autoware_ml.databases.schemas.dataset_schemas import DatasetRecord
 from autoware_ml.databases.schemas.lidar_frames import LidarFrameDataModel
@@ -51,6 +53,7 @@ from autoware_ml.geometry.bbox_3d.lidar_bbox3d import LidarBBoxes3D
 from autoware_ml.types.geometry import Box3DCenterCoordinateType
 from autoware_ml.types.sensor import LidarChannel, Modality
 from autoware_ml.types.spatial import CoordinateSystem
+from autoware_ml.types.tasks import TaskType
 from autoware_ml.utils.dataset import convert_quaternion_to_matrix
 
 
@@ -70,7 +73,7 @@ class T4RecordsGenerator:
         max_sweeps: int,
         sample_steps: int,
         lidar_pointcloud_num_features: int,
-        ignore_label_index: int,
+        database_task_configs: MappingProxyType[TaskType, DatabaseTaskConfig],
         box3d_pipelines: Sequence[Box3DPipeline],
         recompute_boxes3d_lidar_points_num: bool = False,
     ) -> None:
@@ -85,7 +88,8 @@ class T4RecordsGenerator:
           sample_steps: Number of frames/samples to skip between each sample, set to 1
             if not skipping any samples/frames.
           lidar_pointcloud_num_features: Number of features of the lidar pointcloud.
-          ignore_label_index: Label index to use for ignored labels in the box3d annotations.
+          database_task_configs: Task configuration of the database, mapped by task type. The
+            Detection3D configuration supplies the ignore label index of the box3d annotations.
           box3d_pipelines: List of box3d pipelines to process the box3d annotations.
           recompute_boxes3d_lidar_points_num: Whether to recompute the number of lidar points in
             each box3d annotation. Note that this slows down a lot, so it's not recommended
@@ -98,9 +102,20 @@ class T4RecordsGenerator:
         self.sample_steps = sample_steps
         self.lidar_pointcloud_num_features = lidar_pointcloud_num_features
         self.t4_devkit_dataset = self._construct_t4_devkit_dataset()
-        self.ignore_label_index = ignore_label_index
+        self.database_task_configs = database_task_configs
         self.box3d_pipelines = box3d_pipelines
         self.recompute_boxes3d_lidar_points_num = recompute_boxes3d_lidar_points_num
+
+        # The box3d annotations are labelled with the ignore label index of the Detection3D task,
+        # the box3d pipelines assign the actual label indices afterwards
+        detection3d_task_config = self.database_task_configs.get(TaskType.DETECTION3D)
+        if detection3d_task_config is None:
+            raise ValueError(
+                "T4RecordsGenerator requires the Detection3D task configuration to label the "
+                f"box3d annotations, got task types: {list(self.database_task_configs)}"
+            )
+        self.box3d_ignore_label_index = detection3d_task_config.ignore_label_index
+
         assert sample_steps > 0, "Sample steps must be greater than 0."
         assert max_sweeps >= 0, "Max sweeps must be greater than or equal to 0."
 
@@ -237,7 +252,7 @@ class T4RecordsGenerator:
                     box3d_dataset_label_name=box3d.semantic_label.name,
                     box3d_label_name=box3d.semantic_label.name,
                     # Initially, set all label indices to the ignore label index
-                    box3d_label_index=self.ignore_label_index,
+                    box3d_label_index=self.box3d_ignore_label_index,
                     box3d_num_lidar_points=box3d.num_points,
                     box3d_num_radar_points=sample_annotation_record.num_radar_pts,
                     box3d_valid=box3d_valid,

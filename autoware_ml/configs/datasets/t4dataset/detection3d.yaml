@@ -96,6 +96,7 @@ metric_ranges:
 metrics:
   - _target_: autoware_ml.metrics.detection3d.suite.Detection3DMetricSuite
     components:
+      - { _target_: autoware_ml.metrics.detection3d.box_counts.BoxCounts, stages: [val, test] }
       - { _target_: autoware_ml.metrics.detection3d.mean_ap.MeanAP, stages: [val, test] }
       - { _target_: autoware_ml.metrics.detection3d.heading_ap.HeadingAP, stages: [test] }
       - { _target_: autoware_ml.metrics.detection3d.nds.Nds, stages: [test] }

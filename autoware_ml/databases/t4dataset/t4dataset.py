@@ -26,11 +26,13 @@ from tqdm import tqdm
 
 from autoware_ml.databases.base_database import BaseDatabase
 from autoware_ml.databases.database_interface import DatabaseInterface
+from autoware_ml.databases.database_task_config import DatabaseTaskConfig
 from autoware_ml.databases.scenarios import ScenarioData
 from autoware_ml.databases.schemas.dataset_schemas import DatasetRecord
 from autoware_ml.databases.t4dataset.t4records_generator import T4RecordsGenerator
 from autoware_ml.databases.t4dataset.t4scenarios import T4Scenarios
 from autoware_ml.databases.box3d_pipelines.box3d_pipeline import Box3DPipeline
+from autoware_ml.types.tasks import TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,14 @@ class T4RecordsGeneratorWorkerParams:
       database_root_path: Root path of the T4 database.
       scenario_data: Scenario data.
       lidar_pointcloud_num_features: Number of features in the lidar pointcloud.
+      database_task_configs: Task configuration of the database, mapped by task type.
+      box3d_pipelines: List of box 3D pipelines to process the box 3D annotations.
     """
 
     database_root_path: str
     scenario_data: ScenarioData
     lidar_pointcloud_num_features: int
-    ignore_label_index: int
+    database_task_configs: MappingProxyType[TaskType, DatabaseTaskConfig]
     box3d_pipelines: Sequence[Box3DPipeline]
 
 
@@ -73,7 +77,7 @@ def _apply_t4_records_generator(
         sample_steps=t4_records_generator_worker_params.scenario_data.sample_steps,
         max_sweeps=t4_records_generator_worker_params.scenario_data.max_sweeps,
         lidar_pointcloud_num_features=t4_records_generator_worker_params.lidar_pointcloud_num_features,
-        ignore_label_index=t4_records_generator_worker_params.ignore_label_index,
+        database_task_configs=t4_records_generator_worker_params.database_task_configs,
         box3d_pipelines=t4_records_generator_worker_params.box3d_pipelines,
     )
     # Generate DatasetRecords
@@ -91,9 +95,7 @@ class T4Dataset(BaseDatabase):
         cache_path: str,
         cache_file_prefix_name: str,
         num_workers: int,
-        class_names: Sequence[str],
-        ignore_label_index: int,
-        label_remapper: MappingProxyType[str, str] | None,
+        database_task_configs: MappingProxyType[TaskType | str, DatabaseTaskConfig],
         lidar_pointcloud_num_features: int,
         box3d_pipelines: Sequence[Box3DPipeline],
     ) -> None:
@@ -107,9 +109,8 @@ class T4Dataset(BaseDatabase):
           cache_path: Path to cache the dataset records.
           cache_file_prefix_name: Prefix name of the cache file, it will be <cache_file_prefix_name>_<dataset_hash>.parquet
           num_workers: Number of workers to use for processing the dataset.
-          class_names: List of class names in the dataset, used for category mapping.
-          ignore_label_index: Index to use for ignored labels.
-          label_remapper: Mapping to remap label names, if needed.
+          database_task_configs: Task configuration for every task the dataset serves, mapped by
+            task type.
           lidar_pointcloud_num_features: Number of features in the lidar pointcloud.
           box3d_pipelines: List of box 3D pipelines to process the box 3D annotations.
         """
@@ -121,10 +122,8 @@ class T4Dataset(BaseDatabase):
             cache_path=cache_path,
             cache_file_prefix_name=cache_file_prefix_name,
             num_workers=num_workers,
-            class_names=class_names,
-            label_remapper=label_remapper,
+            database_task_configs=database_task_configs,
             box3d_pipelines=box3d_pipelines,
-            ignore_label_index=ignore_label_index,
         )
         self._scenarios = scenarios
         self._lidar_pointcloud_num_features = lidar_pointcloud_num_features
@@ -142,14 +141,28 @@ class T4Dataset(BaseDatabase):
             f"root_path={str(self._root_path)}, "
             f"cache path={str(self._cache_path)}, "
             f"cache file prefix name={self._cache_file_prefix_name}, "
-            f"class_names={self._class_names}, "
-            f"label_remapper={self._label_remapper}, "
-            f"ignore_label_index={self._ignore_label_index}, "
+            f"database_task_configs={self._database_task_configs}, "
             f"box3d_pipelines=[{', '.join([str(pipeline) for pipeline in self._box3d_pipelines])}], "
             f"{self.scenarios_string_repr}"
             f")"
         )
         return string
+
+    @property
+    def hash_repr(self) -> str:
+        """
+        Get the representation of the database that identifies the content of its cache.
+
+        Extends the base representation with the lidar settings that shape the cached records.
+
+        Returns:
+          str: Content representation of the database.
+        """
+
+        return (
+            f"{super().hash_repr}"
+            f"(lidar_pointcloud_num_features={self._lidar_pointcloud_num_features})"
+        )
 
     def __eq__(self, other: DatabaseInterface) -> bool:
         """
@@ -234,7 +247,8 @@ class T4Dataset(BaseDatabase):
                 database_root_path=str(self._root_path),
                 scenario_data=scenario,
                 lidar_pointcloud_num_features=self._lidar_pointcloud_num_features,
-                ignore_label_index=self._ignore_label_index,
+                # Plain dict since MappingProxyType cannot be pickled to the worker processes
+                database_task_configs=dict(self._database_task_configs),
                 box3d_pipelines=self._box3d_pipelines,
             )
             for scenario in scenario_data.values()

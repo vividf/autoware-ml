@@ -86,7 +86,7 @@ class MultiTaskDataModule(L.LightningDataModule):
             ],
             "validate": [(self.validation_dataset, SplitType.VAL)],
             "test": [(self.test_dataset, SplitType.TEST)],
-            "predict": [(self.predict_dataset, SplitType.PREDICT)],
+            "predict": [(self.predict_dataset, SplitType.TEST)],
         }
 
         stage_datasets = stage_to_datasets.get(stage, [])
@@ -95,11 +95,11 @@ class MultiTaskDataModule(L.LightningDataModule):
                 dataset.assign_dataset_records(split_dataset_dataframes[split_type])
                 logger.info(
                     f"Assigned {len(split_dataset_dataframes[split_type])} dataset records to "
-                    f"{dataset.__class__.__name__} for split type {split_type}."
+                    f"{dataset.__class__.__name__} for split type {stage}."
                 )
             else:
                 logger.warning(
-                    f"Dataset for split type {split_type} is not set. Skipping assignment of dataset records."
+                    f"Dataset for split type {stage} is not set. Skipping assignment of dataset records."
                 )
 
         logger.info(

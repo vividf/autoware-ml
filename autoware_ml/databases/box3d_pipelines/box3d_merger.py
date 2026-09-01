@@ -23,22 +23,22 @@ class Box3DMerger(Box3DPipeline):
         self,
         target_labels: MappingProxyType[str, Sequence[str]],
         proximity_distance_threshold: float,
-        class_names: Sequence[str],
+        label_names: Sequence[str],
     ):
         """
         Initialize Box3DMerger.
 
         Args:
-          target_classes: Mapping of the target classes to the list of source classes.
+          target_labels: Mapping of the target labels to the list of source labels.
           proximity_distance_threshold: Proximity distance threshold to check if two boxes are
             close to each other.
-          class_names: List of class names in the database, used for category mapping.
+          label_names: List of label names in the database, used for category mapping.
         """
         super().__init__()
         self.target_labels = target_labels
         self.proximity_distance_threshold = proximity_distance_threshold
-        self.class_names = class_names
-        self.label_indices = {label_name: index for index, label_name in enumerate(class_names)}
+        self.label_names = label_names
+        self.label_indices = {label_name: index for index, label_name in enumerate(label_names)}
 
         # Check if target labels are valid, it supports only two source labels for each target label
         for target_label, source_labels in self.target_labels.items():
@@ -179,7 +179,7 @@ class Box3DMerger(Box3DPipeline):
         Returns:
           MappingProxyType[str, Sequence[Tuple[int, int]]]: Mapping of target labels to matched pairs of box indices.
         """
-        # {target_class: [(source_box_index, source_box_index), ...]}
+        # {target_label: [(source_box_index, source_box_index), ...]}
         matched_pairs = {target_label: [] for target_label in self.target_labels.keys()}
         for target_label, source_labels in self.target_labels.items():
             pairs = []
@@ -322,22 +322,22 @@ class Box3DExtendLongerMerger(Box3DMerger):
         self,
         target_labels: MappingProxyType[str, Sequence[str]],
         proximity_distance_threshold: float,
-        class_names: Sequence[str],
+        label_names: Sequence[str],
     ):
         """
         Initialize Box3DExtendLongerMerger.
 
         Args:
-          target_labels: Mapping of the target classes to the list of source classes.
+          target_labels: Mapping of the target labels to the list of source labels.
           proximity_distance_threshold: Proximity distance threshold to check if two boxes are
             close to each other.
-          class_names: List of class names in the database, used for category mapping.
+          label_names: List of label names in the database, used for category mapping.
         """
 
         super().__init__(
             target_labels=target_labels,
             proximity_distance_threshold=proximity_distance_threshold,
-            class_names=class_names,
+            label_names=label_names,
         )
 
     def __str__(self) -> str:
@@ -350,7 +350,7 @@ class Box3DExtendLongerMerger(Box3DMerger):
         return (
             f"{self.__class__.__name__}(target_labels={self.target_labels}, "
             f"proximity_distance_threshold={self.proximity_distance_threshold}, "
-            f"class_names={self.class_names})"
+            f"label_names={self.label_names})"
         )
 
     @staticmethod

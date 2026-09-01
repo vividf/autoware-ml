@@ -23,3 +23,17 @@ pipeline:
     _convert_: all
 
     points_range: ${point_cloud_range}
+
+  - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesLabelNameFilter
+    _convert_: all
+
+    label_names_to_keep: ${database.database_task_configs.detection3d.label_names}
+
+  - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesAttributeFilter
+    _convert_: all
+
+    attributes_to_filter:
+      bicycle:
+        - vehicle_state.parked
+        - cycle_state.without_rider
+        - motorcycle_state.without_rider

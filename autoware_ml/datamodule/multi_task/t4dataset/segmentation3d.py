@@ -47,3 +47,9 @@ class T4Segmentation3DTask(BaseDatasetTask):
         raise NotImplementedError(
             "get_data_sample method for T4Segmentation3DTask is not yet implemented."
         )
+
+    def log_dataset_info(self) -> None:
+        """
+        Log and print dataset information for the specific task.
+        """
+        return

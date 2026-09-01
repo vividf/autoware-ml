@@ -1,0 +1,16 @@
+_target_: autoware_ml.databases.database_task_config.DatabaseTaskConfig
+_convert_: all
+
+# Relative to this config's group (t4dataset/database_task_configs), not to its directory
+defaults:
+  - detection3d/labels@label_names: default_label_names
+  - detection3d/labels@label_remapper: default_label_remapper
+  - _self_
+
+# Must match TaskType.DETECTION3D.value
+task_type:
+  _target_: autoware_ml.types.tasks.TaskType
+  _convert_: all
+  _args_: [detection3d]
+
+ignore_label_index: -1

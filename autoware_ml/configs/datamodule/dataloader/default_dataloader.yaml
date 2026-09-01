@@ -5,4 +5,5 @@ pin_memory: true
 persistent_workers: true
 drop_last: false
 shuffle: false
-batch_size: 1
+batch_size: ${batch_size}
+num_workers: ${num_workers}

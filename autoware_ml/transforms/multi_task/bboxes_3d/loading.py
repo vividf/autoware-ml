@@ -3,7 +3,7 @@ Bboxes 3d transforms for loading bboxes (for example, label name filter).
 The code is modified based on https://github.com/open-mmlab/mmdetection3d/blob/main/mmdet3d/datasets/transforms/transforms_3d.py.
 """
 
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import torch
 
@@ -35,6 +35,70 @@ class BBoxesLabelNameFilter(MultiTaskBaseTransform):
             [
                 True if label_name in self.label_names_to_keep else False
                 for label_name in detection3d_gt_bboxes_3d.bbox_label_names
+            ],
+            dtype=torch.bool,
+        )
+
+        # TODO(Kok Seang): Consider to make it immutable and return a new instance
+        # instead of modifying in place.
+        detection3d_gt_bboxes_3d.remove_bboxes(bboxes_to_keep_mask)
+        return multi_task_gt_sample
+
+
+class BBoxesAttributeFilter(MultiTaskBaseTransform):
+    """Filter out 3D bounding boxes by their attributes, on a per label name basis.
+
+    For example, the following configuration removes every parked or stopped vehicle, and every
+    sitting pedestrian, while every other bounding box is kept:
+
+    .. code-block:: python
+
+        BBoxesAttributeFilter(
+            attributes_to_filter={
+                "vehicle": ["vehicle_state.parked", "vehicle_state.stopped"],
+                "pedestrian": ["pedestrian_state.sitting"],
+            }
+        )
+    """
+
+    _required_keys = ["detection3d_gt_bboxes_3d"]
+
+    def __init__(self, attributes_to_filter: Mapping[str, Sequence[str]]) -> None:
+        """
+        Initialize the BBoxesAttributeFilter transform.
+
+        Args:
+            attributes_to_filter (Mapping[str, Sequence[str]]): Mapping from a bbox label name to
+                the attributes to filter out for that label name. A bounding box is removed when
+                its label name is in the mapping and it carries at least one of the attributes
+                listed for that label name. Label names that are absent from the mapping are
+                left untouched.
+        """
+        super().__init__(probability=None)
+        self.attributes_to_filter = {
+            label_name: set(attributes) for label_name, attributes in attributes_to_filter.items()
+        }
+
+    def transform(self, multi_task_gt_sample: MultiTaskGTSample) -> MultiTaskGTSample:
+        """Filter out 3D bounding boxes carrying the configured attributes."""
+        # This is checked in the _validate_required_keys()
+        detection3d_gt_bboxes_3d: BaseBBoxes3D = multi_task_gt_sample.detection3d_gt_bboxes_3d  # type: ignore[reportOptionalMemberAccess]
+        if not len(detection3d_gt_bboxes_3d):
+            return multi_task_gt_sample
+
+        bbox_attributes = detection3d_gt_bboxes_3d.bbox_attributes
+        if bbox_attributes is None:
+            raise ValueError(
+                f"{self.__class__.__name__}: The 3D bounding boxes do not carry any attribute, "
+                "therefore they cannot be filtered by attributes."
+            )
+
+        bboxes_to_keep_mask = torch.tensor(
+            [
+                not self.attributes_to_filter.get(label_name, set()).intersection(attributes)
+                for label_name, attributes in zip(
+                    detection3d_gt_bboxes_3d.bbox_label_names, bbox_attributes
+                )
             ],
             dtype=torch.bool,
         )

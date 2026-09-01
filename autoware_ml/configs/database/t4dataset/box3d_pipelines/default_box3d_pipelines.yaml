@@ -1,9 +1,9 @@
 - _target_: autoware_ml.databases.box3d_pipelines.box3d_label_remapper.Box3DLabelRemapper
   _convert_: all
 
-  label_remapper: ${database.label_remapper}
-  class_names: ${database.class_names}
-  ignore_label_index: ${database.ignore_label_index}
+  label_remapper: ${database.database_task_configs.detection3d.label_remapper}
+  label_names: ${database.database_task_configs.detection3d.label_names}
+  ignore_label_index: ${database.database_task_configs.detection3d.ignore_label_index}
 
 - _target_: autoware_ml.databases.box3d_pipelines.box3d_merger.Box3DExtendLongerMerger
   _convert_: all
@@ -14,7 +14,7 @@
       - trailer
 
   proximity_distance_threshold: 1.0
-  class_names: ${database.class_names}
+  label_names: ${database.database_task_configs.detection3d.label_names}
 
 # Second remapping, to remap remaining trailers to trucks
 - _target_: autoware_ml.databases.box3d_pipelines.box3d_label_remapper.Box3DLabelRemapper
@@ -25,8 +25,8 @@
     vehicle.trailer: truck
     semi_trailer: truck
 
-  class_names: ${database.class_names}
-  ignore_label_index: ${database.ignore_label_index}
+  label_names: ${database.database_task_configs.detection3d.label_names}
+  ignore_label_index: ${database.database_task_configs.detection3d.ignore_label_index}
 
 - _target_: autoware_ml.databases.box3d_pipelines.box3d_velocity_clip.Box3DVelocityNormClip
   _convert_: all

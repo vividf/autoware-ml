@@ -190,6 +190,25 @@ class Scenarios(BaseModel):
         string += "))"
         return string
 
+    @property
+    def hash_repr(self) -> str:
+        """
+        Get the representation of the scenarios that identifies their content.
+
+        ``scenario_root_path`` is deliberately left out to align different nodes with the same
+        scenarios at different paths, and they must agree on this representation.
+
+        Returns:
+          str: Content representation of the scenarios.
+        """
+
+        dataset_params = ", ".join(str(dataset_param) for dataset_param in self.dataset_params)
+        scenario_data = ", ".join(
+            f"{split}: [{', '.join(str(data) for data in split_data)}]"
+            for split, split_data in self.scenario_data.items()
+        )
+        return f"Scenarios(dataset_params=({dataset_params}), scenario_data=({scenario_data}))"
+
     def __eq__(self, other: Scenarios) -> bool:
         """
         Compare two scenarios by their version and scenario IDs.

@@ -1,0 +1,149 @@
+# @package _global_
+defaults:
+  - base
+  - /database@database: t4dataset/t4dataset_j6gen2_base
+  - /datamodule@datamodule: t4dataset/default_detection3d_datamodule
+  - /metrics/t4dataset@metric_ranges: default_detection3d_120m_metric_ranges
+  - _self_
+
+batch_size: 16
+num_workers: 16
+max_num_3d_gt_bboxes: 500
+
+experiment_group_name: centerpoint/${database.version}/j6gen2_base
+experiment_name: voxel024_second_secfpn_b16_30e_t4dataset_120m
+point_cloud_range: [-122.4, -122.4, -3.0, 122.4, 122.4, 5.0]
+voxel_size: [0.24, 0.24, 8.0]
+
+eval_class_range:
+  car: 121.0
+  truck: 121.0
+  bus: 121.0
+  bicycle: 121.0
+  pedestrian: 121.0
+  traffic_cone: 121.0
+  barrier: 121.0
+
+trainer:
+  max_epochs: 30
+  check_val_every_n_epoch: 5
+
+model:
+  pts_middle_encoder:
+    output_shape: [1020, 1020]
+  pts_backbone:
+    layer_strides: [1, 2, 2]
+  bbox_head:
+    out_size_factor: 2
+    nms_min_radius: 1.0
+  scheduler:
+    max_lr_factor: 10.0
+
+datamodule:
+  # Overwrite dataloader
+  train_dataloader:
+    shuffle: true
+  predict_dataloader:
+    shuffle: false
+    batch_size: 1
+
+  # Overwrite transforms
+  train_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+    transforms:
+      _target_: autoware_ml.transforms.multi_task.base.MultiTaskTransformsCompose
+      _convert_: all
+
+      pipeline:
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.loading.LoadPointsFromFile
+          _convert_: all
+
+          load_dim: ${database.lidar_pointcloud_num_features}
+          use_dim: [0, 1, 2, 3] # Refer PointFieldIndex for the name of each dimensionality, [x, y, z, intensity]
+          bev_remove_radius: 0.0
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.loading.LoadMultiSweepPointsFromFile
+          _convert_: all
+
+          sweeps_num: 1
+          bev_remove_radius: 1.0
+          test_mode: false
+          use_timestamp_difference: true
+          load_dim: ${database.lidar_pointcloud_num_features}
+          use_dim: [0, 1, 2, 3] # Refer PointFieldIndex for the name of each dimensionality, [x, y, z, intensity]
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalRotScaleTrans
+          _convert_: all
+
+          # In radians, the range of rotation angles for random rotation around the Z-axis.
+          # The range is specified as [min_angle, max_angle].
+          yaw_rot_range: [-1.571, 1.571]
+          # The range of scale factors for random scaling.
+          scale_ratio_range: [0.8, 1.2]
+          # The standard deviation for Gaussian translation noise.
+          translation_std: [1.0, 1.0, 0.2]
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalBEVRandomFlip
+          _convert_: all
+
+          horizontal_flip_ratio: 0.5
+          vertical_flip_ratio: 0.5
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRangeFilter
+          _convert_: all
+
+          points_range: ${point_cloud_range}
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRandomShuffle
+          _convert_: all
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesLabelNameFilter
+          _convert_: all
+
+          label_names_to_keep: ${database.database_task_configs.detection3d.label_names}
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesBEVDistanceFilter
+          _convert_: all
+
+          bev_range:
+            - ${point_cloud_range.0}
+            - ${point_cloud_range.1}
+            - ${point_cloud_range.3}
+            - ${point_cloud_range.4}
+
+        # Order matters, it first filters bboxes within the default meters with less than 2 points.
+        # Then it filters bboxes within 60 meters with less than 3 points
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesMinPointsFilter
+          _convert_: all
+
+          min_points: 2
+          bev_range:
+            - ${point_cloud_range.0}
+            - ${point_cloud_range.1}
+            - ${point_cloud_range.3}
+            - ${point_cloud_range.4}
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesMinPointsFilter
+          _convert_: all
+
+          min_points: 3
+          bev_range: [-60.0, -60.0, 60.0, 60.0]
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesAttributeFilter
+          _convert_: all
+
+          attributes_to_filter:
+            bicycle:
+              - vehicle_state.parked
+              - cycle_state.without_rider
+              - motorcycle_state.without_rider
+
+  test_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+  validation_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+  predict_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
