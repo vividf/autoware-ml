@@ -17,11 +17,14 @@ and the per-stage fallback / external-onnx framework semantics."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
+from omegaconf import OmegaConf
 import torch
 from torch import nn
 
+from autoware_ml.deployment.config import DeployConfig
 from autoware_ml.deployment.export import available_backends
 from autoware_ml.deployment.pipeline import StagedPipeline, _ModuleRunner
 from autoware_ml.deployment.stages import GraphStage, TorchStage, validate_stages
@@ -123,6 +126,62 @@ def test_available_backends_exempts_fallback_stages_from_artifacts(tmp_path) -> 
     # onnx is available without sparse_like.onnx (fallback); tensorrt is not
     # (no engines, and sparse_like has no tensorrt fallback).
     assert Backend.ONNX in available and Backend.TENSORRT not in available
+
+
+def test_export_skips_engines_for_tensorrt_fallback_stages(tmp_path, monkeypatch) -> None:
+    """A stage TensorRT cannot execute must not have an engine built for it.
+
+    The sparse stage exports an ONNX full of runtime plugin ops; building an engine
+    from it fails (the plugin is not registered) and the pipeline would never use it,
+    because the stage runs in PyTorch on the tensorrt backend.
+    """
+    from autoware_ml.deployment import export as export_module
+
+    built: list[str] = []
+    monkeypatch.setattr(
+        export_module,
+        "build_engine",
+        lambda onnx_path, engine_path, **kwargs: built.append(Path(onnx_path).stem),
+    )
+
+    plugin_stage = GraphStage(
+        "plugin_like",
+        module=nn.Identity(),
+        inputs=("x",),
+        outputs=("y",),
+        torch_fallback_backends=(Backend.ONNX, Backend.TENSORRT),
+    )
+    plain_stage = GraphStage(
+        "plain_like",
+        module=nn.Identity(),
+        inputs=("y",),
+        outputs=("z",),
+        output_fields=(("z", "z"),),
+    )
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    deploy_cfg = DeployConfig.from_dict(
+        OmegaConf.create(
+            {
+                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
+                "tensorrt": {"enabled": True},
+                "stages": {},
+            }
+        )
+    )
+    export_module.export_stages(
+        (TorchStage("seed", run=seed), plugin_stage, plain_stage),
+        batch_inputs=None,
+        deploy_cfg=deploy_cfg,
+        output_dir=tmp_path,
+        device=torch.device("cpu"),
+    )
+
+    assert built == ["plain_like"]
+    # The ONNX is still written for the fallback stage: it is the deployed artifact.
+    assert (tmp_path / "plugin_like.onnx").exists()
 
 
 def test_assemble_wraps_packed_runtime_tensors() -> None:

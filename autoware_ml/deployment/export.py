@@ -156,12 +156,13 @@ def export_stages(
             artifacts.onnx[stage.name] = onnx_path
 
         if deploy_cfg.tensorrt.enabled:
-            if Backend.TENSORRT in stage.torch_fallback_backends and not onnx_path.exists():
-                # The tensorrt backend runs this stage in PyTorch; an engine is only
-                # built once an (external) ONNX for the stage actually exists.
+            if Backend.TENSORRT in stage.torch_fallback_backends:
+                # The stage declares that TensorRT cannot execute it (a missing runtime
+                # plugin, say), and the pipeline runs it in PyTorch on that backend, so
+                # an engine would fail to build and would never be used. Drop the
+                # backend from the stage's fallbacks to start building one.
                 logger.info(
-                    "Stage %r has no ONNX and falls back to torch on tensorrt — "
-                    "skipping its engine build.",
+                    "Stage %r falls back to torch on tensorrt — skipping its engine build.",
                     stage.name,
                 )
                 continue
