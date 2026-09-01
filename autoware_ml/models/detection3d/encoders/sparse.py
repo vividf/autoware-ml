@@ -57,7 +57,7 @@ def _copy_sparse_convolution_weights(
         target.bias.data.copy_(source.bias.data)
 
 
-def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
+def _convert_sparse_convolution(module: nn.Module, do_sort: bool) -> nn.Module:
     """Convert one native spconv layer into the export-aware equivalent."""
     if isinstance(module, SubMConv3d):
         converted = ExportableSubMConv3d(
@@ -75,6 +75,7 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     if isinstance(module, SparseConv3d):
@@ -98,6 +99,7 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     return module
@@ -130,14 +132,14 @@ def _fuse_sparse_convolution_bn(module: nn.Module) -> int:
     return fused
 
 
-def _replace_sparse_convolutions(module: nn.Module) -> None:
+def _replace_sparse_convolutions(module: nn.Module, do_sort: bool) -> None:
     """Replace native sparse convolution children in-place on an export copy."""
     for name, child in list(module.named_children()):
-        converted = _convert_sparse_convolution(child)
+        converted = _convert_sparse_convolution(child, do_sort)
         if converted is not child:
             module.add_module(name, converted)
         else:
-            _replace_sparse_convolutions(child)
+            _replace_sparse_convolutions(child, do_sort)
 
 
 def _norm(channels: int, eps: float, momentum: float) -> nn.BatchNorm1d:
@@ -197,6 +199,15 @@ class SparseEncoder(nn.Module):
         dense_output_shapes: Dense output shape ``(Y, X, Z)`` after ``conv_out``.
         norm_eps: BatchNorm epsilon.
         norm_momentum: BatchNorm momentum.
+        export_do_sort: Whether the deployed graph's pair-mask generation argsorts its
+            result. Sorting improves memory locality without changing the pairing math,
+            so it is purely a latency trade-off and the answer is hardware-specific:
+            measured on this project's Blackwell workstation (BEVFusion j6gen2, 100
+            frames, FP16 dense + FP32 sparse), sorting is 0.44 ms/frame FASTER
+            (6.70 vs 7.13 ms), which is why it defaults on. Turning it off pays on other
+            targets — the reference deployment does exactly that — so measure before
+            changing it. Applies only to the export copy
+            (:meth:`prepare_for_export`); training always uses spconv's own default.
     """
 
     def __init__(
@@ -215,9 +226,11 @@ class SparseEncoder(nn.Module):
         dense_output_shapes: Sequence[int] = (180, 180, 2),
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
+        export_do_sort: bool = True,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
+        self.export_do_sort = export_do_sort
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
@@ -334,7 +347,7 @@ class SparseEncoder(nn.Module):
         # Fold first: the fold gives each convolution a bias, which the wrapper
         # below has to be constructed with.
         _fuse_sparse_convolution_bn(encoder)
-        _replace_sparse_convolutions(encoder)
+        _replace_sparse_convolutions(encoder, self.export_do_sort)
         # eval() again: the freshly constructed export wrappers start in train
         # mode and are inference-only.
         return encoder.eval()

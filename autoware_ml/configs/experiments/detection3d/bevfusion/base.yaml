@@ -127,6 +127,11 @@ model:
     sparse_shape: ???
     output_channels: 128
     dense_output_shapes: ???
+    # Pair-mask sorting in the deployed graph: locality only, identical detections, so
+    # this is a per-target latency choice. Measured here (100 frames, TensorRT): sorting
+    # 6.70 ms vs not sorting 7.13 ms per frame, so it stays on. Re-measure on the vehicle
+    # target before trusting either value.
+    export_do_sort: true
   pts_backbone:
     _target_: autoware_ml.models.detection3d.backbones.second.SECONDBackbone
     in_channels: 256

@@ -110,6 +110,11 @@ class GraphStage:
             ``torch.onnx.export`` (e.g. the libspconv INT8 format); the export stage
             skips this graph and expects the file to be placed in the artifact
             directory before a TensorRT build.
+        onnx_transforms: Rewrites applied to this stage's exported ``.onnx``, in order,
+            each taking and returning the file path. For fusions intrinsic to the
+            deployed form of this graph — folding a bias and an activation into a
+            runtime plugin node, say — not for user-configurable graph surgery, which
+            belongs in ``deploy.onnx.modify_graph``.
     """
 
     name: str
@@ -119,6 +124,7 @@ class GraphStage:
     output_fields: tuple[tuple[str, str], ...] = ()
     torch_fallback_backends: tuple[Backend, ...] = ()
     external_onnx: bool = False
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     @property
     def exportable(self) -> bool:

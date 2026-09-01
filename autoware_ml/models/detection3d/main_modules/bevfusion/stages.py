@@ -63,6 +63,7 @@ from torch import nn
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
 from autoware_ml.models.detection3d.feature_extractors import LidarBEVFeatureExtractor
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 
 # Stage / artifact names (AWML split-deployment ABI: <name>.onnx / .engine).
@@ -193,6 +194,10 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             # libautoware_tensorrt_plugins.so (deploy.tensorrt.plugin_libraries); ONNX
             # Runtime has no implementation at all, so only that backend falls back.
             torch_fallback_backends=(Backend.ONNX,),
+            # TensorRT cannot fuse a standard operator into a plugin node, so the traced
+            # bias adds and block ReLUs are folded into the plugin's own bias input and
+            # act_type instead.
+            onnx_transforms=(fuse_sparse_graph,),
         ),
         GraphStage(
             DENSE_STAGE,

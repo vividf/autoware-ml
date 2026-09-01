@@ -151,6 +151,8 @@ def export_stages(
                     )
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})
+            for transform in stage.onnx_transforms:
+                onnx_path = Path(transform(onnx_path))
             if should_modify_graph(deploy_cfg.onnx.modify_graph):
                 onnx_path = modify_onnx_graph(onnx_path, deploy_cfg.onnx.modify_graph)
             artifacts.onnx[stage.name] = onnx_path

@@ -124,6 +124,21 @@ def _no_gradients(count: int) -> tuple[None, ...]:
     return (None,) * count
 
 
+def _gemm_activation_to_onnx_int(act_type: Any) -> int:
+    """Map a ``tv.gemm.Activation`` to the integer the runtime plugin expects.
+
+    The plugin mirrors cumm's activation enum (0 = none, 1 = ReLU).
+    """
+    if act_type is None:
+        return 0
+    if isinstance(act_type, int):
+        return int(act_type)
+    value = getattr(act_type, "value", None)
+    if value is None:
+        raise ValueError(f"Cannot map activation {act_type!r} to the plugin's enum.")
+    return int(value)
+
+
 class GetIndicePairs(Function):
     """Bridge sparse indice-pair generation into autograd and ONNX export.
 
@@ -408,6 +423,7 @@ class GetIndicePairsImplicitGemm(Function):
         is_train: bool,
         alloc: ThrustSortAllocator | None,
         timer: CUDAKernelTimer,
+        do_sort: bool = SPCONV_DO_SORT,
     ):
         """Register the ONNX symbolic for implicit-GEMM indice generation.
 
@@ -428,6 +444,9 @@ class GetIndicePairsImplicitGemm(Function):
             subm_i=subm,
             transpose_i=transpose,
             is_train_i=is_train,
+            # The runtime plugin reads do_sort from the graph; omitting it puts the plugin
+            # on its legacy 11-field path, which warns and assumes sorting is on.
+            do_sort_i=int(do_sort),
             outputs=5,
         )
         indices_shape = _get_tensor_sizes(indices)
@@ -457,6 +476,7 @@ class GetIndicePairsImplicitGemm(Function):
         is_train: bool,
         alloc: ThrustSortAllocator | None,
         timer: CUDAKernelTimer,
+        do_sort: bool = SPCONV_DO_SORT,
     ) -> torch.Tensor:
         """Generate implicit-GEMM indice pairs during eager execution.
 
@@ -484,7 +504,6 @@ class GetIndicePairsImplicitGemm(Function):
 
         num_out_act_bound: int = -1
         direct_table: bool = SPCONV_USE_DIRECT_TABLE
-        do_sort = SPCONV_DO_SORT
 
         stream = _current_stream_for(indices)
 
@@ -547,7 +566,7 @@ class GetIndicePairsImplicitGemm(Function):
             Tuple of ``None`` gradients for all inputs.
         """
         del ctx, grad_output
-        return _no_gradients(14)
+        return _no_gradients(15)
 
 
 class ImplicitGemm(Function):
@@ -601,6 +620,7 @@ class ImplicitGemm(Function):
             act_beta_f=act_beta,
             output_scale_f=output_scale,
             output_add_scale_f=output_add_scale,
+            act_type_i=_gemm_activation_to_onnx_int(act_type),
             outputs=1,
         )
         _set_sparse_feature_metadata(output, features, filters)
