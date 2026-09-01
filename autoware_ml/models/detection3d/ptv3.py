@@ -513,6 +513,7 @@ class PTv3DetectionModel(PTv3BaseModel):
         del batch_inputs_dict
         return self.bbox_head.predict(outputs)
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_spec(self, batch_inputs_dict: Mapping[str, torch.Tensor]) -> ExportSpec:
         """Build the PTv3 detection ONNX export specification."""
         inputs = build_monolithic_export_inputs(self, batch_inputs_dict)

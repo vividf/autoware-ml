@@ -22,6 +22,7 @@ import torch
 
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.quantization.checkpoint import find_quantization
 from autoware_ml.utils.checkpoints import apply_matching_weights
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,13 @@ def build_model(
     enforce_full_coverage: bool = False,
 ) -> MultiTaskBaseModel:
     """
-    Build a model from the Hydra configuration.
+    Build a model from the Hydra configuration and load its weights.
+
+    A quantized (PTQ / QAT) checkpoint describes itself: when one of ``weights_path``
+    carries the embedded quantization description, the identical quantized module
+    tree is rebuilt from it and verified before the weights load. Callers never need a
+    ``quantization`` config section — ``deploy`` and ``test`` score an INT8 checkpoint
+    exactly like an FP one.
 
     Args:
         cfg: Hydra configuration.
@@ -59,7 +66,8 @@ def build_model(
         weights_path: Path(s) to the weights file(s) to load into the model.
         resume_checkpoint_path: Path to the checkpoint file to resume training from.
         set_eval: Whether to set the model to evaluation mode after loading weights.
-        enforce_full_coverage: Whether to enforce that all model parameters are covered by the weights.
+        enforce_full_coverage: Whether to enforce that all model parameters are covered by
+            the weights (always enforced for a quantized checkpoint).
 
     Returns:
         Pytorch-Lightning MultiTaskBaseModel for multi-task learning/inference.
@@ -72,14 +80,35 @@ def build_model(
         raise ValueError("'--resume-checkpoint' and '--weights' are mutually exclusive.")
 
     if weights_path is not None:
-        apply_matching_weights(
-            model,
-            weights_path,
-            map_location=device,
-            logger=logger,
-            enforce_full_coverage=enforce_full_coverage,
-            set_eval=set_eval,
+        weight_paths = (
+            [Path(weights_path)]
+            if isinstance(weights_path, (str, Path))
+            else [Path(path) for path in weights_path]
         )
+        quantized = find_quantization(weight_paths)
+        if quantized is not None:
+            from autoware_ml.quantization.loader import load_quantized_model
+
+            path, description = quantized
+            logger.info(
+                "Quantized checkpoint detected (%s, mode=%s): rebuilding the quantized tree "
+                "from its embedded description.",
+                path,
+                description.config.mode,
+            )
+            load_quantized_model(model, weight_paths, description, device)
+            if not set_eval:
+                model.train()
+        else:
+            apply_matching_weights(
+                model,
+                weight_paths,
+                map_location=device,
+                device=device,
+                logger=logger,
+                enforce_full_coverage=enforce_full_coverage,
+                set_eval=set_eval,
+            )
 
     if resume_checkpoint_path is not None:
         progress = torch.load(

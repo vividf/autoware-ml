@@ -371,6 +371,7 @@ class TransFusionHead(nn.Module):
         head_hidden_channels: int | None = None,
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
+        shared_conv_norm_act: bool = True,
         use_bf16_cross_attention: bool = False,
     ) -> None:
         """Initialize the TransFusion detection head.
@@ -425,6 +426,13 @@ class TransFusionHead(nn.Module):
                 (shared conv, heatmap head, prediction branches).
             norm_momentum: Momentum used by the head's batch-normalization layers
                 (shared conv, heatmap head, prediction branches).
+            shared_conv_norm_act: Whether the shared conv is conv(no bias)+BN+ReLU
+                (this implementation's default). ``False`` uses the reference
+                (mmdet3d) form — a single biased Conv2d with signed output —
+                required to load reference-trained checkpoints.
+                TODO(vividf): remove this option (and the ``False`` branch below)
+                once BEVFusion is retrained natively and the AWML reference
+                checkpoint is no longer needed for chain validation.
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
         """
@@ -463,11 +471,24 @@ class TransFusionHead(nn.Module):
         )
         self.nms_groups = self._resolve_nms_groups(nms_groups)
 
-        self.shared_conv = nn.Conv2d(
-            in_channels, hidden_channel, kernel_size=3, padding=1, bias=False
-        )
-        self.shared_norm = nn.BatchNorm2d(hidden_channel, eps=norm_eps, momentum=norm_momentum)
-        self.shared_act = nn.ReLU(inplace=True)
+        if shared_conv_norm_act:
+            self.shared_conv = nn.Conv2d(
+                in_channels, hidden_channel, kernel_size=3, padding=1, bias=False
+            )
+            self.shared_norm = nn.BatchNorm2d(hidden_channel, eps=norm_eps, momentum=norm_momentum)
+            self.shared_act = nn.ReLU(inplace=True)
+        else:
+            # TODO(vividf): temporary branch for the AWML reference checkpoint only —
+            # remove together with the shared_conv_norm_act option once BEVFusion is
+            # retrained natively. The reference (mmdet3d BEVFusion) shared conv is a
+            # single biased Conv2d whose signed output feeds the heatmap head and
+            # decoder directly — required to load reference-trained checkpoints
+            # without clipping ~half of the shared-feature energy through BN+ReLU.
+            self.shared_conv = nn.Conv2d(
+                in_channels, hidden_channel, kernel_size=3, padding=1, bias=True
+            )
+            self.shared_norm = nn.Identity()
+            self.shared_act = nn.Identity()
 
         self.heatmap_head = nn.Sequential(
             ConvModule(

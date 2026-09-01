@@ -28,6 +28,17 @@ trainer:
   max_epochs: 30
   check_val_every_n_epoch: 5
 
+deploy:
+  stages:
+    pts_backbone_neck_head:
+      tensorrt:
+        input_shapes:
+          # Static BEV canvas: (batch, pfn_channels, *pts_middle_encoder.output_shape).
+          spatial_features:
+            min_shape: [1, 32, 1020, 1020]
+            opt_shape: [1, 32, 1020, 1020]
+            max_shape: [1, 32, 1020, 1020]
+
 model:
   pts_middle_encoder:
     output_shape: [1020, 1020]

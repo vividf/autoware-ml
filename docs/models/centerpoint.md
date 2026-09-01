@@ -51,11 +51,11 @@ autoware-ml test \
 
 ```bash
 autoware-ml deploy \
-    --config-name detection3d/centerpoint/voxel024_second_secfpn_120m_t4dataset_j6gen2 \
-    --weights mlruns/detection3d/centerpoint/voxel024_second_secfpn_120m_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt
+    --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base \
+    --weights mlruns/<...>/artifacts/checkpoints/best.ckpt
 ```
 
-The export produces the two ONNX modules consumed by `autoware_universe/perception/autoware_lidar_centerpoint`: `pts_voxel_encoder_centerpoint.onnx` encodes decorated pillar features into per-pillar descriptors, and `pts_backbone_neck_head_centerpoint.onnx` predicts the raw dense detection heads (`heatmap`, `reg`, `height`, `dim`, `rot`, `vel`) from the scattered BEV canvas. Voxelization, pillar decoration, BEV scatter, and box decoding all run in the runtime node.
+The export produces the two ONNX modules consumed by `autoware_universe/perception/autoware_lidar_centerpoint`, named after the model's exportable stages (`CenterPointDetectionModel.build_stages()`): `pts_voxel_encoder.onnx` encodes decorated pillar features into per-pillar descriptors, and `pts_backbone_neck_head.onnx` predicts the raw dense detection heads (`heatmap`, `reg`, `height`, `dim`, `rot`, `vel`) from the scattered BEV canvas. Voxelization, pillar decoration, BEV scatter, and box decoding all run in the runtime node. With `deploy.tensorrt.enabled=true` the matching `.engine` files are built; `deploy.verification` / `deploy.evaluation` check numerical parity and score every backend (see [Deployment](../user-guide/deployment.md)). INT8 checkpoints come from `autoware-ml quantize` (see [Quantization](../framework/quantization.md)).
 
 ## Implementation
 

@@ -38,7 +38,6 @@ from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.types.dataset import SplitType
-from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
 
 
@@ -347,36 +346,57 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
             else None,
         )
 
-    def build_export_spec(self, multi_task_batch_inputs: MultiTaskBatchInputs) -> ExportSpec:
-        """Build the single-module deployment export specification.
+    def preprocess_batch(
+        self, batch: MultiTaskGTBatch, device: torch.device
+    ) -> MultiTaskBatchInputs:
+        """Move a collated batch to ``device`` and apply runtime preprocessing.
 
-        :meth:`forward` consumes a :class:`MultiTaskBatchInputs` and returns a
-        :class:`MultiTaskOutputs`, neither of which the ONNX exporter can trace, so
-        there is no generic signature-based default. Models that support deployment
-        must override this hook and flatten the batch into the tensor arguments of
-        the exported graph.
-
-        Args:
-            multi_task_batch_inputs: Example preprocessed batch used for export.
-
-        Returns:
-            Export specification for deployment.
-        """
-        raise NotImplementedError("Model must implement build_export_spec()")
-
-    def build_export_specs(
-        self, multi_task_batch_inputs: MultiTaskBatchInputs
-    ) -> dict[str, ExportSpec]:
-        """Build per-module deployment export specifications.
-
-        The default implementation wraps :meth:`build_export_spec` as a single
-        ``end_to_end`` module. Models with separate exportable sub-graphs
-        override this to return one spec per architectural component.
+        The single spelling of "device transfer + :meth:`on_after_batch_transfer`" used
+        outside the Lightning loop: deployment export/verification/evaluation and
+        quantization calibration all preprocess through here, so every consumer feeds
+        the model exactly the tensors the trainer would.
 
         Args:
-            multi_task_batch_inputs: Example preprocessed batch used for export.
+            batch: Collated batch from a dataloader.
+            device: Device the preprocessing (e.g. voxelization) runs on.
 
         Returns:
-            Ordered mapping of module name to export specification.
+            Preprocessed model inputs.
         """
-        return {"end_to_end": self.build_export_spec(multi_task_batch_inputs)}
+        return self.on_after_batch_transfer(batch.to_device(device), 0)
+
+    def build_stages(self) -> Sequence[Any]:
+        """Declare the model's inference stage graph for deployment.
+
+        The stage graph is the *one* declaration deployment derives everything from:
+        ONNX export units, artifact names, backend inference, verification, and
+        evaluation (see :mod:`autoware_ml.deployment.stages`). Exportable stages
+        (:class:`~autoware_ml.deployment.stages.GraphStage`) become one ONNX/TensorRT
+        artifact each; the rest (:class:`~autoware_ml.deployment.stages.TorchStage`)
+        always run in PyTorch on every backend. :meth:`forward` stays hand-written; a
+        parity test pins it to the PyTorch run of these stages.
+
+        Models that support deployment override this.
+
+        Returns:
+            Ordered stages, ending with the ``GraphStage`` whose outputs feed
+            :meth:`assemble_outputs`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deployment: build_stages() is not implemented."
+        )
+
+    def assemble_outputs(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskOutputs:
+        """Wrap the final stage's named output tensors into the model's typed outputs.
+
+        Deployment runs the stage graph on a backend and gets back the final
+        ``GraphStage``'s tensors keyed by dataclass *field* name (the stage declares the
+        ONNX-name -> field mapping). This hook rebuilds the :class:`MultiTaskOutputs`
+        that :meth:`decode_outputs` / :meth:`build_eval_output` consume.
+
+        Args:
+            outputs: Field name -> tensor, as declared by the final stage.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deployment: assemble_outputs() is not implemented."
+        )

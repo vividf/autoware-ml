@@ -338,7 +338,7 @@ class TestCliCommands:
             extra_args=[],
             hydra_overrides=["+weights=[model.ckpt]"],
             checkpoints=["model.ckpt"],
-            config_prefix=cli.TASK_CONFIG_PREFIX,
+            config_prefix=cli.EXPERIMENT_CONFIG_PREFIX,
         )
 
     def test_deploy_runs_with_multiple_weights(self) -> None:
@@ -366,7 +366,67 @@ class TestCliCommands:
             extra_args=[],
             hydra_overrides=["+weights=[seg.ckpt,det.ckpt]"],
             checkpoints=["seg.ckpt", "det.ckpt"],
-            config_prefix=cli.TASK_CONFIG_PREFIX,
+            config_prefix=cli.EXPERIMENT_CONFIG_PREFIX,
+        )
+
+    def test_deploy_rejects_tasks_family(self) -> None:
+        result = self.runner.invoke(
+            app,
+            ["deploy", "--config-name", SAMPLE_CONFIG_PATH, "--weights", "model.ckpt"],
+        )
+        assert result.exit_code != 0
+        assert "not available for tasks/" in result.output
+
+    def test_quantize_dispatches_to_experiments_entrypoint(self) -> None:
+        config_name = "experiments/detection3d/centerpoint/some_int8"
+        with patch("autoware_ml.cli.cli.run_lazy_script") as run_lazy_script_mock:
+            result = self.runner.invoke(
+                app, ["quantize", "--config-name", config_name, "--weights", "fp.ckpt"]
+            )
+
+        assert result.exit_code == 0
+        run_lazy_script_mock.assert_called_once_with(
+            cli.CLI_RUNTIME_MODULE,
+            "run_hydra_entrypoint",
+            entrypoint_module=cli.QUANTIZE_ENTRYPOINT_MODULE,
+            config_name=config_name,
+            stage="quantize",
+            extra_args=[],
+            hydra_overrides=["+weights=[fp.ckpt]"],
+            checkpoints=["fp.ckpt"],
+            config_prefix=cli.EXPERIMENT_CONFIG_PREFIX,
+        )
+
+    def test_train_dispatches_experiments_prefix_to_experiment_entrypoint(self) -> None:
+        config_name = "experiments/detection3d/centerpoint/base"
+        with patch("autoware_ml.cli.cli.run_lazy_script") as run_lazy_script_mock:
+            result = self.runner.invoke(app, ["train", "--config-name", config_name])
+
+        assert result.exit_code == 0
+        kwargs = run_lazy_script_mock.call_args.kwargs
+        assert kwargs["entrypoint_module"] == cli.EXPERIMENT_TRAIN_ENTRYPOINT_MODULE
+        assert kwargs["config_prefix"] == cli.EXPERIMENT_CONFIG_PREFIX
+
+    def test_test_dispatches_experiments_prefix_to_experiment_entrypoint(self) -> None:
+        config_name = "experiments/detection3d/centerpoint/base"
+        with patch("autoware_ml.cli.cli.run_lazy_script") as run_lazy_script_mock:
+            result = self.runner.invoke(
+                app, ["test", "--config-name", config_name, "--weights", "best.ckpt"]
+            )
+
+        assert result.exit_code == 0
+        kwargs = run_lazy_script_mock.call_args.kwargs
+        assert kwargs["entrypoint_module"] == cli.EXPERIMENT_TEST_ENTRYPOINT_MODULE
+        assert kwargs["config_prefix"] == cli.EXPERIMENT_CONFIG_PREFIX
+
+    def test_bare_config_name_defaults_to_tasks_for_train(self) -> None:
+        assert cli.resolve_config_prefix(SAMPLE_CONFIG_NAME, cli.TASK_CONFIG_PREFIX) == "tasks"
+        assert (
+            cli.resolve_config_prefix(SAMPLE_CONFIG_PATH, cli.EXPERIMENT_CONFIG_PREFIX) == "tasks"
+        )
+        assert (
+            cli.resolve_config_prefix("experiments/detection3d/x", cli.TASK_CONFIG_PREFIX)
+            == "experiments"
         )
 
     def test_test_requires_weights(self) -> None:

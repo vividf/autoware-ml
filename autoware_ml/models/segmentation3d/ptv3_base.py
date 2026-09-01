@@ -522,6 +522,7 @@ def build_ptv3_export_context(
     )
 
 
+# TODO(vividf): legacy ExportSpec builders — migrate the PTv3 family to MultiTaskBaseModel.build_stages() (stage-graph export).
 @dataclass(frozen=True)
 class MonolithicExportInputs:
     """Encoder-side inputs shared by every single-graph PTv3 export."""

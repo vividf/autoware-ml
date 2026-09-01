@@ -64,10 +64,10 @@ trainer:
 
 callbacks:
   model_checkpoint:
-    monitor: val/det3d/mAP
+    monitor: val/pytorch/det3d/mAP
     mode: max
   early_stopping:
-    monitor: val/det3d/mAP
+    monitor: val/pytorch/det3d/mAP
     patience: 20
     mode: max
 
