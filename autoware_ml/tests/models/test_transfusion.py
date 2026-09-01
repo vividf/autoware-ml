@@ -488,6 +488,51 @@ def test_transfusion_bbox_loss_normalizes_by_positive_count() -> None:
     assert torch.allclose(losses["layer_-1_loss_bbox"], expected)
 
 
+def test_transfusion_bbox_loss_masks_unknown_velocity_targets() -> None:
+    """Untracked objects carry non-finite GT velocity; those channels must leave the loss.
+
+    Same convention as CenterHead.loss(): masking alone is not enough because
+    ``nan * 0`` stays ``nan``, so the targets are zeroed as well.
+    """
+
+    class OnePositiveAssigner:
+        def assign(self, bboxes, gt_bboxes, gt_labels, cls_pred, point_cloud_range):
+            del bboxes, gt_bboxes, gt_labels, cls_pred, point_cloud_range
+            return AssignResult(
+                num_gts=1,
+                gt_inds=torch.tensor([1, 0], dtype=torch.long),
+                max_overlaps=torch.tensor([1.0, 0.0], dtype=torch.float32),
+                labels=torch.tensor([0, -1], dtype=torch.long),
+            )
+
+    head = _build_head(assigner=OnePositiveAssigner())
+    outputs = {
+        "heatmap": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "dense_heatmap": torch.zeros((1, 2, 4, 4), dtype=torch.float32),
+        "center": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "height": torch.zeros((1, 1, 2), dtype=torch.float32),
+        "dim": torch.zeros((1, 3, 2), dtype=torch.float32),
+        "rot": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "vel": torch.zeros((1, 2, 2), dtype=torch.float32),
+    }
+    unknown_velocity_box = torch.tensor(
+        [[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, float("nan"), float("nan")]], dtype=torch.float32
+    )
+    gt_labels = [torch.tensor([0], dtype=torch.long)]
+
+    losses = head.loss(outputs, [unknown_velocity_box], gt_labels)
+
+    # Only the eight geometry channels contribute; predictions are zeros, so the loss
+    # is the weighted absolute encoded target over those channels.
+    encoded_target = head.bbox_coder.encode(unknown_velocity_box)[0]
+    expected = (
+        encoded_target[:8].abs() * torch.tensor(head.code_weights[:8])
+    ).sum() * head.loss_bbox_weight
+    assert torch.isfinite(losses["layer_-1_loss_bbox"])
+    assert torch.isfinite(losses["loss"])
+    assert torch.allclose(losses["layer_-1_loss_bbox"], expected)
+
+
 def _heatmap_for_box(
     head: TransFusionHead, length: float, width: float, yaw: float
 ) -> torch.Tensor:

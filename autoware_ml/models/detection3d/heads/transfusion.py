@@ -923,8 +923,22 @@ class TransFusionHead(nn.Module):
                 if pos_mask.any():
                     pos_gt_inds = assign_result.gt_inds[pos_mask] - 1
                     labels[pos_mask] = gt_labels_tensor[pos_gt_inds]
-                    bbox_targets[pos_mask] = self.bbox_coder.encode(gt_boxes_tensor[pos_gt_inds])
-                    bbox_weights[pos_mask] = 1.0
+                    encoded = self.bbox_coder.encode(gt_boxes_tensor[pos_gt_inds])
+                    weights = encoded.new_ones(encoded.shape)
+                    # Only the velocity channels of a valid box are allowed to be non-finite: they
+                    # are unknown for objects the annotation pipeline could not track, so they are
+                    # dropped from the loss and zeroed out, because nan/inf * 0 stays nan. Same
+                    # convention as CenterHead.loss(). A non-finite target on any other channel is
+                    # corrupt ground truth and is left to surface as a non-finite loss.
+                    if self.bbox_coder.code_size == 10:
+                        num_geometry_channels = self.bbox_coder.code_size - 2
+                        velocity_finite = torch.isfinite(encoded[:, num_geometry_channels:])
+                        encoded[:, num_geometry_channels:] = torch.where(
+                            velocity_finite, encoded[:, num_geometry_channels:], 0.0
+                        )
+                        weights[:, num_geometry_channels:] = velocity_finite.to(weights.dtype)
+                    bbox_targets[pos_mask] = encoded
+                    bbox_weights[pos_mask] = weights
                     num_pos += int(pos_mask.sum().item())
                     if assign_result.max_overlaps is not None:
                         matched_ious += float(assign_result.max_overlaps[pos_mask].sum().item())
