@@ -77,7 +77,7 @@ A model supports deployment and quantization by implementing three methods on
 | Hook | Returns | Used by |
 |---|---|---|
 | `build_stages()` | ordered `Stage`s (`GraphStage` = one ONNX/TRT artifact, `TorchStage` = glue that always runs in PyTorch) | export (trace inputs, artifact names, I/O names), pipelines, verification, evaluation, latency breakdown |
-| `assemble_outputs(fields)` | the model's typed outputs from the final stage's tensors, keyed by field | evaluation (decode + metrics on any backend) |
+| `assemble_predictions(fields)` | predictions from the final stage's tensors, keyed as the stage declares | evaluation (metrics on any backend). Default composes `assemble_outputs` + `decode_outputs`, so a model whose graph emits the head's raw maps implements only `assemble_outputs` |
 | `build_quantization_plan(config)` | the model's `QuantizationPlan` | quantize (PTQ / QAT) and the checkpoint loader |
 
 `forward()` stays hand-written for training. The stage graph is what deploys;
@@ -101,7 +101,7 @@ CenterPoint:  pillar_decorate (torch) -> pts_voxel_encoder (graph) -> scatter (t
   runner; glue stages run in PyTorch on every backend. Mixing is therefore visible
   data (`exportable`), not code hidden in a per-model pipeline.
 - Verification compares the final stage's raw outputs; evaluation reassembles them
-  via `assemble_outputs` and scores with the model's own metric suites.
+  via `assemble_predictions` and scores with the model's own metric suites.
 - Export folds BatchNorm into the preceding conv/linear on a copy (an inference
   identity): deployed graphs never carry a BatchNormalization node, so the FP ONNX
   weights are BN-fused relative to the checkpoint — the same layout the quantized

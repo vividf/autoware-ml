@@ -175,13 +175,23 @@ autoware-ml deploy --config-name experiments/<...> --weights <ckpt> \
 
 ## Adding Deployment to a Model
 
-Implement three hooks on your `MultiTaskBaseModel` subclass, in the model's own
+Implement these hooks on your `MultiTaskBaseModel` subclass, in the model's own
 directory (`models/<task>/main_modules/<model>/`):
 
 1. `build_stages()` — the stage graph (`stages.py`).
-2. `assemble_outputs(fields)` — rebuild the typed outputs from the final stage's
-   tensors, which the stage declares as `(onnx_name, field)` pairs.
-3. `build_quantization_plan(config)` — only if the model supports INT8
+2. Turn the final stage's tensors — which the stage declares as `(onnx_name, key)`
+   pairs — into predictions. Which hook depends on what the deployed graph emits:
+   - the head's raw output maps: implement `assemble_outputs(fields)` and the default
+     `assemble_predictions` decodes them with the model's own `decode_outputs`;
+   - detections, because the runtime ABI decodes in-graph: override
+     `assemble_predictions(fields)` instead. There is no head output to rebuild, so
+     `assemble_outputs` stays unimplemented. Reuse the head's post-processing rather
+     than restating it, so the deployed behaviour cannot drift from the model's
+     (see `TransFusionHead.decode_detections`).
+3. `build_eval_output_from_predictions(batch, predictions)` — pair predictions with
+   ground truth for the metric suites. Training, validation and deployment all score
+   through this one method.
+4. `build_quantization_plan(config)` — only if the model supports INT8
    (`quantization.py`).
 
 Nothing model-specific goes into `autoware_ml/deployment`, `autoware_ml/evaluation`,
