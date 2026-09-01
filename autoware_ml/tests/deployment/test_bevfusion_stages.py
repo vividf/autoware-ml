@@ -55,7 +55,9 @@ def test_declaration_is_valid_with_the_awml_split_abi() -> None:
     assert sparse.outputs == (LIDAR_BEV,) and dense.inputs == (LIDAR_BEV,)
     assert dense.outputs == ("bbox_pred", "score", "label_pred")
     assert sparse.torch_fallback_backends == (Backend.ONNX, Backend.TENSORRT)
-    assert sparse.external_onnx is True and dense.external_onnx is False
+    # Both graphs are exported by the framework; the sparse one needs the runtime's
+    # spconv plugin to execute, not a separate exporter.
+    assert sparse.external_onnx is False and dense.external_onnx is False
 
 
 def _fallback_test_stages() -> tuple:

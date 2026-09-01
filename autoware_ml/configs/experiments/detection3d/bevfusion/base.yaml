@@ -51,6 +51,16 @@ deploy:
   # split-deployment ABI: bevfusion_sparse (external libspconv ONNX; torch fallback
   # on onnx/tensorrt backends until its exporter lands) and bevfusion_dense.
   stages:
+    bevfusion_sparse:
+      onnx:
+        # The runtime voxelizes each frame independently, so the voxel count is a
+        # runtime property and must stay dynamic in the artifact.
+        dynamic_axes:
+          voxels: { 0: voxels_num }
+          coors: { 0: voxels_num }
+          num_points_per_voxel: { 0: voxels_num }
+      # The sparse stage's TensorRT profile also depends on the voxel budget and on
+      # the rulebook inputs the spconv plugin adds, so it is configured per variant.
     bevfusion_dense:
       onnx:
         # Single-sample static graph: lidar_bev in, packed detections out.

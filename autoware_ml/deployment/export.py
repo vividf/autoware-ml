@@ -38,6 +38,7 @@ from autoware_ml.deployment.onnx_export import (
     autocast_to_fp16,
     export_to_onnx,
     modify_onnx_graph,
+    onnx_custom_op_domains,
     onnx_has_qdq,
     should_modify_graph,
 )
@@ -134,11 +135,19 @@ def export_stages(
                 dynamic_axes=stage_cfg.onnx.dynamic_axes,
             )
             if deploy_cfg.onnx.precision is OnnxPrecision.FP16:
+                custom_domains = onnx_custom_op_domains(onnx_path)
                 if onnx_has_qdq(onnx_path):
                     logger.info(
                         "Stage %r carries Q/DQ nodes — precision comes from the quantized "
                         "checkpoint; skipping AutoCast.",
                         stage.name,
+                    )
+                elif custom_domains:
+                    logger.info(
+                        "Stage %r uses runtime plugin ops (%s) — AutoCast cannot type such a "
+                        "graph; exporting it as traced.",
+                        stage.name,
+                        ", ".join(custom_domains),
                     )
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})

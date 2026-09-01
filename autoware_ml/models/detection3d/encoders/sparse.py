@@ -32,6 +32,7 @@ import spconv.pytorch as spconv
 import torch
 import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential
+from spconv.pytorch.conv import SparseConvolution as SparseConvolutionBase
 from spconv.pytorch.modules import SparseModule
 
 from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
@@ -100,6 +101,33 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     return module
+
+
+def _fuse_sparse_convolution_bn(module: nn.Module) -> int:
+    """Fold every adjacent (sparse convolution, BatchNorm1d) pair on an export copy.
+
+    Inference-identity rewrite: the deployed sparse graph carries no
+    BatchNormalization node, the same invariant the dense stages hold, and the
+    fold has to happen before the export wrappers are built so the wrapper is
+    constructed with the bias the fold introduces.
+
+    Args:
+        module: Export copy of the encoder, already in eval mode.
+
+    Returns:
+        Number of fused pairs.
+    """
+    from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
+
+    fused = 0
+    for parent in list(module.modules()):
+        children = list(parent.named_children())
+        for (left_name, left), (right_name, right) in zip(children, children[1:]):
+            if isinstance(left, SparseConvolutionBase) and isinstance(right, nn.BatchNorm1d):
+                parent.add_module(left_name, fuse_spconv_bn_eval(left, right))
+                parent.add_module(right_name, nn.Identity())
+                fused += 1
+    return fused
 
 
 def _replace_sparse_convolutions(module: nn.Module) -> None:
@@ -294,14 +322,19 @@ class SparseEncoder(nn.Module):
         return dense.view(batch_size, channels * depth, height, width)
 
     def prepare_for_export(self) -> "SparseEncoder":
-        """Return an export-ready copy with sparse convolution wrappers.
+        """Return an export-ready copy with folded BN and sparse convolution wrappers.
 
         Returns:
-            Deep copy of the encoder with native spconv layers replaced by the
-            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`.
+            Deep copy of the encoder whose Conv-BN pairs are folded (inference
+            identity, so the exported graph is BatchNorm-free) and whose native
+            spconv layers are replaced by the deployment-aware wrappers from
+            :mod:`autoware_ml.ops.spconv`.
         """
-        encoder = deepcopy(self)
+        encoder = deepcopy(self).eval()
+        # Fold first: the fold gives each convolution a bias, which the wrapper
+        # below has to be constructed with.
+        _fuse_sparse_convolution_bn(encoder)
         _replace_sparse_convolutions(encoder)
-        # eval() last: the freshly constructed export wrappers start in train
+        # eval() again: the freshly constructed export wrappers start in train
         # mode and are inference-only.
         return encoder.eval()

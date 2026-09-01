@@ -22,15 +22,15 @@ Split form (the INT8 deployment line, mirroring AWML's
 Runtime ABI carried over from the AWML split artifacts:
 
 - ``bevfusion_sparse``: ``voxels`` / ``coors`` / ``num_points_per_voxel`` in,
-  ``lidar_bev`` out. The production INT8 ONNX is the libspconv format
-  (``GetIndicePairsImplicitGemm`` / ``ImplicitGemmInt8`` custom ops with per-layer
-  ``*_channel_scale`` / ``*_bias_scaled`` inputs) produced by a dedicated exporter —
-  NOT by ``torch.onnx.export`` — hence ``external_onnx=True``. ONNX Runtime cannot
-  execute spconv, hence ``torch_fallback_backends`` includes ``onnx``: the onnx
-  backend of verification/evaluation runs this stage in PyTorch. ``tensorrt`` is a
-  fallback too until the libspconv exporter lands (the TODO below) — the tensorrt
-  backend then measures torch-sparse + TRT-dense, which is also what the dense
-  INT8/FP16 milestones need to compare.
+  ``lidar_bev`` out. Exported through :meth:`SparseEncoder.prepare_for_export`,
+  which swaps the native spconv layers for the wrappers in
+  :mod:`autoware_ml.ops.spconv`; their symbolics emit the runtime's libspconv
+  ABI (``autoware::GetIndicePairsImplicitGemm`` / ``autoware::ImplicitGemm`` with
+  the rulebook tensors as graph inputs). Executing that graph needs
+  ``libautoware_tensorrt_plugins.so``: ONNX Runtime has no implementation at all,
+  and TensorRT only with the plugin loaded, so both backends fall back to PyTorch
+  for this stage today (see ``torch_fallback_backends``) and the tensorrt backend
+  effectively measures torch-sparse + TRT-dense.
 - ``bevfusion_dense``: ``lidar_bev`` in; ``bbox_pred`` / ``score`` / ``label_pred``
   out — the AWML dense graph DECODES in-graph (unlike CenterPoint's raw-map ABI),
   so the wrapper ends at the head's export decode.
@@ -48,8 +48,10 @@ Contract with the interface migration:
   verification (raw-output comparison) and trainer.test (pytorch forward) cover
   correctness.
 
-.. todo:: TODO(vividf): port the libspconv INT8 sparse exporter (AWML
-   ``projects/BEVFusion/deploy``) as the producer of ``bevfusion_sparse.onnx``.
+.. todo:: TODO(vividf): INT8 for the sparse stage needs the quantized libspconv ABI
+   (``ImplicitGemmInt8`` with per-layer ``*_channel_scale`` / ``*_bias_scaled``
+   inputs) plus its own plugin; the current quantization declaration deliberately
+   covers the dense graph only.
 """
 
 from __future__ import annotations
@@ -96,9 +98,16 @@ class BEVFusionSparseExportWrapper(nn.Module):
 
     def __init__(self, voxel_encoder: nn.Module, middle_encoder: nn.Module) -> None:
         super().__init__()
+        # Export-ready deep copy: native spconv layers swapped for the wrappers in
+        # autoware_ml.ops.spconv, whose symbolics emit the runtime's
+        # autoware::GetIndicePairsImplicitGemm / autoware::ImplicitGemm nodes.
         self.extractor = LidarBEVFeatureExtractor(
             pts_voxel_encoder=voxel_encoder,
-            pts_middle_encoder=middle_encoder,
+            pts_middle_encoder=(
+                middle_encoder.prepare_for_export()
+                if hasattr(middle_encoder, "prepare_for_export")
+                else middle_encoder
+            ),
             pts_backbone=None,
             pts_neck=None,
         )
@@ -180,11 +189,12 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             module=BEVFusionSparseExportWrapper(model.pts_voxel_encoder, model.pts_middle_encoder),
             inputs=(VOXELS, COORS, NUM_POINTS_PER_VOXEL),
             outputs=(LIDAR_BEV,),
-            # ONNX Runtime cannot execute spconv; TensorRT falls back too until the
-            # libspconv exporter (module TODO) produces a pluggable sparse engine.
+            # The exported graph carries autoware::GetIndicePairsImplicitGemm /
+            # autoware::ImplicitGemm custom ops. ONNX Runtime has no implementation for
+            # them at all; TensorRT needs libautoware_tensorrt_plugins.so, so it also
+            # falls back until that plugin ships in the image (pass it through
+            # deploy.tensorrt.plugin_libraries and drop tensorrt from this tuple).
             torch_fallback_backends=(Backend.ONNX, Backend.TENSORRT),
-            # The INT8 sparse ONNX (libspconv format) comes from a dedicated exporter.
-            external_onnx=True,
         ),
         GraphStage(
             DENSE_STAGE,

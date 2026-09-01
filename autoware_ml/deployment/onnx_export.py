@@ -308,6 +308,25 @@ def onnx_has_qdq(onnx_path: Path) -> bool:
     return any(node.op_type in ("QuantizeLinear", "DequantizeLinear") for node in model.graph.node)
 
 
+def onnx_custom_op_domains(onnx_path: Path) -> tuple[str, ...]:
+    """Non-standard operator domains used by the graph's nodes.
+
+    Nodes outside the default ONNX domain (and ``ai.onnx.*``) are runtime plugins —
+    ``autoware::ImplicitGemm`` and friends. AutoCast cannot process such a graph:
+    it infers types with TensorRT's ONNX parser, which rejects an op whose plugin
+    is not registered in the exporting process.
+    """
+    import onnx
+
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    domains = {
+        node.domain
+        for node in model.graph.node
+        if node.domain and not node.domain.startswith("ai.onnx")
+    }
+    return tuple(sorted(domains))
+
+
 def autocast_to_fp16(onnx_path: Path, sample_inputs: Mapping[str, Any]) -> None:
     """Convert an exported FP32 ONNX graph to mixed FP16 in place (ModelOpt AutoCast).
 
