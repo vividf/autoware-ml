@@ -93,13 +93,19 @@ RUN CONDA_OVERRIDE_CUDA=12.8 /opt/pixi/bin/pixi install --locked --environment d
 # project copy below does not invalidate them: the spconv/cumm C++ packages the plugin
 # links against, then the plugin itself into /opt/plugins. Both use the system toolchain —
 # cumm installs headers into /usr/local/include, which the pixi compilers do not search.
-COPY docker/tensorrt_plugins /workspace/docker/tensorrt_plugins
+# Two layers, so editing the plugin build does not rebuild the (much slower) spconv one.
+COPY docker/tensorrt_plugins/build_spconv_cpp.sh /workspace/docker/tensorrt_plugins/
 RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
       bash /workspace/docker/tensorrt_plugins/build_spconv_cpp.sh \
-      && PYTHON_BIN="$(/opt/pixi/bin/pixi run --environment dev which python)" \
-         bash /workspace/docker/tensorrt_plugins/build_plugin.sh \
-      && rm -rf /opt/spconv_cpp /tmp/autoware_trt_plugins_build /tmp/autoware_trt_plugins_src \
-                /tmp/tensorrt_oss_headers /var/lib/apt/lists/*; \
+      && rm -rf /opt/spconv_cpp /var/lib/apt/lists/*; \
+    fi
+
+COPY docker/tensorrt_plugins /workspace/docker/tensorrt_plugins
+RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
+      PYTHON_BIN="$(/opt/pixi/bin/pixi run --environment dev which python)" \
+        bash /workspace/docker/tensorrt_plugins/build_plugin.sh \
+      && rm -rf /tmp/autoware_trt_plugins_build /tmp/autoware_trt_plugins_src \
+                /tmp/tensorrt_oss_headers; \
     fi
 
 # Install the project itself in editable mode inside the environment

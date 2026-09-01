@@ -188,6 +188,14 @@ make -j"$(nproc)"
 mkdir -p "$INSTALL_DIR"
 cp -a "$BUILD_DIR/$SO_NAME" "$BUILD_DIR/libcuda_ops.so" "$INSTALL_DIR/"
 chmod 755 "$INSTALL_DIR/$SO_NAME"
-ldconfig 2>/dev/null || true
+# The plugin links libcuda_ops.so, which lands beside it, so the install directory has to
+# be on the loader's search path — otherwise dlopen fails on the dependency, not on the
+# plugin itself.
+if [ -w /etc ]; then
+    echo "$INSTALL_DIR" >/etc/ld.so.conf.d/autoware-tensorrt-plugins.conf
+    ldconfig
+else
+    log "WARNING: /etc is not writable; add ${INSTALL_DIR} to LD_LIBRARY_PATH yourself"
+fi
 log "Installed ${INSTALL_DIR}/${SO_NAME}"
 log "Point deploy.tensorrt.plugin_libraries at it to build engines for plugin graphs."
