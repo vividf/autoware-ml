@@ -47,12 +47,10 @@ deploy:
     # into the image (docker/tensorrt_plugins).
     plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   verification:
-    # Raw-output parity is not the right gate for PTv3: the PyTorch reference interleaves
-    # the four serialization orders it was trained with, shuffled per forward
-    # (encoder.shuffle_orders, torch.randperm, not gated by training mode), while the
-    # exported graph fixes the two of EXPORT_ORDER. The two therefore disagree by
-    # construction, on tensors that are argmax labels and probabilities. Per-backend mIoU
-    # (deploy.evaluation) is the gate that means something here.
+    # PTv3SegmentationModel.verification_caveat declares why raw-output parity is not a
+    # meaningful gate here (shuffle_orders makes the PyTorch reference stochastic); even
+    # when enabled, the gate skips loudly. Per-backend mIoU (deploy.evaluation) is the
+    # gate that means something.
     enabled: false
     num_verify_batches: 1
     scenarios:

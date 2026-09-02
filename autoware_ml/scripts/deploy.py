@@ -121,6 +121,15 @@ def verify(
     if not cfg.enabled:
         logger.info("Verification disabled; skipping.")
         return
+    caveat = getattr(model, "verification_caveat", None)
+    if caveat:
+        logger.warning(
+            "Verification SKIPPED: %s declares its raw graph outputs incomparable across "
+            "backends — %s Per-backend metrics (deploy.evaluation) are the meaningful gate.",
+            type(model).__name__,
+            caveat,
+        )
+        return
 
     batches = []
     for index, batch in enumerate(datamodule.predict_dataloader()):

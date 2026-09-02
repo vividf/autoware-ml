@@ -73,6 +73,15 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
     All parameters are explicitly typed for IDE support and type checking.
     """
 
+    #: Why this model's raw graph outputs cannot be compared across backends, or
+    #: ``None`` when they can. Cross-backend verification (deploy.verification) compares
+    #: the final raw tensors element-wise; a model for which that comparison is invalid
+    #: *by construction* — a PyTorch reference that is stochastic at inference, decoded
+    #: outputs whose proposal ties reorder — declares the reason here, and the gate
+    #: skips loudly instead of the reason living in a config comment. Per-backend
+    #: ground-truth metrics (deploy.evaluation) are the gate that remains meaningful.
+    verification_caveat: str | None = None
+
     def __init__(
         self,
         data_preprocessor: DataPreprocessor,

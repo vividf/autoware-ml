@@ -106,6 +106,14 @@ def outputs_to_head_dict(outputs: TransFusionHeadOutputs) -> dict[str, torch.Ten
 class BEVFusionLidarDetectionModel(MultiTaskBaseModel):
     """Compose a lidar-only BEVFusion detector from the parity-verified modules."""
 
+    verification_caveat = (
+        "the dense graph packs its top-500 proposals, and the zero-padded heatmap "
+        "borders produce mass score ties, so backends legitimately select different "
+        "near-zero-score proposals — positional raw-output comparison is meaningless "
+        "(measured 2026-09-01: high-score proposals align to 0.038 while the "
+        "positional bbox_pred diff is 159)."
+    )
+
     def __init__(
         self,
         data_preprocessor: DataPreprocessor,

@@ -70,6 +70,13 @@ class PTv3SegmentationModel(MultiTaskBaseModel):
     #: rather than configurable because the trained weights are tied to this pairing.
     EXPORT_ORDER = ("z", "z-trans")
 
+    verification_caveat = (
+        "the PyTorch reference interleaves the four trained serialization orders, "
+        "shuffled per forward (encoder.shuffle_orders uses torch.randperm, not gated by "
+        "training mode), while the exported graph fixes the two of EXPORT_ORDER — the "
+        "raw outputs differ by construction."
+    )
+
     def __init__(
         self,
         data_preprocessor: DataPreprocessor,
