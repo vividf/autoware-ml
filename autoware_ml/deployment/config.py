@@ -135,22 +135,38 @@ class TensorRTConfig:
 class StageOnnxConfig:
     """Per-stage ONNX options (``deploy.stages.<name>.onnx``).
 
-    Exactly the shape declarations; input/output *names* are never configured — they
-    come from the stage declaration.
+    Shape declarations plus an optional per-stage precision; input/output *names* are
+    never configured — they come from the stage declaration.
     """
 
     #: Legacy exporter (``dynamo=false``): ``{tensor_name: {dim_index: dim_name}}``.
     dynamic_axes: Mapping[str, Mapping[int, str]] | None = None
     #: Dynamo exporter: ``{input_name: {dim_index: dim_name | {name, min, max}}}``.
     dynamic_shapes: Mapping[str, Mapping[int, Any]] | None = None
+    #: Overrides ``deploy.onnx.precision`` for this stage only — for a pipeline whose
+    #: stages need different precisions (one numerically fragile head kept FP32, say).
+    #: ``None`` inherits the global setting.
+    precision: OnnxPrecision | None = None
 
-    KNOWN_KEYS = frozenset({"dynamic_axes", "dynamic_shapes"})
+    KNOWN_KEYS = frozenset({"dynamic_axes", "dynamic_shapes", "precision"})
 
     @classmethod
     def from_dict(cls, raw: Any, stage: str) -> StageOnnxConfig:
         raw = _mapping(raw, f"deploy.stages.{stage}.onnx")
         _reject_unknown(raw, cls.KNOWN_KEYS, f"deploy.stages.{stage}.onnx")
-        return cls(dynamic_axes=raw.get("dynamic_axes"), dynamic_shapes=raw.get("dynamic_shapes"))
+        raw_precision = raw.get("precision")
+        try:
+            precision = OnnxPrecision(str(raw_precision).lower()) if raw_precision else None
+        except ValueError:
+            raise ValueError(
+                f"deploy.stages.{stage}.onnx.precision={raw_precision!r} — valid values: "
+                f"{[p.value for p in OnnxPrecision]}."
+            ) from None
+        return cls(
+            dynamic_axes=raw.get("dynamic_axes"),
+            dynamic_shapes=raw.get("dynamic_shapes"),
+            precision=precision,
+        )
 
 
 @dataclass(frozen=True)

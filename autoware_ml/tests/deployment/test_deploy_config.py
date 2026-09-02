@@ -116,3 +116,34 @@ class TestDeployConfig:
             cfg.check_stage_names(["pts_voxel_encoder", "pts_backbone_neck_head"])
         cfg = DeployConfig.from_dict(_RAW)
         cfg.check_stage_names(["pts_voxel_encoder"])
+
+
+def test_stage_onnx_precision_overrides_the_global_setting() -> None:
+    """A stage may pin its own precision; unset stages inherit ``deploy.onnx.precision``."""
+    from autoware_ml.deployment.config import DeployConfig, OnnxPrecision
+
+    cfg = DeployConfig.from_dict(
+        {
+            "onnx": {"enabled": True, "precision": "fp16"},
+            "tensorrt": {"enabled": False},
+            "stages": {"fragile_head": {"onnx": {"precision": "fp32"}}},
+        }
+    )
+    assert cfg.onnx.precision is OnnxPrecision.FP16
+    assert cfg.stage("fragile_head").onnx.precision is OnnxPrecision.FP32
+    assert cfg.stage("other").onnx.precision is None
+
+
+def test_stage_onnx_precision_rejects_unknown_values() -> None:
+    import pytest
+
+    from autoware_ml.deployment.config import DeployConfig
+
+    with pytest.raises(ValueError, match="fragile_head.onnx.precision"):
+        DeployConfig.from_dict(
+            {
+                "onnx": {"enabled": True},
+                "tensorrt": {"enabled": False},
+                "stages": {"fragile_head": {"onnx": {"precision": "fp42"}}},
+            }
+        )

@@ -85,6 +85,9 @@ deploy:
   stages:
     pts_voxel_encoder:
       onnx:
+        # Optional per-stage override of deploy.onnx.precision (fp32 | fp16) — for a
+        # pipeline whose stages need different precisions; unset inherits the global.
+        # precision: fp32
         dynamic_axes:
           input_features: { 0: num_voxels, 1: num_max_points }
           pillar_features: { 0: num_voxels }

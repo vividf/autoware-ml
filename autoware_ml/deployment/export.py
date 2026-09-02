@@ -129,7 +129,8 @@ def export_stages(
                 # intrinsic axes apply (a point graph has no static point count).
                 dynamic_axes=stage_cfg.onnx.dynamic_axes or (stage.onnx_dynamic_axes or None),
             )
-            if deploy_cfg.onnx.precision is OnnxPrecision.FP16:
+            stage_precision = stage_cfg.onnx.precision or deploy_cfg.onnx.precision
+            if stage_precision is OnnxPrecision.FP16:
                 custom_domains = onnx_custom_op_domains(onnx_path)
                 has_qdq = onnx_has_qdq(onnx_path)
                 if custom_domains:

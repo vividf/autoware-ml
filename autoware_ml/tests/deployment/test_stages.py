@@ -259,3 +259,53 @@ def test_graph_stage_declares_its_own_dynamic_axes_and_the_config_overrides_them
     assert run({}) == declared
     configured = {"x": {0: "batch"}}
     assert run({"points": {"onnx": {"dynamic_axes": configured}}}) == configured
+
+
+def test_export_honors_the_per_stage_precision_override(tmp_path, monkeypatch) -> None:
+    """`deploy.stages.<name>.onnx.precision` wins over the global fp16 setting."""
+    from omegaconf import OmegaConf
+    import torch
+    from torch import nn
+
+    from autoware_ml.deployment import export as export_module
+    from autoware_ml.deployment.config import DeployConfig
+    from autoware_ml.deployment.stages import GraphStage, TorchStage
+
+    monkeypatch.setattr(
+        export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
+    )
+    converted: list[str] = []
+    monkeypatch.setattr(
+        export_module, "autocast_to_fp16", lambda path, inputs: converted.append(path.stem)
+    )
+    monkeypatch.setattr(export_module, "onnx_has_qdq", lambda path: False)
+    monkeypatch.setattr(export_module, "onnx_custom_op_domains", lambda path: ())
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    stages = (
+        TorchStage("seed", run=seed),
+        GraphStage("kept_fp32", module=nn.Identity(), inputs=("x",), outputs=("mid",)),
+        GraphStage(
+            "goes_fp16",
+            module=nn.Identity(),
+            inputs=("mid",),
+            outputs=("y",),
+            output_fields=(("y", "y"),),
+        ),
+    )
+    deploy_cfg = DeployConfig.from_dict(
+        OmegaConf.create(
+            {
+                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17, "precision": "fp16"},
+                "tensorrt": {"enabled": False},
+                "stages": {"kept_fp32": {"onnx": {"precision": "fp32"}}},
+            }
+        )
+    )
+    export_module.export_stages(
+        stages, batch_inputs=None, deploy_cfg=deploy_cfg, output_dir=tmp_path,
+        device=torch.device("cpu"),
+    )
+    assert converted == ["goes_fp16"]
