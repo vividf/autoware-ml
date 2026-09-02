@@ -659,3 +659,28 @@ def test_transfusion_coder_rejects_mismatched_threshold_length() -> None:
             torch.rand(1, 2, 3),
             filter_predictions=True,
         )
+
+
+def test_fuse_export_attention_emits_fusion_pattern_without_bf16(tmp_path: Path) -> None:
+    """fuse_export_attention drops the max-subtraction (the Myelin MHA-fusion blocker)
+    while keeping the trace dtype; bf16 stays opt-in via use_bf16_cross_attention."""
+    head = _build_head(fuse_export_attention=True).prepare_for_export()
+    cross = head.decoder[0].cross_attn
+    assert isinstance(cross, ExportableMultiheadAttention)
+    assert cross.fuse_attention and not cross.use_bf16
+    assert head.decoder[0].self_attn.fuse_attention
+    # No fp16-unfriendly stabilization in the exported attention graph.
+    model = _export_attention(cross, tmp_path / "fused_attention.onnx")
+    ops = {node.op_type for node in model.graph.node}
+    assert "ReduceMax" not in ops and "Sub" not in ops
+    # Unlike the bf16 variant, the trace stays in the input dtype (no bf16 casts).
+    assert not any(
+        attr.i == onnx.TensorProto.BFLOAT16
+        for node in model.graph.node
+        if node.op_type == "Cast"
+        for attr in node.attribute
+        if attr.name == "to"
+    )
+    # Defaults unchanged: explicit attention keeps the stabilized pattern.
+    default_head = _build_head().prepare_for_export()
+    assert not default_head.decoder[0].cross_attn.fuse_attention

@@ -65,6 +65,11 @@ model:
   bbox_head:
     num_proposals: 500
     num_classes: 7
+    # Export emits fusion-ready attention (no max-subtraction before softmax) so
+    # TensorRT's Myelin fuses the decoder attention into one MHA kernel — the max-sub
+    # pattern blocks the fusion (measured 0.68 vs 0.25 ms). Same graph shape as the AWML
+    # 2.8 deployment (plain matmul-softmax-matmul); training is untouched (export copy).
+    fuse_export_attention: true
     dense_heatmap_pooling_classes: [car, truck, bus, barrier]
     # Reference-trained head geometry (mmdet3d SeparateHead head_conv=64, PyTorch
     # default BN eps/momentum) — required to load the parity-verified checkpoint.

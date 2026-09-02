@@ -372,6 +372,7 @@ class TransFusionHead(nn.Module):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         shared_conv_norm_act: bool = True,
+        fuse_export_attention: bool = False,
         use_bf16_cross_attention: bool = False,
     ) -> None:
         """Initialize the TransFusion detection head.
@@ -433,6 +434,11 @@ class TransFusionHead(nn.Module):
                 TODO(vividf): remove this option (and the ``False`` branch below)
                 once BEVFusion is retrained natively and the AWML reference
                 checkpoint is no longer needed for chain validation.
+            fuse_export_attention: Whether export emits fusion-ready attention (no
+                max-subtraction before softmax) in the trace dtype. The max-sub pattern
+                blocks TensorRT's Myelin MHA fusion (measured: fused 0.25 ms vs unfused
+                0.68 ms on the j6gen2 dense graph); the fused kernel handles softmax
+                numerics internally. Training is untouched (export copy only).
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
         """
@@ -461,6 +467,7 @@ class TransFusionHead(nn.Module):
         self.loss_heatmap_weight = loss_heatmap_weight
         self.heatmap_init_bias = heatmap_init_bias
         self.use_velocity = use_velocity
+        self.fuse_export_attention = fuse_export_attention
         self.use_bf16_cross_attention = use_bf16_cross_attention
         self.required_onnx_precision = "fp16" if use_bf16_cross_attention else None
         if nms_type not in {None, "circle"}:
@@ -1076,16 +1083,17 @@ class TransFusionHead(nn.Module):
         head = deepcopy(self).eval()
         if not hasattr(head, "decoder"):
             return head
+        fuse = head.fuse_export_attention or head.use_bf16_cross_attention
         for decoder_layer in head.decoder:
             if isinstance(decoder_layer.self_attn, nn.MultiheadAttention):
                 decoder_layer.self_attn = ExportableMultiheadAttention(
                     decoder_layer.self_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                 )
             if isinstance(decoder_layer.cross_attn, nn.MultiheadAttention):
                 decoder_layer.cross_attn = ExportableMultiheadAttention(
                     decoder_layer.cross_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                     use_bf16=head.use_bf16_cross_attention,
                 )
         return head
