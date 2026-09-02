@@ -49,13 +49,14 @@ _INPUT_DESC_ARGS: Mapping[Precision, dict[str, Any]] = {
 }
 
 #: Per-output-channel weight descriptor for Conv2d. INT8 keeps the modelopt preset the
-#: calibrated production checkpoints were built with; FP8 has no preset and is spelled
-#: as args (same per-output-channel axis).
+#: calibrated production checkpoints were built with. FP8 weights are per-tensor:
+#: modelopt's E4M3 ONNX export requires a scalar amax (``TensorQuantizer.
+#: _check_onnx_readiness`` asserts on per-channel), matching its ``FP8_DEFAULT_CFG``.
 _CONV2D_WEIGHT_PRESET: Mapping[Precision, str] = {
     Precision.INT8: "QUANT_DESC_8BIT_CONV2D_WEIGHT_PER_CHANNEL",
 }
 _CONV2D_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
-    Precision.FP8: dict(num_bits=(4, 3), axis=(0,)),
+    Precision.FP8: dict(num_bits=(4, 3)),
 }
 
 #: Per-tensor weight descriptor for ConvTranspose2d. TensorRT INT8 transposed conv is
@@ -68,10 +69,11 @@ _CONV_TRANSPOSE2D_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
     Precision.FP8: dict(num_bits=(4, 3)),
 }
 
-#: Per-output-channel (per-row) weight descriptor for Linear.
+#: Weight descriptor for Linear: INT8 per-output-channel (per-row); FP8 per-tensor
+#: (modelopt's E4M3 ONNX export requires scalar amax — see the Conv2d note).
 _LINEAR_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
     Precision.INT8: dict(num_bits=8, axis=(0,)),
-    Precision.FP8: dict(num_bits=(4, 3), axis=(0,)),
+    Precision.FP8: dict(num_bits=(4, 3)),
 }
 
 

@@ -120,6 +120,13 @@ def test_onnx_has_qdq_detects_quantize_nodes(tmp_path) -> None:
     # initializers must be attached for a valid graph; has_qdq only reads node types.
     assert onnx_has_qdq(qdq) is True
 
+    # FP8 exports as modelopt's TRT-domain custom ops, not standard QuantizeLinear.
+    fp8_nodes = [
+        onnx.helper.make_node("TRT_FP8QuantizeLinear", ["x", "s"], ["q"], domain="trt"),
+        onnx.helper.make_node("TRT_FP8DequantizeLinear", ["q", "s"], ["y"], domain="trt"),
+    ]
+    assert onnx_has_qdq(graph(fp8_nodes, "fp8_qdq")) is True
+
 
 def test_export_to_onnx_writes_named_graph(tmp_path) -> None:
     import onnx
@@ -237,9 +244,7 @@ def test_cast_graph_to_fp16_rewires_internal_consumers_of_kept_fp32_outputs(tmp_
 
     converted = onnx.load(str(path))
     boundary_casts = [
-        node
-        for node in converted.graph.node
-        if node.op_type == "Cast" and node.output[0] == "feat"
+        node for node in converted.graph.node if node.op_type == "Cast" and node.output[0] == "feat"
     ]
     assert len(boundary_casts) == 1, "the kept-FP32 output should come from one boundary cast"
     mul = next(node for node in converted.graph.node if node.op_type == "Mul")
@@ -317,9 +322,11 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     # Q/DQ still read the scale directly (no Cast between the constant and the island).
     for name in ("q", "dq", "wq", "wdq"):
         assert nodes[name].input[1] == "s"
+
     # The island's boundaries are single casts: no fp16 round-trip pairs anywhere.
     def cast_to(node):
         return next((a.i for a in node.attribute if a.name == "to"), None)
+
     producer = {o: n for n in converted.graph.node for o in n.output}
     for node in converted.graph.node:
         if node.op_type == "Cast" and cast_to(node) == TensorProto.FLOAT:
@@ -330,6 +337,83 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
                 and cast_to(upstream) == TensorProto.FLOAT16
             ), f"fp16 round trip at {node.name}"
     onnx.checker.check_model(converted)
+
+
+def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) -> None:
+    """FP8 quantization islands survive the FP16 cast like INT8 ones do.
+
+    modelopt exports FP8 as TRT-domain custom ops (``TRT_FP8QuantizeLinear`` /
+    ``TRT_FP8DequantizeLinear``) with the scale coming from a Constant *node*, not an
+    initializer — the graph shape its TorchScript symbolic actually emits. The island
+    pass must recognize these spellings, or the whole-graph cast rounds the FP8 scales
+    through fp16 (the INT8 version of that mistake measured mIoU 0.545 -> 0.067).
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    scale_value = np.float32(1e-4)  # not representable in fp16; a round trip shows
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
+    )
+    gain = helper.make_tensor("g", TensorProto.FLOAT, [4], np.ones(4, dtype=np.float32))
+    scale_tensor = helper.make_tensor("s_value", TensorProto.FLOAT, [], [scale_value])
+    graph = helper.make_graph(
+        [
+            # A plugin op routes the graph into the whole-graph cast in the first place.
+            helper.make_node("PluginOp", ["x", "g"], ["mid"], domain="autoware", name="plugin"),
+            helper.make_node("Constant", [], ["s"], name="s_const", value=scale_tensor),
+            helper.make_node("TRT_FP8QuantizeLinear", ["mid", "s"], ["q"], domain="trt", name="q"),
+            helper.make_node(
+                "TRT_FP8DequantizeLinear", ["q", "s"], ["dq"], domain="trt", name="dq"
+            ),
+            helper.make_node("TRT_FP8QuantizeLinear", ["w", "s"], ["wq"], domain="trt", name="wq"),
+            helper.make_node(
+                "TRT_FP8DequantizeLinear", ["wq", "s"], ["wdq"], domain="trt", name="wdq"
+            ),
+            helper.make_node("MatMul", ["dq", "wdq"], ["mm_out"], name="matmul"),
+            helper.make_node("Mul", ["mm_out", "g"], ["y"], name="mul"),
+        ],
+        "fp8_island_graph",
+        [x],
+        [y],
+        [weight, gain],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("", 17),
+            helper.make_opsetid("autoware", 1),
+            helper.make_opsetid("trt", 1),
+        ],
+    )
+    path = tmp_path / "fp8_island_graph.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    nodes = {n.name: n for n in converted.graph.node}
+    # The scale constant keeps its exact FP32 value.
+    scale_attr = next(a for a in nodes["s_const"].attribute if a.name == "value")
+    assert scale_attr.t.data_type == TensorProto.FLOAT
+    assert numpy_helper.to_array(scale_attr.t) == scale_value
+    # The quantized weight (feeding Q) stays FP32; outside the island conversion happened.
+    inits = {i.name: i for i in converted.graph.initializer}
+    assert inits["w"].data_type == TensorProto.FLOAT
+    assert inits["g"].data_type == TensorProto.FLOAT16
+    # Island edges are direct (the converter renames tensors; what matters is that no
+    # node sits between): DQ feeds the MatMul, and every Q/DQ reads the scale straight
+    # from the Constant — the converter's fp32->fp16->fp32 boundary pairs around the
+    # blocked scale, which would round it, must have been collapsed.
+    assert nodes["matmul"].input[0] == nodes["dq"].output[0]
+    assert nodes["matmul"].input[1] == nodes["wdq"].output[0]
+    for name in ("q", "dq", "wq", "wdq"):
+        assert nodes[name].input[1] == nodes["s_const"].output[0]
 
 
 def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
@@ -354,9 +438,7 @@ def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -
         [values, indices],
         [k],
     )
-    graph.value_info.append(
-        helper.make_tensor_value_info("x32", TensorProto.FLOAT, [1, 8])
-    )
+    graph.value_info.append(helper.make_tensor_value_info("x32", TensorProto.FLOAT, [1, 8]))
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     path = tmp_path / "topk_graph.onnx"
     onnx.save(model, str(path))

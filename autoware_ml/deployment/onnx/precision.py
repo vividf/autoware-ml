@@ -34,12 +34,20 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+#: Quantize/dequantize node spellings. INT8 exports as standard ONNX Q/DQ; FP8 exports
+#: as modelopt's TRT-domain custom ops (its E4M3 symbolic bypasses standard
+#: ``QuantizeLinear``, whose float8 form it never emits).
+_QUANTIZE_OPS = ("QuantizeLinear", "TRT_FP8QuantizeLinear")
+_DEQUANTIZE_OPS = ("DequantizeLinear", "TRT_FP8DequantizeLinear")
+_QDQ_OPS = _QUANTIZE_OPS + _DEQUANTIZE_OPS
+
+
 def onnx_has_qdq(onnx_path: Path) -> bool:
-    """Whether the ONNX graph contains QuantizeLinear/DequantizeLinear nodes."""
+    """Whether the ONNX graph contains quantize/dequantize nodes (INT8 or FP8)."""
     import onnx
 
     model = onnx.load(str(onnx_path), load_external_data=False)
-    return any(node.op_type in ("QuantizeLinear", "DequantizeLinear") for node in model.graph.node)
+    return any(node.op_type in _QDQ_OPS for node in model.graph.node)
 
 
 def onnx_custom_op_domains(onnx_path: Path) -> tuple[str, ...]:
@@ -87,14 +95,14 @@ def _quantized_island_names(graph) -> list[str]:
     island: dict[str, None] = {}
     dq_outputs = set()
     for node in graph.node:
-        if node.op_type not in ("QuantizeLinear", "DequantizeLinear"):
+        if node.op_type not in _QDQ_OPS:
             continue
         island[node.name] = None
         for name in node.input[1:]:  # scale / zero_point
             producer = producer_of.get(name)
             if producer is not None:
                 island[producer.name] = None
-        if node.op_type == "DequantizeLinear":
+        if node.op_type in _DEQUANTIZE_OPS:
             dq_outputs.update(node.output)
     for node in graph.node:
         if node.name not in island and any(name in dq_outputs for name in node.input):
