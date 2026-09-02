@@ -114,6 +114,15 @@ class TensorRTModuleRunner:
             raise ValueError(f"TensorRT requires a CUDA device, got {self.device}.")
         self.engine, self.context = load_trt_engine(engine_path)
         self.input_names, self.output_names = list_trt_io_names(self.engine)
+        # Bindings persist across calls: input shapes are re-declared and output buffers
+        # re-allocated only when a shape actually changes. Re-binding every call was
+        # measured to inflate the reported per-engine time by ~0.5 ms/engine on
+        # BEVFusion (the deployment report showed 6.08 ms for a chain whose paired
+        # single-window measurement is 5.16 ms).
+        self._bound_input_shapes: dict[str, tuple[int, ...]] = {}
+        self._output_buffers: dict[str, torch.Tensor] = {}
+        self._start_event = torch.cuda.Event(enable_timing=True)
+        self._end_event = torch.cuda.Event(enable_timing=True)
         logger.info(
             "Loaded TensorRT engine %s (inputs=%s, outputs=%s)",
             Path(engine_path).name,
@@ -147,37 +156,50 @@ class TensorRTModuleRunner:
             Tuple of (outputs by engine output name as CUDA tensors, pure-GPU time in
             ms measured with CUDA events around ``execute_async_v3`` only).
 
+        NOTE: output tensors are owned by the runner and REUSED on the next ``run``
+        with the same shapes — consume (or copy) them before calling ``run`` again.
+        Every current caller is strictly sequential per runner (evaluation processes a
+        frame to completion; verification compares per batch, and its reference and
+        test pipelines hold separate runners).
+
         Raises:
             RuntimeError: If ``execute_async_v3`` reports a failure status.
         """
         device_inputs = {
             name: self._cast_to_binding_dtype(name, tensor) for name, tensor in inputs.items()
         }
+        shapes_changed = False
         for name, tensor in device_inputs.items():
-            self.context.set_input_shape(name, tuple(tensor.shape))
+            shape = tuple(tensor.shape)
+            if self._bound_input_shapes.get(name) != shape:
+                self.context.set_input_shape(name, shape)
+                self._bound_input_shapes[name] = shape
+                shapes_changed = True
+            # Input tensors arrive from the caller, so their addresses change per call.
             self.context.set_tensor_address(name, int(tensor.data_ptr()))
 
-        # Output shapes can depend on the input shape, so read them only after set_input_shape.
-        device_outputs: dict[str, torch.Tensor] = {}
-        for name in self.output_names:
-            shape = tuple(self.context.get_tensor_shape(name))
-            out = torch.empty(
-                shape,
-                dtype=_trt_dtype_to_torch(self.engine.get_tensor_dtype(name)),
-                device=self.device,
-            )
-            device_outputs[name] = out
-            self.context.set_tensor_address(name, int(out.data_ptr()))
+        # Output shapes can depend on the input shapes, so re-derive (and re-allocate
+        # only what actually changed) when any input shape did.
+        if shapes_changed or not self._output_buffers:
+            for name in self.output_names:
+                shape = tuple(self.context.get_tensor_shape(name))
+                buffer = self._output_buffers.get(name)
+                if buffer is None or tuple(buffer.shape) != shape:
+                    buffer = torch.empty(
+                        shape,
+                        dtype=_trt_dtype_to_torch(self.engine.get_tensor_dtype(name)),
+                        device=self.device,
+                    )
+                    self._output_buffers[name] = buffer
+                    self.context.set_tensor_address(name, int(buffer.data_ptr()))
 
         stream = torch.cuda.current_stream(self.device)
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record(stream)
+        self._start_event.record(stream)
         succeeded = self.context.execute_async_v3(stream_handle=stream.cuda_stream)
         if not succeeded:
             raise RuntimeError("TensorRT execute_async_v3 returned failure status.")
-        end_event.record(stream)
-        end_event.synchronize()
-        gpu_time_ms = float(start_event.elapsed_time(end_event))
+        self._end_event.record(stream)
+        self._end_event.synchronize()
+        gpu_time_ms = float(self._start_event.elapsed_time(self._end_event))
 
-        return device_outputs, gpu_time_ms
+        return dict(self._output_buffers), gpu_time_ms
