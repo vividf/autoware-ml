@@ -22,7 +22,7 @@ Every network is built STRONGLY TYPED: the ONNX graph's own tensor types are
 binding, and precision therefore lives in the ONNX, not in builder flags —
 quantized precisions come from Quantize/DequantizeLinear nodes (explicit
 quantization), FP16 from the exported graph's tensor types
-(:func:`autoware_ml.deployment.onnx_export.autocast_to_fp16`). This matches the
+(:func:`autoware_ml.deployment.onnx.precision.autocast_to_fp16`). This matches the
 TensorRT direction: the weak-typing precision flags (``BuilderFlag.FP16`` & co)
 were deprecated in TensorRT 10.12 and removed in TensorRT 11, where all networks
 are strongly typed.

@@ -34,14 +34,13 @@ from torch import nn
 from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
 from autoware_ml.deployment.backends.tensorrt_builder import build_engine
 from autoware_ml.deployment.config import DeployConfig, OnnxPrecision
-from autoware_ml.deployment.onnx_export import (
+from autoware_ml.deployment.onnx.export import export_to_onnx
+from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_graph
+from autoware_ml.deployment.onnx.precision import (
     autocast_to_fp16,
-    export_to_onnx,
-    modify_onnx_graph,
     cast_graph_to_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,
-    should_modify_graph,
 )
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, Stage, artifact_path, graph_stages

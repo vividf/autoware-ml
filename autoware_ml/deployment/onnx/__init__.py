@@ -13,33 +13,31 @@
 # limitations under the License.
 
 
-"""DEPRECATED module path — the content moved to :mod:`autoware_ml.deployment.onnx`.
+"""ONNX-side machinery of deployment: export primitive, precision passes, graph surgery."""
 
-Kept as a re-export shim for one deprecation cycle; import from
-``autoware_ml.deployment.onnx.{export,precision,modify}`` instead.
-"""
-
-from autoware_ml.deployment.onnx.export import (  # noqa: F401
-    _log_export_inputs,
-    _merge_onnx_external_data,
+from autoware_ml.deployment.onnx.export import (
     build_dynamic_axes,
     build_dynamic_shapes,
     export_to_onnx,
     normalize_dynamic_shapes_for_model,
 )
-from autoware_ml.deployment.onnx.modify import (  # noqa: F401
-    _apply_modifier,
-    _instantiate_modifier,
-    modify_onnx_graph,
-    should_modify_graph,
-)
-from autoware_ml.deployment.onnx.precision import (  # noqa: F401
-    _assign_missing_node_names,
-    _island_input_names,
-    _quantized_island_names,
-    _strip_fp16_round_trips,
+from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_graph
+from autoware_ml.deployment.onnx.precision import (
     autocast_to_fp16,
     cast_graph_to_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,
 )
+
+__all__ = [
+    "autocast_to_fp16",
+    "build_dynamic_axes",
+    "build_dynamic_shapes",
+    "cast_graph_to_fp16",
+    "export_to_onnx",
+    "modify_onnx_graph",
+    "normalize_dynamic_shapes_for_model",
+    "onnx_custom_op_domains",
+    "onnx_has_qdq",
+    "should_modify_graph",
+]

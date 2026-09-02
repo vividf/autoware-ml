@@ -17,7 +17,7 @@
 - :mod:`.stages`       — the declaration a model returns from ``build_stages()``.
 - :mod:`.config`       — typed ``deploy`` config (``DeployConfig``).
 - :mod:`.export`       — derive ONNX / TensorRT artifacts from the stage graph.
-- :mod:`.onnx_export`  — the ``torch.onnx.export`` primitive + graph modification.
+- :mod:`.onnx`         — the ``torch.onnx.export`` primitive, precision passes, graph surgery.
 - :mod:`.pipeline`     — run the stage graph on pytorch / onnx / tensorrt.
 - :mod:`.backends`     — TensorRT engine builder + ONNX Runtime / TensorRT runners.
 - :mod:`.verification` — cross-backend numerical parity.
