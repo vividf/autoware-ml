@@ -272,3 +272,57 @@ def autocast_to_fp16(onnx_path: Path, sample_inputs: Mapping[str, Any]) -> None:
         calibration_path.unlink(missing_ok=True)
     onnx.save(model, str(onnx_path))
     logger.info("AutoCast: wrote mixed-FP16 graph back to %s", onnx_path)
+
+
+def keep_topk_in_fp16(onnx_path: Path) -> Path:
+    """Let TopK read its FP16 tensor directly instead of an FP32 copy.
+
+    AutoCast pins TopK to FP32, so in a mixed-FP16 graph the selection input arrives
+    through a Cast — for a proposal head that means casting the *entire* flattened
+    heatmap before selecting a few hundred elements (BEVFusion: 3.24M elements,
+    measured 0.81 ms -> 0.45 ms on the dense graph by bypassing it; the ``sorted``
+    attribute measured as irrelevant to TensorRT).
+
+    A stage declares this transform (``GraphStage.onnx_transforms``) rather than the
+    framework applying it globally, because ranking scores in FP16 is a per-model
+    accuracy judgement: near-ties may reorder (BEVFusion already declares proposal
+    ties in its ``verification_caveat``), and the gate is the evaluated metric.
+
+    No-op when no FP32 cast feeds a TopK (fp32 exports, Q/DQ graphs).
+    """
+    import onnx
+    from onnx import TensorProto
+
+    model = onnx.load(str(onnx_path))
+    graph = model.graph
+    producers = {output: node for node in graph.node for output in node.output}
+
+    def cast_target(node) -> int | None:
+        return next((a.i for a in node.attribute if a.name == "to"), None)
+
+    bypassed = 0
+    for node in graph.node:
+        if node.op_type != "TopK":
+            continue
+        upstream = producers.get(node.input[0])
+        if (
+            upstream is None
+            or upstream.op_type != "Cast"
+            or cast_target(upstream) != TensorProto.FLOAT
+        ):
+            continue
+        node.input[0] = upstream.input[0]
+        bypassed += 1
+        # The values output follows the input dtype now.
+        for value_info in graph.value_info:
+            if (
+                value_info.name == node.output[0]
+                and value_info.type.tensor_type.elem_type == TensorProto.FLOAT
+            ):
+                value_info.type.tensor_type.elem_type = TensorProto.FLOAT16
+    if bypassed:
+        onnx.save(model, str(onnx_path))
+        logger.info(
+            "keep_topk_in_fp16: %d TopK input cast(s) bypassed in %s.", bypassed, onnx_path.name
+        )
+    return onnx_path

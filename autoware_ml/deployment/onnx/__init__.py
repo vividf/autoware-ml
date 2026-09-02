@@ -25,6 +25,7 @@ from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_
 from autoware_ml.deployment.onnx.precision import (
     autocast_to_fp16,
     cast_graph_to_fp16,
+    keep_topk_in_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "build_dynamic_shapes",
     "cast_graph_to_fp16",
     "export_to_onnx",
+    "keep_topk_in_fp16",
     "modify_onnx_graph",
     "normalize_dynamic_shapes_for_model",
     "onnx_custom_op_domains",

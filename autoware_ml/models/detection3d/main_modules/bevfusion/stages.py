@@ -61,6 +61,7 @@ from torch import nn
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
 from autoware_ml.models.detection3d.feature_extractors import LidarBEVFeatureExtractor
+from autoware_ml.deployment.onnx.precision import keep_topk_in_fp16
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 
@@ -204,6 +205,10 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             inputs=(LIDAR_BEV,),
             outputs=(BBOX_PRED, SCORE, LABEL_PRED),
             output_fields=OUTPUT_FIELDS,
+            # The proposal TopK ranks FP16 scores directly instead of an FP32 copy of the
+            # whole flattened heatmap (measured 0.81 -> 0.45 ms). Near-ties may reorder,
+            # which this model already declares (verification_caveat); the gate is mAP.
+            onnx_transforms=(keep_topk_in_fp16,),
         ),
     )
 

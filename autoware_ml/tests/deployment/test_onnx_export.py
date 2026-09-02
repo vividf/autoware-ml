@@ -330,3 +330,44 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
                 and cast_to(upstream) == TensorProto.FLOAT16
             ), f"fp16 round trip at {node.name}"
     onnx.checker.check_model(converted)
+
+
+def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
+    """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx.precision import keep_topk_in_fp16
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 8])
+    values = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
+    indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 2])
+    k = helper.make_tensor("k", TensorProto.INT64, [1], np.array([2], dtype=np.int64))
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["x"], ["x32"], to=TensorProto.FLOAT, name="lift"),
+            helper.make_node("TopK", ["x32", "k"], ["values", "indices"], name="topk"),
+        ],
+        "topk_graph",
+        [x],
+        [values, indices],
+        [k],
+    )
+    graph.value_info.append(
+        helper.make_tensor_value_info("x32", TensorProto.FLOAT, [1, 8])
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    path = tmp_path / "topk_graph.onnx"
+    onnx.save(model, str(path))
+
+    keep_topk_in_fp16(path)
+
+    converted = onnx.load(str(path))
+    topk = next(node for node in converted.graph.node if node.op_type == "TopK")
+    assert topk.input[0] == "x", "TopK must read the FP16 tensor directly"
+
+    # A graph whose TopK already reads fp16 (or fp32 exports) is untouched.
+    before = converted.SerializeToString()
+    keep_topk_in_fp16(path)
+    assert onnx.load(str(path)).SerializeToString() == before
