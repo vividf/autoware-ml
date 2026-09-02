@@ -58,6 +58,9 @@ class EvaluationResult:
         num_samples: Number of evaluated samples/frames.
         headline_metrics: Metric names the evaluated suites declare as their headline
             ones (``MetricSuite.headline_metrics``) — the rows a report leads with.
+        fallback_stages: Graph stages that ran their PyTorch module on this backend
+            (declared ``torch_fallback_backends``) — reported, so a backend column is
+            never silently the pytorch numbers under another name.
     """
 
     backend: Backend
@@ -67,6 +70,7 @@ class EvaluationResult:
     latency: dict[str, LatencyStats]
     num_samples: int
     headline_metrics: tuple[str, ...] = ()
+    fallback_stages: tuple[str, ...] = ()
 
 
 def evaluate_backend(
@@ -156,6 +160,7 @@ def evaluate_backend(
         headline_metrics=tuple(
             dict.fromkeys(name for suite in suites for name in suite.headline_metrics)
         ),
+        fallback_stages=tuple(getattr(pipeline, "fallback_stage_names", ())),
     )
     log_backend_report(result)
     return result
@@ -178,6 +183,13 @@ def log_backend_report(result: EvaluationResult) -> None:
         result.device,
         result.num_samples,
     )
+    if result.fallback_stages:
+        logger.warning(
+            "  NOTE: stage(s) %s ran their PyTorch module on this backend "
+            "(declared torch fallback) — this column is not pure %s.",
+            ", ".join(result.fallback_stages),
+            result.backend.value,
+        )
     logger.info("  Latency [ms]:")
     for name, stats in sorted(result.latency.items()):
         logger.info(
@@ -218,9 +230,12 @@ def log_comparison(results: Sequence[EvaluationResult]) -> None:
             if _is_headline(k, result.headline_metrics)
         }
         rows = keys if rows is None else rows & keys
+    def label(result: EvaluationResult) -> str:
+        return result.backend.value + ("*" if result.fallback_stages else "")
+
     logger.info("=" * 70)
-    logger.info("Cross-backend comparison (%s):", ", ".join(r.backend.value for r in results))
-    logger.info("    %-40s" % "metric" + "".join(f"{r.backend.value:>12}" for r in results))
+    logger.info("Cross-backend comparison (%s):", ", ".join(label(r) for r in results))
+    logger.info("    %-40s" % "metric" + "".join(f"{label(r):>12}" for r in results))
     for row in sorted(rows or ()):
         split, rest = row.split("/", 1)
         values = "".join(
@@ -233,6 +248,13 @@ def log_comparison(results: Sequence[EvaluationResult]) -> None:
         for r in results
     )
     logger.info(f"    {MODEL_STAGE + ' mean [ms]':<40}{latency_row}")
+    for result in results:
+        if result.fallback_stages:
+            logger.info(
+                "    * %s: stage(s) %s ran in PyTorch (declared torch fallback).",
+                result.backend.value,
+                ", ".join(result.fallback_stages),
+            )
 
 
 def log_results_to_mlflow(client: Any, run_id: str, results: Sequence[EvaluationResult]) -> None:

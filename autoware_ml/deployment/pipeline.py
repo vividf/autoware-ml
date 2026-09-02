@@ -168,6 +168,15 @@ class StagedPipeline:
         self.graph_stage_names = tuple(stage.name for stage in graph_stages(self.stages))
 
         self._runners: dict[str, Any] = {}
+        #: Graph stages that run their PyTorch module on this (non-pytorch) backend
+        #: because they declare it as a fallback — reports must say so, or a backend
+        #: column can silently be the pytorch numbers under another name.
+        self.fallback_stage_names: tuple[str, ...] = tuple(
+            stage.name
+            for stage in graph_stages(self.stages)
+            if self.backend is not Backend.PYTORCH
+            and self.backend in stage.torch_fallback_backends
+        )
         for stage in graph_stages(self.stages):
             if self.backend is Backend.PYTORCH or self.backend in stage.torch_fallback_backends:
                 self._runners[stage.name] = _ModuleRunner(stage, self.device)

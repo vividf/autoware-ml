@@ -147,3 +147,16 @@ def test_stage_onnx_precision_rejects_unknown_values() -> None:
                 "stages": {"fragile_head": {"onnx": {"precision": "fp42"}}},
             }
         )
+
+
+def test_evaluation_split_parses_and_rejects_unknown_values() -> None:
+    import pytest
+
+    from autoware_ml.deployment.config import DeployConfig
+
+    base = {"onnx": {"enabled": True}, "tensorrt": {"enabled": False}, "stages": {}}
+    cfg = DeployConfig.from_dict({**base, "evaluation": {"enabled": True, "split": "val"}})
+    assert cfg.evaluation.split == "val"
+    assert DeployConfig.from_dict(base).evaluation.split == "test"
+    with pytest.raises(ValueError, match="evaluation.split"):
+        DeployConfig.from_dict({**base, "evaluation": {"split": "train"}})

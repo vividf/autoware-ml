@@ -59,6 +59,7 @@ from autoware_ml.evaluation import (
     log_comparison,
     log_results_to_mlflow,
 )
+from autoware_ml.metrics.base import EvalStage
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.utils.deploy import (
     build_tensorrt_engine,
@@ -152,6 +153,17 @@ def evaluate(
         logger.info("Evaluation disabled; skipping.")
         return []
 
+    # The predict dataloader carries the test split; a val evaluation scores the
+    # validation dataloader instead and its metric keys report under val/... .
+    if cfg.split == "val":
+        datamodule.setup("validate")
+        make_dataloader = datamodule.val_dataloader
+        eval_stage = EvalStage.VAL
+        logger.info("Evaluation split: val (metric keys report under val/...).")
+    else:
+        make_dataloader = datamodule.predict_dataloader
+        eval_stage = EvalStage.TEST
+
     results: list[EvaluationResult] = []
     for backend, backend_cfg in cfg.enabled_backends():
         if backend not in available:
@@ -171,11 +183,12 @@ def evaluate(
         results.append(
             evaluate_backend(
                 model,
-                datamodule.predict_dataloader(),
+                make_dataloader(),
                 pipelines.get(backend, backend_cfg.device),
                 device,
                 num_samples=cfg.num_samples,
                 num_warmup=cfg.num_warmup,
+                stage=eval_stage,
             )
         )
     log_comparison(results)

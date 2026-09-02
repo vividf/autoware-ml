@@ -37,6 +37,9 @@ deploy:
   # PyTorch is a backend like the others; keys land under {split}/{backend}/{metric}.
   evaluation:
     enabled: false
+    # Split the backends are scored on: test (default) or val — for when the test
+    # split is unavailable or held back. Metric keys carry the split (val/{backend}/...).
+    split: test
     num_samples: -1
     num_warmup: 2
     backends:

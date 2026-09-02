@@ -283,21 +283,31 @@ class EvaluationConfig:
     """Per-backend ground-truth evaluation stage (``deploy.evaluation``)."""
 
     enabled: bool = False
-    #: Samples per backend; -1 = the whole predict (test) split.
+    #: Split the backends are scored on: ``test`` (default, the predict dataloader) or
+    #: ``val`` — for when the test split is unavailable or held back. Metric keys carry
+    #: the split, so a val evaluation reports under ``val/{backend}/...``.
+    split: str = "test"
+    #: Samples per backend; -1 = the whole split.
     num_samples: int = -1
     #: Extra re-runs of the first batch that prime the GPU / TensorRT (discarded).
     num_warmup: int = 2
     backends: Mapping[Backend, BackendEvaluationConfig] = field(default_factory=dict)
 
-    KNOWN_KEYS = frozenset({"enabled", "num_samples", "num_warmup", "backends"})
+    KNOWN_KEYS = frozenset({"enabled", "split", "num_samples", "num_warmup", "backends"})
 
     @classmethod
     def from_dict(cls, raw: Any) -> EvaluationConfig:
         raw = _mapping(raw, "deploy.evaluation")
         _reject_unknown(raw, cls.KNOWN_KEYS, "deploy.evaluation")
         backends = _mapping(raw.get("backends"), "deploy.evaluation.backends")
+        split = str(raw.get("split", "test"))
+        if split not in ("test", "val"):
+            raise ValueError(
+                f"deploy.evaluation.split={split!r} — valid values: 'test', 'val'."
+            )
         return cls(
             enabled=bool(raw.get("enabled", False)),
+            split=split,
             num_samples=int(raw.get("num_samples", -1)),
             num_warmup=int(raw.get("num_warmup", 2)),
             backends={
