@@ -15,15 +15,27 @@
 """BEVFusion (lidar-only) quantization declaration.
 
 Quantization covers the dense deployment graph only: ``pts_backbone`` /
-``pts_neck`` (Conv2d) and the head's Conv2d layers (shared conv, heatmap head).
-The sparse side (``pts_voxel_encoder`` / ``pts_middle_encoder``) is deliberately
-absent — its INT8 form is the libspconv engine produced by the dedicated sparse
-exporter, not Q/DQ replacement. The decoder's attention/Linear/Conv1d layers
-carry no quantizable kinds here and stay in floating point.
+``pts_neck`` (Conv2d) and the head's Conv2d layers (shared conv, heatmap head),
+plus the decoder FFN's Linear layers — pinned FP8, never INT8 (INT8 linears cost
+PTv3 6 mIoU for nothing; E4M3 held accuracy). The sparse side
+(``pts_voxel_encoder`` / ``pts_middle_encoder``) is deliberately absent — its
+INT8 form is the libspconv engine produced by the dedicated sparse exporter,
+not Q/DQ replacement.
+
+The attention projections are *structurally* out of reach at calibration time:
+the trained head holds ``nn.MultiheadAttention`` (packed ``in_proj_weight``
+Parameter — not a module — and an ``out_proj`` whose forward the fast path
+bypasses; the walker refuses it), and the export-form ``q/k/v/out_proj``
+Linears only come into existence in ``prepare_for_export``, after calibration.
+Quantizing them means swapping to the export-form attention *before*
+calibration — the deferred attention-recipe infrastructure.
 
 Every stage — quantize (PTQ / QAT) and deploy-load — reaches this declaration
 through ``BEVFusionLidarDetectionModel.build_quantization_plan``, so the same
-plan builds the same tree everywhere.
+plan builds the same tree everywhere. NOTE: adding the ``linear`` kind changed
+the placement record; quantized checkpoints produced before 2026-09-03 need a
+re-run of ``quantize`` (experimental ckpts carry no format versioning by
+design).
 """
 
 from __future__ import annotations
@@ -36,7 +48,7 @@ BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
     quantize_submodules={
         "pts_backbone": ("conv",),
         "pts_neck": ("conv",),
-        "bbox_head": ("conv",),
+        "bbox_head": {"conv": None, "linear": "fp8"},
     },
     recipes=("residual_add", "ese", "maxpool"),
 )

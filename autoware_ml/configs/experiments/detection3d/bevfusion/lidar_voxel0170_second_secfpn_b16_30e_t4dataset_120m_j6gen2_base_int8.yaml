@@ -35,6 +35,10 @@ quantization:
   mode: ptq
   fuse_bn: true
   default_precision: int8
+  # Keep the validated conv-only INT8 tree: the model rules also pin the decoder FFN
+  # linears to FP8 (see the *_fp8 experiment); this recipe measures INT8 convolutions.
+  skip_quantize:
+    - bbox_head.decoder
   # SECOND has no residual blocks, so the "residual_add" recipe would match nothing anyway.
   disable_recipes:
     - residual_add

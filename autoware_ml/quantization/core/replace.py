@@ -246,6 +246,14 @@ _REPLACEMENT_KINDS: dict = {
     "linear": ((nn.Linear, QuantLinear, _rebuild_linear_as_quant),),
 }
 
+#: Module types the walker must never swap, whatever the kind rules say.
+#: ``nn.MultiheadAttention.out_proj`` is a ``NonDynamicallyQuantizableLinear`` whose
+#: forward the attention fast path bypasses (``F.multi_head_attention_forward`` reads
+#: ``.weight`` directly), so a quantizer planted there never sees a calibration batch
+#: and silently vanishes from any export that rebuilds the attention module — a
+#: calibrated-looking checkpoint that quantizes nothing.
+_NEVER_REPLACE: tuple = (nn.modules.linear.NonDynamicallyQuantizableLinear,)
+
 
 def replace_quantizable_modules(
     model: nn.Module,
@@ -302,6 +310,9 @@ def _replace_walk(
 
         if submodule is not None:
             _replace_walk(submodule, rules, skip_names, full_name, on_replace, precision)
+
+        if isinstance(submodule, _NEVER_REPLACE):
+            continue
 
         for source_cls, quant_cls, rebuild in rules:
             if isinstance(submodule, source_cls) and not isinstance(submodule, quant_cls):

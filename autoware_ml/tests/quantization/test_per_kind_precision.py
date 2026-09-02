@@ -18,7 +18,6 @@ with the single-precision checkpoints that predate the feature."""
 from __future__ import annotations
 
 import pytest
-import torch
 from torch import nn
 
 from autoware_ml.quantization.config import Precision, QuantizationConfig
@@ -51,9 +50,7 @@ def test_tuple_rules_resolve_every_kind_to_the_default_precision() -> None:
 
 
 def test_mapping_rules_carry_per_kind_precision() -> None:
-    rules = QuantRules(
-        quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=()
-    )
+    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=())
     resolved = rules.resolved_kinds("body", Precision.INT8)
     assert resolved == {"conv": Precision.INT8, "linear": Precision.FP8}
     # None follows the default.
@@ -70,9 +67,7 @@ def test_unknown_kind_and_unknown_precision_are_rejected() -> None:
 
 def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     model = _Model().eval()
-    rules = QuantRules(
-        quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=()
-    )
+    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=())
     plan = QuantizationPlan(rules=rules, config=_config())
     plan.prepare(model)
 
@@ -85,6 +80,40 @@ def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     details = {d.module: d.detail for d in plan.placement_record.decisions}
     assert "@fp8" in details["body.linear"]
     assert "@" not in details["body.conv"]
+
+
+def test_attention_out_proj_is_never_replaced() -> None:
+    """``nn.MultiheadAttention.out_proj`` must not become a QuantLinear.
+
+    Its forward is bypassed by the attention fast path (``F.multi_head_attention_forward``
+    reads ``.weight`` directly), so a quantizer there never collects calibration data and
+    silently vanishes from any export that rebuilds the attention module. A plain Linear
+    sibling in the same subtree still quantizes.
+    """
+
+    class _AttnBody(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn = nn.MultiheadAttention(8, 2, batch_first=True)
+            self.linear = nn.Linear(8, 8)
+
+    class _AttnModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.body = _AttnBody()
+
+    model = _AttnModel().eval()
+    rules = QuantRules(quantize_submodules={"body": {"linear": "fp8"}}, recipes=())
+    plan = QuantizationPlan(rules=rules, config=_config())
+    plan.prepare(model)
+
+    assert type(model.body.attn.out_proj).__name__ == "NonDynamicallyQuantizableLinear"
+    assert not hasattr(model.body.attn.out_proj, "_weight_quantizer")
+    assert model.body.linear._weight_quantizer.num_bits == (4, 3)
+    replaced = [
+        d.module for d in plan.placement_record.decisions if d.transform == "replace_module"
+    ]
+    assert replaced == ["body.linear"]
 
 
 def test_default_precision_records_stay_identical_to_the_pre_feature_format() -> None:
