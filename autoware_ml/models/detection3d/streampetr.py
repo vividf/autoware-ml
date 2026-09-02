@@ -188,21 +188,31 @@ class StreamPETRDetectionModel(BaseModel):
         img_backbone: nn.Module,
         img_neck: nn.Module,
         bbox_head: StreamPETRHead,
+        img_roi_head: nn.Module | None = None,
         optimizer: Callable[..., Optimizer] | None = None,
         scheduler: Callable[[Optimizer], LRScheduler] | None = None,
         optimizer_group_overrides: Mapping[str, Mapping[str, Any]] | None = None,
+        scheduler_config: Mapping[str, Any] | None = None,
         metrics: Sequence[MetricSuite] | None = None,
     ) -> None:
+        """Initialize StreamPETR.
+
+        ``img_roi_head`` is an optional auxiliary 2D detection head that
+        supervises the image features during training (Focal-PETR-style);
+        inference and the exported graphs never run it.
+        """
         super().__init__(
             optimizer=optimizer,
             scheduler=scheduler,
             optimizer_group_overrides=optimizer_group_overrides,
+            scheduler_config=scheduler_config,
             metrics=metrics,
         )
         self.image_feature_extractor = MultiviewImageFeatureExtractor(
             img_backbone=img_backbone, img_neck=img_neck
         )
         self.bbox_head = bbox_head
+        self.img_roi_head = img_roi_head
 
     def setup(self, stage: str) -> None:
         """Require a streaming datamodule; the memory bank needs lane-contiguous batches."""
@@ -261,7 +271,7 @@ class StreamPETRDetectionModel(BaseModel):
         del kwargs
         image_batch = _stack(img).float()
         img_features = self.image_feature_extractor(image_batch)
-        return self.bbox_head(
+        outputs = self.bbox_head(
             img_features=img_features,
             image_height=int(image_batch.shape[-2]),
             image_width=int(image_batch.shape[-1]),
@@ -275,16 +285,43 @@ class StreamPETRDetectionModel(BaseModel):
             gt_boxes=gt_boxes,
             gt_labels=gt_labels,
         )
+        # The auxiliary 2D head only shapes image features during training;
+        # inference and deployment never execute it.
+        if self.img_roi_head is not None and self.training:
+            outputs.update(
+                self.img_roi_head(
+                    img_features,
+                    image_height=int(image_batch.shape[-2]),
+                    image_width=int(image_batch.shape[-1]),
+                )
+            )
+        return outputs
 
     def compute_metrics(
         self,
         batch_inputs_dict: dict[str, Any],
         outputs: dict[str, Any],
     ) -> dict[str, torch.Tensor]:
-        """Compute the head's multi-layer detection and denoising losses."""
-        return self.bbox_head.loss(
-            outputs, batch_inputs_dict["gt_boxes"], batch_inputs_dict["gt_labels"]
+        """Compute the head's detection and denoising losses plus the optional 2D auxiliary losses."""
+        losses = self.bbox_head.loss(
+            outputs,
+            batch_inputs_dict["gt_boxes"],
+            batch_inputs_dict["gt_labels"],
+            annotation_status=batch_inputs_dict.get("annotation_status"),
         )
+        if self.img_roi_head is not None and self.training:
+            roi_losses = self.img_roi_head.loss(
+                outputs,
+                gt_bboxes_2d=batch_inputs_dict["gt_bboxes_2d"],
+                gt_labels_2d=batch_inputs_dict["gt_labels_2d"],
+                centers_2d=batch_inputs_dict["centers_2d"],
+                annotation_status=batch_inputs_dict.get("annotation_status"),
+            )
+            losses.update(roi_losses)
+            losses["loss"] = losses["loss"] + sum(
+                value for key, value in roi_losses.items() if key.startswith("loss_")
+            )
+        return losses
 
     def predict_outputs(self, batch_inputs_dict: dict[str, Any], outputs: dict[str, Any]) -> Any:
         """Decode the last decoder layer into per-sample detections."""
