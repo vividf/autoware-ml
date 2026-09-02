@@ -19,11 +19,10 @@ Both PTv3 task forms share one front half and differ only in the head graph:
     serialize_points (torch)  ->  encoder (graph)  ->  seg3d_head (graph)   [segmentation]
     serialize_points (torch)  ->  encoder (graph)  ->  det3d_head (graph)   [detection]
 
-The declarations reuse the export modules and the name rules of the legacy
-ExportSpec path (``models/segmentation3d/ptv3_base.py`` /
-``models/detection3d/ptv3.py``) — those helpers already define the deployment
-name contract (``point_feat_{i}``, ``serialized_pooling_{i}_{field}``,
-``pooling_cluster_{i}``), and they move here when the legacy path is deleted (Q5).
+The export modules and generated name rules (``point_feat_{i}``,
+``serialized_pooling_{i}_{field}``, ``pooling_cluster_{i}``) live next door in
+:mod:`.export_modules`; the legacy ExportSpec path re-imports the same toolbox
+until it is deleted (Q5).
 Stage names keep the legacy artifact names (``encoder.onnx`` / ``seg3d_head.onnx``
 / ``det3d_head.onnx``).
 
@@ -50,13 +49,13 @@ import torch
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
 from autoware_ml.types.backend import Backend
-from autoware_ml.models.segmentation3d.ptv3_base import (
+from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     ENCODER_EXPORT_POOLING_FIELDS,
+    _PTv3EncoderExportModule,
+    _PTv3SegHeadExportModule,
     build_point_feature_dynamic_axes,
     build_ptv3_encoder_dynamic_axes,
     build_seg_head_input_dynamic_axes,
-    _PTv3EncoderExportModule,
-    _PTv3SegHeadExportModule,
     build_serialized_pooling_metadata,
     seg_head_export_input_names,
     stage_feature_names,

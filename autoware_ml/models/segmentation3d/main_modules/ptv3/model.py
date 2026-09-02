@@ -52,7 +52,9 @@ from autoware_ml.models.segmentation3d.main_modules.ptv3.quantization import (
     build_ptv3_quantization_plan,
 )
 from autoware_ml.models.segmentation3d.main_modules.ptv3.stages import build_ptv3_seg_stages
-from autoware_ml.models.segmentation3d.ptv3_base import split_block_parameters
+from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
+    split_block_parameters,
+)
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.plan import QuantizationPlan
