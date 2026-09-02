@@ -49,8 +49,12 @@ from typing import Any, Mapping
 import torch
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
+from autoware_ml.types.backend import Backend
 from autoware_ml.models.segmentation3d.ptv3_base import (
     ENCODER_EXPORT_POOLING_FIELDS,
+    build_point_feature_dynamic_axes,
+    build_ptv3_encoder_dynamic_axes,
+    build_seg_head_input_dynamic_axes,
     _PTv3EncoderExportModule,
     _PTv3SegHeadExportModule,
     build_serialized_pooling_metadata,
@@ -125,7 +129,7 @@ def _serialize_stage(model: Any) -> TorchStage:
             raise ValueError("MultiTaskBatchInputs must carry points_data for PTv3.")
         depth = serialization_depth.to(context.device)
         point, (grid_coord, feat, _depth, serialized_code) = serialize_point_cloud_batch(
-            dict(points), model.EXPORT_ORDER, depth
+            points.as_point_dict(), model.EXPORT_ORDER, depth
         )
         metadata = build_serialized_pooling_metadata(
             point["grid_coord"],
@@ -159,12 +163,24 @@ def _encoder_stage(model: Any) -> GraphStage:
         encoder=model._prepare_encoder_export(),
         sparse_shape=sparse_shape,
         serialized_depth=serialization_depth,
+        # The stage declares one input per field in ENCODER_EXPORT_POOLING_FIELDS, so the
+        # module must unpack them with the same field list (it excludes `cluster`, which
+        # only the head graphs consume).
+        pooling_field_names=ENCODER_EXPORT_POOLING_FIELDS,
     ).eval()
+    input_names = encoder_input_names(num_poolings)
     return GraphStage(
         ENCODER_STAGE,
         module=module,
-        inputs=tuple(encoder_input_names(num_poolings)),
+        inputs=tuple(input_names),
         outputs=tuple(stage_feature_names(num_poolings + 1)),
+        # Every tensor here is indexed by a point count, so the axes belong to the graph
+        # rather than to a configuration.
+        onnx_dynamic_axes=build_ptv3_encoder_dynamic_axes(input_names, num_poolings + 1),
+        # The graph carries autoware:: plugin ops (sparse convolution, argsort,
+        # segment_csr). TensorRT executes them from deploy.tensorrt.plugin_libraries;
+        # ONNX Runtime has no implementation, so only that backend falls back to torch.
+        torch_fallback_backends=(Backend.ONNX,),
     )
 
 
@@ -178,6 +194,8 @@ def build_ptv3_seg_stages(model: Any) -> tuple[Stage, ...]:
         head, stage_count, sparse_shape, tuple(model.encoder.stride)
     ).eval()
     output_names = tuple(model.get_export_output_names())
+    head_dynamic_axes = build_seg_head_input_dynamic_axes(stage_count, head.dec_depths)
+    head_dynamic_axes.update(build_point_feature_dynamic_axes(output_names))
     return (
         _serialize_stage(model),
         _encoder_stage(model),
@@ -186,6 +204,9 @@ def build_ptv3_seg_stages(model: Any) -> tuple[Stage, ...]:
             module=head_module,
             inputs=tuple(seg_head_export_input_names(stage_count, head.dec_depths)),
             outputs=output_names,
+            onnx_dynamic_axes=head_dynamic_axes,
+            # Same plugin ops as the encoder graph; see _encoder_stage.
+            torch_fallback_backends=(Backend.ONNX,),
             # Field names are a draft until the outputs dataclass gains segmentation slots.
             output_fields=tuple((name, name) for name in output_names),
         ),
