@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 PREPROCESS_STAGE = "preprocess"
 POSTPROCESS_STAGE = "decode_and_metrics"
 MODEL_STAGE = "model_graphs"
-HEADLINE_METRIC_PREFIXES = ("mAP", "NDS")
 
 
 @dataclass(frozen=True)
@@ -57,6 +56,8 @@ class EvaluationResult:
         latency: Per-stage latency stats; ``model_graphs`` sums the exportable stages
             only (pure GPU time for TensorRT).
         num_samples: Number of evaluated samples/frames.
+        headline_metrics: Metric names the evaluated suites declare as their headline
+            ones (``MetricSuite.headline_metrics``) — the rows a report leads with.
     """
 
     backend: Backend
@@ -65,6 +66,7 @@ class EvaluationResult:
     metrics: dict[str, float]
     latency: dict[str, LatencyStats]
     num_samples: int
+    headline_metrics: tuple[str, ...] = ()
 
 
 def evaluate_backend(
@@ -151,6 +153,9 @@ def evaluate_backend(
             name: LatencyStats.from_samples(samples) for name, samples in stage_samples.items()
         },
         num_samples=evaluated,
+        headline_metrics=tuple(
+            dict.fromkeys(name for suite in suites for name in suite.headline_metrics)
+        ),
     )
     log_backend_report(result)
     return result
@@ -161,8 +166,8 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def _is_headline(key: str) -> bool:
-    return key.rsplit("/", 1)[-1].startswith(HEADLINE_METRIC_PREFIXES)
+def _is_headline(key: str, headline_metrics: Sequence[str]) -> bool:
+    return bool(headline_metrics) and key.rsplit("/", 1)[-1].startswith(tuple(headline_metrics))
 
 
 def log_backend_report(result: EvaluationResult) -> None:
@@ -185,7 +190,9 @@ def log_backend_report(result: EvaluationResult) -> None:
             stats.median,
         )
     logger.info("  Headline metrics:")
-    for key, value in sorted((k, v) for k, v in result.metrics.items() if _is_headline(k)):
+    for key, value in sorted(
+        (k, v) for k, v in result.metrics.items() if _is_headline(k, result.headline_metrics)
+    ):
         logger.info("    %-48s %.4f", key, value)
 
 
@@ -205,7 +212,11 @@ def log_comparison(results: Sequence[EvaluationResult]) -> None:
 
     rows = None
     for result in results:
-        keys = {strip_backend(k, result.backend) for k in result.metrics if _is_headline(k)}
+        keys = {
+            strip_backend(k, result.backend)
+            for k in result.metrics
+            if _is_headline(k, result.headline_metrics)
+        }
         rows = keys if rows is None else rows & keys
     logger.info("=" * 70)
     logger.info("Cross-backend comparison (%s):", ", ".join(r.backend.value for r in results))

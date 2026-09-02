@@ -106,6 +106,11 @@ class GraphStage:
         torch_fallback_backends: Backends on which this stage runs its PyTorch module
             instead of an artifact (and needs no artifact for availability) — for graphs
             a backend cannot execute, e.g. a spconv graph on ONNX Runtime.
+        onnx_dynamic_axes: Axes this graph makes dynamic *by construction*
+            (``{tensor_name: {dim_index: dim_name}}``), for graphs whose dynamic axes are
+            a property of the declaration rather than a choice — a point model where every
+            tensor is indexed by a point count that no configuration can pin down, say.
+            ``deploy.stages.<name>.onnx.dynamic_axes`` overrides this when set.
         onnx_transforms: Rewrites applied to this stage's exported ``.onnx``, in order,
             each taking and returning the file path. For fusions intrinsic to the
             deployed form of this graph — folding a bias and an activation into a
@@ -119,6 +124,7 @@ class GraphStage:
     outputs: tuple[str, ...]
     output_fields: tuple[tuple[str, str], ...] = ()
     torch_fallback_backends: tuple[Backend, ...] = ()
+    onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
     onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     @property

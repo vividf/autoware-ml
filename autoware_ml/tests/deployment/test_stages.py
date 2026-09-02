@@ -197,3 +197,65 @@ class TestAvailableBackends:
             available = available_backends(_toy_stages(), tmp_path)
         assert Backend.TENSORRT in available
         assert "STALE TENSORRT ENGINE" in caplog.text
+
+
+def test_graph_stage_declares_its_own_dynamic_axes_and_the_config_overrides_them(
+    tmp_path, monkeypatch
+) -> None:
+    """Axes intrinsic to a graph live on the stage; ``deploy.stages`` still wins.
+
+    A point model has no static point count, so its axes are a property of the
+    declaration rather than a per-experiment choice.
+    """
+    from omegaconf import OmegaConf
+    import torch
+    from torch import nn
+
+    from autoware_ml.deployment import export as export_module
+    from autoware_ml.deployment.config import DeployConfig
+    from autoware_ml.deployment.stages import GraphStage, TorchStage
+
+    seen: list[dict] = []
+
+    def fake_export_to_onnx(module, args, path, **kwargs):
+        seen.append(kwargs["dynamic_axes"])
+        path.write_bytes(b"")
+
+    monkeypatch.setattr(export_module, "export_to_onnx", fake_export_to_onnx)
+
+    declared = {"x": {0: "num_points"}, "y": {0: "num_points"}}
+    stage = GraphStage(
+        "points",
+        module=nn.Identity(),
+        inputs=("x",),
+        outputs=("y",),
+        output_fields=(("y", "y"),),
+        onnx_dynamic_axes=declared,
+    )
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    def run(stages_config: dict) -> dict:
+        seen.clear()
+        deploy_cfg = DeployConfig.from_dict(
+            OmegaConf.create(
+                {
+                    "onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
+                    "tensorrt": {"enabled": False},
+                    "stages": stages_config,
+                }
+            )
+        )
+        export_module.export_stages(
+            (TorchStage("seed", run=seed), stage),
+            batch_inputs=None,
+            deploy_cfg=deploy_cfg,
+            output_dir=tmp_path,
+            device=torch.device("cpu"),
+        )
+        return seen[0]
+
+    assert run({}) == declared
+    configured = {"x": {0: "batch"}}
+    assert run({"points": {"onnx": {"dynamic_axes": configured}}}) == configured

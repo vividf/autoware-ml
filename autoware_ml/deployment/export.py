@@ -126,24 +126,36 @@ def export_stages(
                 dynamo=deploy_cfg.onnx.dynamo,
                 do_constant_folding=deploy_cfg.onnx.do_constant_folding,
                 dynamic_shapes=stage_cfg.onnx.dynamic_shapes,
-                dynamic_axes=stage_cfg.onnx.dynamic_axes,
+                # The config wins when it says something; otherwise the graph's own
+                # intrinsic axes apply (a point graph has no static point count).
+                dynamic_axes=stage_cfg.onnx.dynamic_axes or (stage.onnx_dynamic_axes or None),
             )
             if deploy_cfg.onnx.precision is OnnxPrecision.FP16:
                 custom_domains = onnx_custom_op_domains(onnx_path)
-                if onnx_has_qdq(onnx_path):
+                has_qdq = onnx_has_qdq(onnx_path)
+                if custom_domains:
+                    # AutoCast cannot type a plugin op (it infers types with TensorRT's
+                    # parser), so plugin graphs take the whole-graph FP16 cast — which is
+                    # Q/DQ-aware: the quantization islands stay FP32 exactly as the
+                    # checkpoint calibrated them, everything around them stops running
+                    # FP32 (the point for a model whose plugin ops dominate its runtime).
+                    logger.info(
+                        "Stage %r uses runtime plugin ops (%s) — applying the whole-graph "
+                        "FP16 cast%s.",
+                        stage.name,
+                        ", ".join(custom_domains),
+                        " around its Q/DQ islands" if has_qdq else "",
+                    )
+                    cast_graph_to_fp16(onnx_path)
+                elif has_qdq:
+                    # AutoCast does not support Q/DQ models; the INT8 regions carry their
+                    # precision from the checkpoint and the rest of such a (plugin-free)
+                    # graph stays FP32.
                     logger.info(
                         "Stage %r carries Q/DQ nodes — precision comes from the quantized "
                         "checkpoint; skipping AutoCast.",
                         stage.name,
                     )
-                elif custom_domains:
-                    logger.info(
-                        "Stage %r uses runtime plugin ops (%s) — AutoCast cannot type such a "
-                        "graph, so it gets the whole-graph FP16 cast instead.",
-                        stage.name,
-                        ", ".join(custom_domains),
-                    )
-                    cast_graph_to_fp16(onnx_path)
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})
             for transform in stage.onnx_transforms:

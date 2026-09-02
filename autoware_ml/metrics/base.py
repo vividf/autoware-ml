@@ -102,6 +102,10 @@ class MetricSuite(torchmetrics.Metric, ABC, Generic[StateT]):
     """
 
     prefix: str = ""
+    #: Names (or name prefixes) of the metrics that summarize this suite — what a
+    #: cross-backend comparison shows and a report leads with. Declared by the suite
+    #: because only the task knows which of its numbers is the headline one.
+    headline_metrics: tuple[str, ...] = ()
     _required_keys: tuple[str, ...] = ()
 
     full_state_update: bool = False

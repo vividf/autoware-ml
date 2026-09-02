@@ -195,3 +195,138 @@ def test_cast_graph_to_fp16_converts_internals_and_keeps_io(tmp_path) -> None:
     assert TensorProto.FLOAT in casts.values()
     assert converted.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
     assert converted.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+
+def test_cast_graph_to_fp16_rewires_internal_consumers_of_kept_fp32_outputs(tmp_path) -> None:
+    """A graph output that is also consumed internally must not feed the FP32 copy.
+
+    ``keep_io_types`` inserts the boundary Cast under the output's own name (PTv3's
+    encoder emits its per-stage point features and keeps pooling them), so an internal
+    consumer would read FP32 and meet FP16 weights.
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    feat = helper.make_tensor_value_info("feat", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    weight = helper.make_tensor("w", TensorProto.FLOAT, [4], np.ones(4, dtype=np.float32))
+    graph = helper.make_graph(
+        [
+            # A plugin op keeps AutoCast out and forces the whole-graph cast.
+            helper.make_node("PluginOp", ["x", "w"], ["feat"], domain="autoware"),
+            # `feat` is both a graph output and an internal input.
+            helper.make_node("Mul", ["feat", "w"], ["y"]),
+        ],
+        "reused_output_graph",
+        [x],
+        [feat, y],
+        [weight],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+    )
+    path = tmp_path / "reused_output_graph.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    boundary_casts = [
+        node
+        for node in converted.graph.node
+        if node.op_type == "Cast" and node.output[0] == "feat"
+    ]
+    assert len(boundary_casts) == 1, "the kept-FP32 output should come from one boundary cast"
+    mul = next(node for node in converted.graph.node if node.op_type == "Mul")
+    # The internal consumer reads the FP16 tensor the boundary cast came from, not "feat".
+    assert mul.input[0] == boundary_casts[0].input[0] != "feat"
+    assert converted.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+
+def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> None:
+    """A Q/DQ graph converts to FP16 *around* intact FP32 quantization islands.
+
+    The island — Q/DQ, their scale constants, and the GEMM consuming the dequantized
+    tensors — must come through byte-identical and with no Cast on its internal edges:
+    an FP16-rounded scale changes the quantization itself, and a Cast between DQ and its
+    consumer defeats TensorRT's INT8 fusion (both failure modes measured on PTv3).
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    # 0.0001 is not representable in fp16 (rounds to ~0.00010002); a round trip shows.
+    scale_value = np.float32(1e-4)
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
+    )
+    bias = helper.make_tensor("b", TensorProto.FLOAT, [4], np.zeros(4, dtype=np.float32))
+    gain = helper.make_tensor("g", TensorProto.FLOAT, [4], np.ones(4, dtype=np.float32))
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [scale_value])
+    zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
+    graph = helper.make_graph(
+        [
+            # A plugin op routes the graph into the whole-graph cast in the first place.
+            helper.make_node("PluginOp", ["x", "g"], ["mid"], domain="autoware", name="plugin"),
+            helper.make_node("QuantizeLinear", ["mid", "s", "zp"], ["q"], name="q"),
+            helper.make_node("DequantizeLinear", ["q", "s", "zp"], ["dq"], name="dq"),
+            helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
+            helper.make_node("Gemm", ["dq", "wdq", "b"], ["gemm_out"], name="gemm"),
+            helper.make_node("Mul", ["gemm_out", "g"], ["y"], name="mul"),
+        ],
+        "qdq_island_graph",
+        [x],
+        [y],
+        [weight, bias, gain, scale, zero_point],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+    )
+    path = tmp_path / "qdq_island_graph.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    inits = {i.name: i for i in converted.graph.initializer}
+    # The island keeps its exact FP32 tensors: the scale above all, but also the
+    # quantized weight (it feeds Q) and the GEMM bias.
+    assert inits["s"].data_type == TensorProto.FLOAT
+    assert numpy_helper.to_array(inits["s"]) == scale_value
+    assert inits["w"].data_type == TensorProto.FLOAT
+    assert inits["b"].data_type == TensorProto.FLOAT
+    # Outside the island the conversion happened.
+    assert inits["g"].data_type == TensorProto.FLOAT16
+
+    nodes = {n.name: n for n in converted.graph.node}
+    # Island edges are direct: the GEMM's inputs are produced by the DQ nodes themselves
+    # (the converter renames the tensors; what matters is that no node sits between).
+    assert nodes["gemm"].input[0] == nodes["dq"].output[0]
+    assert nodes["gemm"].input[1] == nodes["wdq"].output[0]
+    # Q/DQ still read the scale directly (no Cast between the constant and the island).
+    for name in ("q", "dq", "wq", "wdq"):
+        assert nodes[name].input[1] == "s"
+    # The island's boundaries are single casts: no fp16 round-trip pairs anywhere.
+    def cast_to(node):
+        return next((a.i for a in node.attribute if a.name == "to"), None)
+    producer = {o: n for n in converted.graph.node for o in n.output}
+    for node in converted.graph.node:
+        if node.op_type == "Cast" and cast_to(node) == TensorProto.FLOAT:
+            upstream = producer.get(node.input[0])
+            assert not (
+                upstream is not None
+                and upstream.op_type == "Cast"
+                and cast_to(upstream) == TensorProto.FLOAT16
+            ), f"fp16 round trip at {node.name}"
+    onnx.checker.check_model(converted)

@@ -100,3 +100,44 @@ class TestFusionNumerics:
             _randomized_bn(nn.BatchNorm2d(8), seed=9),
         )
         _assert_fusion_matches(model, torch.randn(2, 8, 10, 10))
+
+
+def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
+    """BN folding must reach models built from custom containers.
+
+    PTv3 composes its blocks in ``PointSequential``, which registers children under
+    numeric names but implements no ``__setitem__``; folding used to crash there.
+    """
+    import torch
+    from torch import nn
+
+    from autoware_ml.quantization.core.fusion import find_conv_bn_pairs, fuse_model_bn
+
+    class NumericContainer(nn.Module):
+        """A container with numeric child names and no ``__getitem__``/``__setitem__``."""
+
+        def __init__(self, *children: nn.Module) -> None:
+            super().__init__()
+            for index, child in enumerate(children):
+                self.add_module(str(index), child)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for child in self._modules.values():
+                x = child(x)
+            return x
+
+    torch.manual_seed(0)
+    linear = nn.Linear(4, 4)
+    norm = nn.BatchNorm1d(4)
+    norm.running_mean.normal_()
+    norm.running_var.uniform_(0.5, 1.5)
+    model = NumericContainer(linear, norm).eval()
+
+    assert find_conv_bn_pairs(model) == [("0", "1")]
+    x = torch.randn(3, 4)
+    expected = model(x)
+
+    fuse_model_bn(model)
+
+    assert isinstance(model.get_submodule("1"), nn.Identity)
+    assert torch.allclose(model(x), expected, atol=1e-5)

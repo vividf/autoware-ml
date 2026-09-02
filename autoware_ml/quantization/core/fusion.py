@@ -221,25 +221,18 @@ def _get_parent_module(model: nn.Module, name: str) -> Tuple[nn.Module, str]:
     Returns:
         Tuple of (parent_module, attr_name)
     """
-    parts = name.split(".")
-    parent = model
-
-    for part in parts[:-1]:
-        if part.isdigit():
-            parent = parent[int(part)]
-        else:
-            parent = getattr(parent, part)
-
-    return parent, parts[-1]
+    parent_name, _, attr_name = name.rpartition(".")
+    # get_submodule resolves numeric names (container children) as well as attributes,
+    # and works for containers that do not implement __getitem__.
+    return (model.get_submodule(parent_name) if parent_name else model), attr_name
 
 
 def _replace_bn_with_identity(model: nn.Module, bn_name: str):
     """Replace a BatchNorm module with ``nn.Identity`` by name."""
     parent, attr = _get_parent_module(model, bn_name)
-    if attr.isdigit():
-        parent[int(attr)] = nn.Identity()
-    else:
-        setattr(parent, attr, nn.Identity())
+    # add_module covers plain attributes, Sequential-style numeric names, and custom
+    # containers with no __setitem__ (PTv3's PointSequential).
+    parent.add_module(attr, nn.Identity())
 
 
 def fuse_model_bn(model: nn.Module) -> nn.Module:
