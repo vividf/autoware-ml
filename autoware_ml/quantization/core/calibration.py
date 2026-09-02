@@ -24,10 +24,10 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-from autoware_ml.quantization.core import backend as quant_backend
+from autoware_ml.quantization.core import modelopt as quant_backend
 
 # Resolved once at import: the framework does not support switching backends mid-process
-# (see autoware_ml.quantization.core.backend.resolve).
+# (see autoware_ml.quantization.core.modelopt.resolve).
 TensorQuantizer = quant_backend.get_tensor_quantizer_cls()
 calib = quant_backend.get_calib()
 

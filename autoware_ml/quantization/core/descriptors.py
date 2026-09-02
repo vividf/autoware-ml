@@ -21,7 +21,7 @@ hands them — nothing else in the framework spells bit widths.
 
 Adding a precision = adding its row to each table below (plus the :class:`Precision`
 enum member and, if modelopt needs new descriptor fields, a translation in
-:func:`autoware_ml.quantization.core.backend.make_quant_desc`). FP8 rows are E4M3
+:func:`autoware_ml.quantization.core.modelopt.make_quant_desc`). FP8 rows are E4M3
 (``num_bits=(4, 3)``) with max calibration — the modelopt convention for FP8, whose
 scales come from tensor maxima rather than histograms.
 
@@ -38,7 +38,7 @@ from typing import Any, Mapping
 
 from autoware_ml.quantization.config import Precision
 
-from . import backend as _backend
+from . import modelopt as _backend
 
 #: Per-tensor histogram activation descriptor, shared by Conv2d / ConvTranspose2d /
 #: Linear inputs AND the recipe quantizers (residual / eSE / pool) — sharing the same

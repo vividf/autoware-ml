@@ -35,7 +35,7 @@ from typing import Callable, Dict, Optional, Set, Tuple, Type
 import torch.nn as nn
 
 from autoware_ml.quantization.config import Precision
-from autoware_ml.quantization.core import backend as quant_backend
+from autoware_ml.quantization.core import modelopt as quant_backend
 from autoware_ml.quantization.core.descriptors import input_desc
 
 from .quant_forwards import (

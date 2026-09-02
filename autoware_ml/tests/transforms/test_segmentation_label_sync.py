@@ -32,7 +32,7 @@ from autoware_ml.transforms.multi_task.point_cloud.geometry import (
     PointsRandomShuffle,
     PointsRangeFilter,
 )
-from autoware_ml.transforms.multi_task.point_cloud.quantization import GridSample
+from autoware_ml.transforms.multi_task.point_cloud.grid_sampling import GridSample
 
 
 def _sample(coords: list[list[float]], labels: list[int]) -> MultiTaskGTSample:

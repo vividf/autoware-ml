@@ -25,7 +25,7 @@ from typing import Iterable, Type, Union
 import torch
 import torch.nn as nn
 
-from autoware_ml.quantization.core import backend as quant_backend
+from autoware_ml.quantization.core import modelopt as quant_backend
 
 TensorQuantizer = quant_backend.get_tensor_quantizer_cls()
 

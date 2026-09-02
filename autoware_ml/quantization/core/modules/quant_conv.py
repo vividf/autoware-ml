@@ -24,7 +24,7 @@ the forward applies fake-quant unconditionally whenever quantizers are attached.
 import torch.nn as nn
 import torch.nn.functional as F
 
-from autoware_ml.quantization.core import backend as quant_backend
+from autoware_ml.quantization.core import modelopt as quant_backend
 
 
 class QuantConv2d(nn.Conv2d):

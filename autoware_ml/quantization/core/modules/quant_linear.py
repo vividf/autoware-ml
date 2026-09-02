@@ -21,7 +21,7 @@ Descriptor choice lives in :mod:`..descriptors`; the builder passes descriptors 
 import torch.nn as nn
 import torch.nn.functional as F
 
-from autoware_ml.quantization.core import backend as quant_backend
+from autoware_ml.quantization.core import modelopt as quant_backend
 
 
 class QuantLinear(nn.Linear):

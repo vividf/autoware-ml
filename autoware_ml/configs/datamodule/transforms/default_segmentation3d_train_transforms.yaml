@@ -35,7 +35,7 @@ pipeline:
 
   # Last: it quantizes the cloud to one point per cell and records the pre-quantization
   # points and labels, which the metrics score against.
-  - _target_: autoware_ml.transforms.multi_task.point_cloud.quantization.GridSample
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.grid_sampling.GridSample
     _convert_: all
 
     grid_size: ${grid_size}

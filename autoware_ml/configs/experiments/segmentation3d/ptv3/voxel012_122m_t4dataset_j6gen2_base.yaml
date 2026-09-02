@@ -3,8 +3,7 @@ defaults:
   - base
   - /database@database: t4dataset/t4dataset_j6gen2_semaseg_base
   - /datamodule@datamodule: t4dataset/default_segmentation3d_datamodule
-  # The distance buckets are task-agnostic; segmentation reuses the 120m set.
-  - /metrics/t4dataset@metric_ranges: default_detection3d_120m_metric_ranges
+  - /metrics/t4dataset@metric_ranges: default_120m_metric_ranges
   - _self_
 
 batch_size: 16
