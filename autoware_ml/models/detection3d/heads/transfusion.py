@@ -476,6 +476,19 @@ class TransFusionHead(nn.Module):
         self.dense_heatmap_pooling_class_ids = self._resolve_class_ids(
             dense_heatmap_pooling_classes
         )
+        # Scatter-free channel bookkeeping for _suppress_dense_heatmap: the suppressed
+        # map is rebuilt as concat([pooled classes, excluded classes]) gathered back into
+        # class order — constant indices instead of a ScatterND (whose ONNX form drags a
+        # whole index-construction subgraph into every export).
+        if self.dense_heatmap_pooling_class_ids:
+            pooling_ids = list(self.dense_heatmap_pooling_class_ids)
+            excluded_ids = [c for c in range(num_classes) if c not in pooling_ids]
+            concat_order = pooling_ids + excluded_ids
+            self._dense_heatmap_excluded_class_ids = excluded_ids
+            self._local_max_class_remap = [concat_order.index(c) for c in range(num_classes)]
+        else:
+            self._dense_heatmap_excluded_class_ids = None
+            self._local_max_class_remap = None
         self.nms_groups = self._resolve_nms_groups(nms_groups)
 
         if shared_conv_norm_act:
@@ -596,10 +609,16 @@ class TransFusionHead(nn.Module):
             )
             return heatmap * (pooled == heatmap)
 
-        local_max = heatmap.clone()
         if not self.dense_heatmap_pooling_class_ids:
             return heatmap
 
+        # Semantics (unchanged): pooling classes take the 3x3 max over fully-interior
+        # windows, their border ring keeps the raw value (border peaks survive), and
+        # excluded classes stay unsuppressed. Built scatter-free — pad + mask + maximum
+        # for the border ring, concat + constant-index gather for the channel merge —
+        # because the slice-assignment form exports as ScatterND plus a Shape/Expand/
+        # Concat index-construction subgraph (~40 nodes) that TensorRT tolerates but
+        # ONNX Runtime and any later graph surgery pay for.
         padding = self.nms_kernel_size // 2
         selected_heatmap = heatmap[:, self.dense_heatmap_pooling_class_ids, :, :]
         pooled = F.max_pool2d(
@@ -608,15 +627,29 @@ class TransFusionHead(nn.Module):
             stride=1,
             padding=0,
         )
-        if padding == 0:
-            local_max[:, self.dense_heatmap_pooling_class_ids, :, :] = pooled
-        else:
-            local_max[
-                :,
-                self.dense_heatmap_pooling_class_ids,
-                padding:-padding,
-                padding:-padding,
-            ] = pooled
+        if padding > 0:
+            height, width = selected_heatmap.shape[2], selected_heatmap.shape[3]
+            interior = F.pad(
+                torch.ones(
+                    1,
+                    1,
+                    height - 2 * padding,
+                    width - 2 * padding,
+                    device=heatmap.device,
+                    dtype=heatmap.dtype,
+                ),
+                [padding] * 4,
+                value=0.0,
+            )
+            # Interior: max(pooled, 0) = pooled (sigmoid scores are positive).
+            # Border:   max(0, raw)    = raw — identical to the old slice assignment.
+            pooled = torch.maximum(
+                F.pad(pooled, [padding] * 4, value=0.0),
+                selected_heatmap * (1.0 - interior),
+            )
+        local_max = torch.cat(
+            [pooled, heatmap[:, self._dense_heatmap_excluded_class_ids, :, :]], dim=1
+        )[:, self._local_max_class_remap, :, :]
         return heatmap * (local_max == heatmap)
 
     def _circle_nms_groups(self) -> list[dict[str, Any]]:

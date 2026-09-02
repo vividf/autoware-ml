@@ -8,6 +8,7 @@ from pathlib import Path
 import onnx
 import pytest
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 from onnx import TensorProto
 
@@ -684,3 +685,30 @@ def test_fuse_export_attention_emits_fusion_pattern_without_bf16(tmp_path: Path)
     # Defaults unchanged: explicit attention keeps the stabilized pattern.
     default_head = _build_head().prepare_for_export()
     assert not default_head.decoder[0].cross_attn.fuse_attention
+
+
+def test_scatter_free_heatmap_suppression_matches_slice_assignment() -> None:
+    """The scatter-free local_max (pad+mask+maximum+concat+gather) must be bit-equal to
+    the old slice-assignment form: interior=pooled, border ring=raw (peaks survive),
+    excluded classes untouched."""
+    head = _build_head(dense_heatmap_pooling_classes=[0])
+    assert head.dense_heatmap_pooling_class_ids == [0]
+
+    torch.manual_seed(7)
+    heatmap = torch.rand(2, 2, 9, 9)  # sigmoid-like positive scores
+
+    def reference(hm: torch.Tensor) -> torch.Tensor:
+        local_max = hm.clone()
+        padding = head.nms_kernel_size // 2
+        pooled = F.max_pool2d(
+            hm[:, head.dense_heatmap_pooling_class_ids],
+            kernel_size=head.nms_kernel_size,
+            stride=1,
+            padding=0,
+        )
+        local_max[:, head.dense_heatmap_pooling_class_ids, padding:-padding, padding:-padding] = (
+            pooled
+        )
+        return hm * (local_max == hm)
+
+    assert torch.equal(head._suppress_dense_heatmap(heatmap), reference(heatmap))
