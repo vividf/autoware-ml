@@ -72,9 +72,17 @@ class TestQuantizationConfig:
         assert config.ptq is None
         assert config.qat == QATConfig(epochs=3, lr=1e-4)
 
-    def test_default_precision_only_int8(self):
-        with pytest.raises(ValueError, match="only int8 is supported"):
-            QuantizationConfig.from_dict({"enabled": True, "default_precision": "fp8"})
+    def test_default_precision_values(self, caplog):
+        import logging
+
+        # FP8 parses (descriptors exist) but is loudly marked unvalidated.
+        with caplog.at_level(logging.WARNING, logger="autoware_ml.quantization.config"):
+            config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "fp8"})
+        assert config.default_precision is Precision.FP8
+        assert "no accuracy validation" in caplog.text
+        # Unknown precisions still die at parse time.
+        with pytest.raises(ValueError, match="valid values"):
+            QuantizationConfig.from_dict({"enabled": True, "default_precision": "int4"})
         config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "int8"})
         assert config.default_precision is Precision.INT8
         assert QuantizationConfig.from_dict(config.to_dict()) == config

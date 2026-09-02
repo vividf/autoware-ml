@@ -33,11 +33,15 @@ MLflow run context.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Optional, Tuple
 
 from autoware_ml.utils.config_parsing import reject_unknown_keys
+
+logger = logging.getLogger(__name__)
 
 #: Module kinds a submodule rule may request.
 VALID_MODULE_KINDS = ("conv", "linear")
@@ -47,9 +51,15 @@ VALID_RECIPES = ("residual_add", "ese", "maxpool")
 
 
 class Precision(str, Enum):
-    """Quantization target precision. INT8 is the only supported value today."""
+    """Quantization target precision.
+
+    INT8 is the validated production path. FP8 (E4M3) has descriptors defined
+    (:mod:`.core.descriptors`) but no accuracy validation on hardware in this repo yet —
+    selecting it logs a warning.
+    """
 
     INT8 = "int8"
+    FP8 = "fp8"
 
 
 @dataclass(frozen=True)
@@ -463,9 +473,16 @@ class QuantizationConfig:
             default_precision = Precision(raw_precision)
         except ValueError:
             raise ValueError(
-                f"quantization.default_precision={raw_precision!r} — only int8 is supported; "
-                "skip_quantize opts subtrees out."
+                f"quantization.default_precision={raw_precision!r} — valid values: "
+                f"{[p.value for p in Precision]}; skip_quantize opts subtrees out."
             ) from None
+        if default_precision is not Precision.INT8:
+            logger.warning(
+                "quantization.default_precision=%s: descriptors are defined but this "
+                "precision has no accuracy validation in this repo yet — validate before "
+                "shipping.",
+                default_precision.value,
+            )
         disable_recipes = cls._str_tuple(raw.get("disable_recipes"))
         unknown_recipes = sorted(set(disable_recipes) - set(VALID_RECIPES))
         if unknown_recipes:

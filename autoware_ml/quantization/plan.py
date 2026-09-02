@@ -57,7 +57,12 @@ from dataclasses import asdict, dataclass
 import logging
 from typing import Any, Mapping, Sequence, Tuple
 
-from autoware_ml.quantization.config import VALID_MODULE_KINDS, VALID_RECIPES, QuantizationConfig
+from autoware_ml.quantization.config import (
+    VALID_MODULE_KINDS,
+    VALID_RECIPES,
+    Precision,
+    QuantizationConfig,
+)
 from autoware_ml.quantization.core.fusion import find_conv_bn_pairs, fuse_model_bn
 from autoware_ml.quantization.core.replace import (
     expand_skip_quantize,
@@ -200,16 +205,25 @@ class QuantRules:
 
     Attributes:
         quantize_submodules: Top-level model attribute name -> module kinds to
-            replace inside it (subset of :data:`VALID_MODULE_KINDS`). A submodule
-            absent on the model is skipped silently, so one rules object can
-            serve model variants.
+            replace inside it. Two spellings:
+
+            - ``("conv", "linear")`` — every kind at the config's
+              ``default_precision`` (the common case);
+            - ``{"conv": "int8", "linear": "fp8"}`` — per-kind precision, for a model
+              whose layer families tolerate different precisions. A kind mapped to
+              ``None`` follows ``default_precision``.
+
+            A submodule absent on the model is skipped silently, so one rules object
+            can serve model variants.
         recipes: Architecture recipes to attach (subset of :data:`VALID_RECIPES`).
             Recipes are class-gated: each fires only where the architecture has
             that block, so zero matches are normal. Applied in canonical
-            :data:`VALID_RECIPES` order regardless of declaration order.
+            :data:`VALID_RECIPES` order regardless of declaration order. Recipe
+            quantizers always follow ``default_precision`` (they are activation-side
+            glue shared with the conv inputs, not per-kind weights).
     """
 
-    quantize_submodules: Mapping[str, Tuple[str, ...]]
+    quantize_submodules: Mapping[str, Tuple[str, ...] | Mapping[str, str | None]]
     recipes: Tuple[str, ...] = VALID_RECIPES
 
     def __post_init__(self) -> None:
@@ -220,12 +234,33 @@ class QuantRules:
                     f"QuantRules submodule {submodule_name!r} declares unknown module kind(s) "
                     f"{sorted(unknown)}; valid kinds: {list(VALID_MODULE_KINDS)}."
                 )
+            if isinstance(kinds, Mapping):
+                for kind, precision_name in kinds.items():
+                    if precision_name is not None:
+                        Precision(precision_name)  # raises ValueError on an unknown precision
         unknown_recipes = set(self.recipes) - set(VALID_RECIPES)
         if unknown_recipes:
             raise ValueError(
                 f"QuantRules declares unknown recipe(s) {sorted(unknown_recipes)}; "
                 f"valid recipes: {list(VALID_RECIPES)}."
             )
+
+    def resolved_kinds(
+        self, submodule_name: str, default_precision: Precision
+    ) -> Mapping[str, Precision]:
+        """The submodule's kinds with every precision resolved.
+
+        Args:
+            submodule_name: Key of :attr:`quantize_submodules`.
+            default_precision: Config precision used for kinds without their own.
+        """
+        kinds = self.quantize_submodules[submodule_name]
+        if isinstance(kinds, Mapping):
+            return {
+                kind: (Precision(name) if name is not None else default_precision)
+                for kind, name in kinds.items()
+            }
+        return {kind: default_precision for kind in kinds}
 
 
 class QuantizationPlan:
@@ -289,30 +324,40 @@ class QuantizationPlan:
             )
         skip_names = expand_skip_quantize(model, self.config.skip_quantize, log=False)
 
-        precision = self.config.default_precision
-        for submodule_name, kinds in self.rules.quantize_submodules.items():
+        default_precision = self.config.default_precision
+        for submodule_name in self.rules.quantize_submodules:
             submodule = getattr(model, submodule_name, None)
             if submodule is None:
                 continue
-            reason = f"submodule rule: {submodule_name} ({', '.join(kinds)})"
-            replace_quantizable_modules(
-                submodule,
-                kinds=kinds,
-                skip_names=skip_names,
-                prefix=submodule_name,
-                on_replace=lambda name, old, new, reason=reason: record.add(
-                    name,
-                    "replace_module",
-                    reason=reason,
-                    detail=f"{type(old).__name__} -> {type(new).__name__}",
-                ),
-                precision=precision,
-            )
+            by_precision: dict[Precision, list[str]] = {}
+            for kind, precision in self.rules.resolved_kinds(
+                submodule_name, default_precision
+            ).items():
+                by_precision.setdefault(precision, []).append(kind)
+            for precision, kinds in by_precision.items():
+                reason = f"submodule rule: {submodule_name} ({', '.join(kinds)})"
+                # The precision appears in the recorded detail only when it deviates
+                # from the default, so records of existing single-precision
+                # checkpoints stay byte-identical and keep verifying.
+                suffix = "" if precision is default_precision else f" @{precision.value}"
+                replace_quantizable_modules(
+                    submodule,
+                    kinds=tuple(kinds),
+                    skip_names=skip_names,
+                    prefix=submodule_name,
+                    on_replace=lambda name, old, new, reason=reason, suffix=suffix: record.add(
+                        name,
+                        "replace_module",
+                        reason=reason,
+                        detail=f"{type(old).__name__} -> {type(new).__name__}{suffix}",
+                    ),
+                    precision=precision,
+                )
 
         disabled = set(self.config.disable_recipes)
         for recipe_name in VALID_RECIPES:
             if recipe_name in self.rules.recipes and recipe_name not in disabled:
-                RECIPE_ATTACHERS[recipe_name](model, skip_names, record.add, precision)
+                RECIPE_ATTACHERS[recipe_name](model, skip_names, record.add, default_precision)
 
         self.placement_record = record
         record.log_summary()

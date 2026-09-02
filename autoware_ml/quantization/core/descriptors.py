@@ -19,9 +19,11 @@ module-replacement engine (:mod:`.replace`) and the architecture recipes
 (:mod:`..recipes.attach`) request descriptors here with the precision the plan
 hands them — nothing else in the framework spells bit widths.
 
-Adding a precision (e.g. FP8) = adding its row to each table below (plus the
-:class:`Precision` enum member and, if modelopt needs new descriptor fields, a
-translation in :func:`autoware_ml.quantization.core.backend.make_quant_desc`).
+Adding a precision = adding its row to each table below (plus the :class:`Precision`
+enum member and, if modelopt needs new descriptor fields, a translation in
+:func:`autoware_ml.quantization.core.backend.make_quant_desc`). FP8 rows are E4M3
+(``num_bits=(4, 3)``) with max calibration — the modelopt convention for FP8, whose
+scales come from tensor maxima rather than histograms.
 
 Descriptors are built through :mod:`.backend`, which translates the framework's
 historical vocabulary to modelopt's ``QuantizerAttributeConfig``.
@@ -43,11 +45,17 @@ from . import backend as _backend
 #: parameters keeps their calibration consistent with the conv inputs.
 _INPUT_DESC_ARGS: Mapping[Precision, dict[str, Any]] = {
     Precision.INT8: dict(num_bits=8, calib_method="histogram"),
+    Precision.FP8: dict(num_bits=(4, 3), calib_method="max"),
 }
 
-#: Per-output-channel weight descriptor for Conv2d (modelopt preset name).
+#: Per-output-channel weight descriptor for Conv2d. INT8 keeps the modelopt preset the
+#: calibrated production checkpoints were built with; FP8 has no preset and is spelled
+#: as args (same per-output-channel axis).
 _CONV2D_WEIGHT_PRESET: Mapping[Precision, str] = {
     Precision.INT8: "QUANT_DESC_8BIT_CONV2D_WEIGHT_PER_CHANNEL",
+}
+_CONV2D_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
+    Precision.FP8: dict(num_bits=(4, 3), axis=(0,)),
 }
 
 #: Per-tensor weight descriptor for ConvTranspose2d. TensorRT INT8 transposed conv is
@@ -56,10 +64,14 @@ _CONV2D_WEIGHT_PRESET: Mapping[Precision, str] = {
 _CONV_TRANSPOSE2D_WEIGHT_PRESET: Mapping[Precision, str] = {
     Precision.INT8: "QUANT_DESC_8BIT_PER_TENSOR",
 }
+_CONV_TRANSPOSE2D_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
+    Precision.FP8: dict(num_bits=(4, 3)),
+}
 
 #: Per-output-channel (per-row) weight descriptor for Linear.
 _LINEAR_WEIGHT_ARGS: Mapping[Precision, dict[str, Any]] = {
     Precision.INT8: dict(num_bits=8, axis=(0,)),
+    Precision.FP8: dict(num_bits=(4, 3), axis=(0,)),
 }
 
 
@@ -80,13 +92,17 @@ def input_desc(precision: Precision) -> Any:
 
 def conv2d_weight_desc(precision: Precision) -> Any:
     """Conv2d weight descriptor for ``precision``."""
-    return _backend.get_preset_desc(_lookup(_CONV2D_WEIGHT_PRESET, precision, "Conv2d weight"))
+    if precision in _CONV2D_WEIGHT_PRESET:
+        return _backend.get_preset_desc(_CONV2D_WEIGHT_PRESET[precision])
+    return _backend.make_quant_desc(**_lookup(_CONV2D_WEIGHT_ARGS, precision, "Conv2d weight"))
 
 
 def conv_transpose2d_weight_desc(precision: Precision) -> Any:
     """ConvTranspose2d weight descriptor for ``precision``."""
-    return _backend.get_preset_desc(
-        _lookup(_CONV_TRANSPOSE2D_WEIGHT_PRESET, precision, "ConvTranspose2d weight")
+    if precision in _CONV_TRANSPOSE2D_WEIGHT_PRESET:
+        return _backend.get_preset_desc(_CONV_TRANSPOSE2D_WEIGHT_PRESET[precision])
+    return _backend.make_quant_desc(
+        **_lookup(_CONV_TRANSPOSE2D_WEIGHT_ARGS, precision, "ConvTranspose2d weight")
     )
 
 
