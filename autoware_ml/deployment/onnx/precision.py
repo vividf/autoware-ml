@@ -81,23 +81,99 @@ def _assign_missing_node_names(graph) -> None:
             taken.add(candidate)
 
 
-#: Pointwise/shape ops TensorRT's Q/DQ propagation commutes across. The backward walk
-#: from each QuantizeLinear grows the island through these so quantized chains stay
-#: castless end to end (conv -> relu -> concat -> next Q); anything else ends the region.
+#: Ops TensorRT's Q/DQ propagation commutes across. The backward walk from each
+#: QuantizeLinear grows the island through these so quantized chains stay castless end
+#: to end (conv -> relu -> reshape -> next Q); anything else ends the region. Membership
+#: means "quantization commutes with this op, so TensorRT can move the Q across it and
+#: fuse an int8-out kernel": monotone/value-neutral activations, linear pooling, and
+#: pure data-movement ops qualify. Deliberately ABSENT: nonlinear activations quantization
+#: does not commute with (Gelu, Sigmoid, Tanh, Erf, Mul-gating ...) — TensorRT cannot
+#: propagate Q across them anyway, so islanding them would only force FP32 execution of
+#: ops that are cheaper left in the FP16 sea (requantized after).
 #: MAINTENANCE CONTRACT: this list approximates the propagation rules of the pinned
 #: TensorRT version. When a quantized chain breaks on an op missing here, the pass logs
-#: a warning naming it; extend the list (and re-run the three-model battery) then.
-_QDQ_COMMUTING_OPS = frozenset({"Relu", "LeakyRelu", "Clip", "Concat", "MaxPool", "Add"})
+#: a warning naming it; extend the list (with a slot entry below — enforced at import —
+#: and re-run the three-model battery) then.
+_QDQ_COMMUTING_OPS = frozenset(
+    {
+        "Relu",
+        "LeakyRelu",
+        "Clip",
+        "Concat",
+        "Add",
+        "MaxPool",
+        "AveragePool",
+        "GlobalAveragePool",
+        "Reshape",
+        "Transpose",
+        "Flatten",
+        "Squeeze",
+        "Unsqueeze",
+        "Slice",
+        "Gather",
+        "Identity",
+    }
+)
 
-#: Positions of the FLOAT-typed inputs of the Q/DQ ops (Q: data + scale, zero-point is
-#: int8; DQ: scale only, its data input is the quantized integer tensor). Every other
-#: island member (the quantized GEMMs and the commuting pointwise ops) is all-float.
-_ISLAND_FLOAT_INPUT_SLOTS = {
+#: Positions of the FLOAT-typed inputs, per island op. The boundary-cast logic must
+#: never cast an integer edge (a Q/DQ zero-point, a Reshape shape, a Gather index...),
+#: so every op that can be an island member has an explicit entry here: Q/DQ, the
+#: commuting ops above, and ``None`` rows meaning "every input is float" (the quantized
+#: compute ops and all-float pointwise). The import-time check below keeps this table
+#: and the whitelist in lockstep, so extending one without the other is impossible.
+_ALL_FLOAT = None
+_ISLAND_FLOAT_INPUT_SLOTS: dict = {
+    # Q/DQ: data + scale are float for Q; only the scale for DQ (its data is int8).
     "QuantizeLinear": (0, 1),
     "TRT_FP8QuantizeLinear": (0, 1),
     "DequantizeLinear": (1,),
     "TRT_FP8DequantizeLinear": (1,),
+    # Commuting ops: data input(s) only — trailing inputs are ints (shape/axes/indices)
+    # or all inputs are float.
+    "Relu": (0,),
+    "LeakyRelu": (0,),
+    "Clip": _ALL_FLOAT,  # min/max inputs are float
+    "Concat": _ALL_FLOAT,
+    "Add": _ALL_FLOAT,
+    "MaxPool": (0,),
+    "AveragePool": (0,),
+    "GlobalAveragePool": (0,),
+    "Reshape": (0,),  # input[1] is the int64 shape
+    "Transpose": (0,),
+    "Flatten": (0,),
+    "Squeeze": (0,),  # input[1] (opset 13+) is the int64 axes
+    "Unsqueeze": (0,),
+    "Slice": (0,),  # starts/ends/axes/steps are int64
+    "Gather": (0,),  # indices are int
+    "Identity": (0,),
 }
+_MISSING_SLOT_ENTRIES = _QDQ_COMMUTING_OPS - set(_ISLAND_FLOAT_INPUT_SLOTS)
+assert not _MISSING_SLOT_ENTRIES, (
+    f"_QDQ_COMMUTING_OPS entries missing a float-slot row: {sorted(_MISSING_SLOT_ENTRIES)}. "
+    "Every whitelisted op needs one so island boundary casts never touch integer edges."
+)
+
+#: Ops quantization mathematically does NOT commute with: a chain deliberately ends here
+#: (the op runs FP16 in the sea and the activation is requantized after), so the
+#: broken-chain check reports these at DEBUG, not WARNING — only genuinely unclassified
+#: ops deserve a look at the whitelist.
+_KNOWN_NON_COMMUTING_OPS = frozenset(
+    {
+        "LayerNormalization",
+        "BatchNormalization",
+        "Softmax",
+        "Sigmoid",
+        "HardSigmoid",
+        "Gelu",
+        "Erf",
+        "Tanh",
+        "Mul",
+        "Div",
+        "Pow",
+        "Sqrt",
+        "Exp",
+    }
+)
 
 
 def _quantized_island_names(graph) -> list[str]:
@@ -135,8 +211,11 @@ def _quantized_island_names(graph) -> list[str]:
         if node.name not in island and any(name in dq_outputs for name in node.input):
             island[node.name] = None
 
-    # Grow each island backward from the Q data inputs through commuting pointwise ops,
-    # so the region between a quantized op and its re-quantization carries no casts.
+    # Grow each island backward from the Q data inputs through commuting ops, so the
+    # region between a quantized op and its re-quantization carries no casts. The walk
+    # follows FLOAT data edges only (per the slot table): stepping through an integer
+    # input (a Gather index chain, a Reshape shape) would drag int-typed glue into the
+    # island and let the boundary logic cast integer edges.
     pending = [node.input[0] for node in graph.node if node.op_type in _QUANTIZE_OPS and node.input]
     while pending:
         producer = producer_of.get(pending.pop())
@@ -145,7 +224,12 @@ def _quantized_island_names(graph) -> list[str]:
         if producer.op_type not in _QDQ_COMMUTING_OPS:
             continue
         island[producer.name] = None
-        pending.extend(producer.input)
+        slots = _ISLAND_FLOAT_INPUT_SLOTS[producer.op_type]
+        pending.extend(
+            name
+            for index, name in enumerate(producer.input)
+            if slots is _ALL_FLOAT or index in slots
+        )
     return list(island)
 
 
@@ -172,14 +256,25 @@ def _warn_broken_quantized_chains(graph, island: set) -> None:
             producer_of.get(name) is not None and producer_of[name].name in dq_consumers
             for name in hop.input
         ):
-            logger.warning(
-                "Quantized chain breaks at %s %r feeding %r: the op is not in "
-                "_QDQ_COMMUTING_OPS, so the upstream quantized op will materialize FP32 "
-                "output instead of fusing. Consider whitelisting it.",
-                hop.op_type,
-                hop.name,
-                node.name,
-            )
+            if hop.op_type in _KNOWN_NON_COMMUTING_OPS:
+                logger.debug(
+                    "Quantized chain ends at %s %r feeding %r (known non-commuting op; "
+                    "it runs FP16 and the activation is requantized after — by design).",
+                    hop.op_type,
+                    hop.name,
+                    node.name,
+                )
+            else:
+                logger.warning(
+                    "Quantized chain breaks at %s %r feeding %r: the op is not in "
+                    "_QDQ_COMMUTING_OPS, so the upstream quantized op will materialize FP32 "
+                    "output instead of fusing. If quantization commutes with it, whitelist "
+                    "it (with a float-slot row) and re-run the battery; if it does not, "
+                    "add it to _KNOWN_NON_COMMUTING_OPS to silence this.",
+                    hop.op_type,
+                    hop.name,
+                    node.name,
+                )
 
 
 def cast_graph_to_fp16(onnx_path: Path) -> None:
@@ -204,6 +299,14 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
 
     model = onnx.load(str(onnx_path))
     graph = model.graph
+    control_flow = sorted({n.op_type for n in graph.node if n.op_type in ("If", "Loop", "Scan")})
+    if control_flow:
+        raise NotImplementedError(
+            f"cast_graph_to_fp16 does not handle control-flow subgraphs ({', '.join(control_flow)} "
+            f"in {onnx_path.name}): their bodies would keep FP32 tensors against the converted "
+            "FP16 sea. Export the stage without in-graph control flow, or extend the pass to "
+            "recurse into subgraph bodies first."
+        )
     _assign_missing_node_names(graph)
     island = set(_quantized_island_names(graph))
     _warn_broken_quantized_chains(graph, island)

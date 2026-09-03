@@ -286,3 +286,57 @@ bit-exact 驗證(state_dict keys、64 個 amax、weights 全零差)通過:
 | QAT 撿 `best.ckpt` hardcode 路徑 | `trainer.checkpoint_callback.best_model_path` | 檔名跟 callback config 走;deploy `--weights` 本就由使用者任選 |
 | `_dry_run_manifest` | `_log_placement_dry_run` | 動詞說明它做的事(印表) |
 | docstring 用語 seam / "the transform vocabulary the manifest speaks" | 白話("the single interface between ..."、"Transforms a placement record can contain");glue(glue code 常語)保留 | 可讀性 |
+
+## 10. 新增量化模型 checklist(2026-09-04)
+
+新 model 要走通 quantize → deploy(INT8/FP8),需要的全部工作與已知陷阱。
+precision pass(island cast / AutoCast 路由)完全自動,model 端**零 precision 程式碼**。
+
+### 步驟
+
+1. **宣告量化面**:在 `main_modules/<model>/quantization.py` 寫 `QuantRules`
+   (參考:PTv3 57 行、BEVFusion 67 行)。`quantize_submodules` 的 key 是 model
+   的**頂層屬性名**;kind 用 tuple(全走 config 的 `default_precision`)或 mapping
+   釘死 per-kind precision(如 BEVFusion 的 `{"conv": None, "linear": "fp8"}`——
+   linear 永不 INT8,PTv3 實測 INT8 linear 賠 6 mIoU 換不到 latency)。
+2. **寫 `_int8` / `_fp8` experiment config**(參考 centerpoint/ptv3/bevfusion 的現例):
+   `quantization:` 區塊 + `skip_quantize` + verification scenarios。
+3. **先 dry-run 再燒 GPU**:`quantize ... +quantization.dry_run=true` 印出完整
+   placement record,確認替換的模組正是你要的。
+4. `quantize` 產 ptq.ckpt(自描述)→ `deploy --weights <ptq.ckpt>` 評估。
+   deploy/test 不讀 `cfg.quantization`。
+5. export log 裡如果出現 **"Quantized chain breaks at ..."** 警告:那個 op 若量化
+   可交換 → 加進 `_QDQ_COMMUTING_OPS`(連同 float-slot 表一行,import 檢查會強制)
+   並重跑三模型 battery;若不可交換 → 加進 `_KNOWN_NON_COMMUTING_OPS` 消音。
+
+### 五個已知陷阱(都付過學費,附實例)
+
+1. **attention 的投影在校準期抓不到**:訓練態 `nn.MultiheadAttention` 的 qkv 是
+   packed Parameter(不是 module),export 態 `q/k/v/out_proj` Linear 在
+   `prepare_for_export` 才誕生(校準之後);`out_proj` 更是 forward 被 fast path
+   繞過的 `NonDynamicallyQuantizableLinear`(walker 已在框架層拒換)。要量 attention
+   投影 = 校準前先換 export 態 attention(未實作的 attention-recipe 前置)。
+   → 實例與完整說明:`models/detection3d/main_modules/bevfusion/quantization.py` docstring。
+2. **輸入端層對 INT8 敏感,照 release recipe skip**:CenterPoint backbone stage 0
+   量了掉 ~1.2 mAP(輸入 pseudo-image 動態範圍大),AWML release recipe 一直是
+   skip 的——遷移時漏過一次。加新 model 時對「吃 raw/scatter 特徵的第一段」做
+   leave-one-out 檢查。→ 實例:`configs/experiments/detection3d/centerpoint/
+   voxel024_..._int8.yaml` 的 skip_quantize 註解。
+3. **linear 量化選 FP8 不選 INT8**:兩模型交叉驗證(PTv3 −0.37 vs INT8 −6.4 mIoU;
+   BEVFusion FFN ±0)。FP8 走 trt-domain 自訂 op、per-tensor scale、max 校準,
+   framework 已全通。→ `work_dirs/reviews/fp8-quantization-README.md`。
+4. **ONNX Runtime backend 跑不了 plugin stage 與 FP8 op**:含 plugin 的 stage 宣告
+   `torch_fallback_backends`,FP8 experiment 直接關 onnx backend(ORT 連圖都載不了)。
+   → 實例:ptv3/base.yaml(onnx disabled 註解)、bevfusion `_fp8` config。
+5. **verification tolerance 是實測校準的,不是猜的**:量化/FP16 stage 的 raw-logit
+   跨 backend 差是預期行為,mAP/mIoU 相等才是真 gate。首跑 fail 時,錯誤訊息會
+   給建議 gate 值(observed×1.25);把 observed 記進 config 註解。
+   → 實例:centerpoint `_int8.yaml` scenarios 註解。
+
+### 一條不可動的地基
+
+**Q/DQ 保持 fp32-typed(island)是刻意且承重的設計**:fp16-typed Q/DQ(opset 19 合法、
+ORT 算得對)會踩 TRT 10.8/10.16 的缺陷——fp16 合併 scale 落入 subnormal 時融合 kernel
+產生 NaN、build 零警告。完整證據與重測工具:`work_dirs/reviews/fp16-typed-qdq-nogo.md`
+(金絲雀 = PTv3 INT8 QAT)。island 的運作規則(誰進島、cast 放哪、每條規則的實測代價)
+見 `deployment/onnx/precision.py` 的 docstrings。

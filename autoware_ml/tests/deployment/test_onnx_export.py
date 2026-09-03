@@ -436,6 +436,104 @@ def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) ->
         assert nodes[name].input[1] == nodes["s_const"].output[0]
 
 
+def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_edges(
+    tmp_path,
+) -> None:
+    """A Reshape between the quantized Gemm and the next Q joins the island castless.
+
+    Shape ops are pure data movement, so TensorRT's Q/DQ propagation crosses them; the
+    island must include them (castless chain) while never casting their integer inputs
+    (the int64 shape here — the reason the whitelist and the float-slot table are kept
+    in lockstep by the import-time check).
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
+    )
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(0.1)])
+    zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
+    shape = helper.make_tensor("new_shape", TensorProto.INT64, [2], [1, 8])
+    gain = helper.make_tensor("g", TensorProto.FLOAT, [8], np.ones(8, dtype=np.float32))
+    graph = helper.make_graph(
+        [
+            helper.make_node("PluginOp", ["x", "g"], ["mid"], domain="autoware", name="plugin"),
+            helper.make_node("QuantizeLinear", ["mid", "s", "zp"], ["q"], name="q"),
+            helper.make_node("DequantizeLinear", ["q", "s", "zp"], ["dq"], name="dq"),
+            helper.make_node("Gemm", ["dq", "w"], ["gemm_out"], name="gemm"),
+            helper.make_node("Reshape", ["gemm_out", "new_shape"], ["reshaped"], name="reshape"),
+            helper.make_node("QuantizeLinear", ["reshaped", "s", "zp"], ["q2"], name="q2"),
+            helper.make_node("DequantizeLinear", ["q2", "s", "zp"], ["y"], name="dq2"),
+        ],
+        "shape_op_island_graph",
+        [x],
+        [y],
+        [weight, scale, zero_point, shape, gain],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+    )
+    path = tmp_path / "shape_op_island_graph.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    nodes = {n.name: n for n in converted.graph.node}
+    inits = {i.name: i for i in converted.graph.initializer}
+    # Castless chain through the Reshape: Gemm -> Reshape -> Q2 direct edges.
+    assert nodes["reshape"].input[0] == nodes["gemm"].output[0]
+    assert nodes["q2"].input[0] == nodes["reshape"].output[0]
+    # The int64 shape input is untouched — no cast, same initializer.
+    assert nodes["reshape"].input[1] == "new_shape"
+    assert inits["new_shape"].data_type == TensorProto.INT64
+    # Island tensors stay FP32; the sea (plugin gain) converted.
+    assert inits["s"].data_type == TensorProto.FLOAT
+    assert inits["w"].data_type == TensorProto.FLOAT
+    assert inits["g"].data_type == TensorProto.FLOAT16
+    onnx.checker.check_model(converted)
+
+
+def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
+    """If/Loop/Scan bodies are not converted; the pass must refuse loudly, not corrupt."""
+    import numpy as np
+    import onnx
+    import pytest
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+
+    cond = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+    const = helper.make_tensor("c", TensorProto.FLOAT, [1], np.ones(1, dtype=np.float32))
+    branch = helper.make_graph(
+        [helper.make_node("Identity", ["c"], ["branch_out"])],
+        "branch",
+        [],
+        [helper.make_tensor_value_info("branch_out", TensorProto.FLOAT, [1])],
+        [const],
+    )
+    graph = helper.make_graph(
+        [helper.make_node("If", ["cond"], ["y"], then_branch=branch, else_branch=branch)],
+        "control_flow_graph",
+        [cond],
+        [y],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    path = tmp_path / "control_flow_graph.onnx"
+    onnx.save(model, str(path))
+
+    with pytest.raises(NotImplementedError, match="control-flow"):
+        cast_graph_to_fp16(path)
+
+
 def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
     """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
     import numpy as np
