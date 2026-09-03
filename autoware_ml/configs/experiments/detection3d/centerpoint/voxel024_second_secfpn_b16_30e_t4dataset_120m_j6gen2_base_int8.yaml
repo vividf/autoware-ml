@@ -31,10 +31,11 @@ deploy:
     # INT8 raw-logit diffs between backends are expected while metrics stay equal, so the
     # tolerances are empirically calibrated per scenario (whole-list override: Hydra lists replace).
     # pytorch-vs-onnx: fp32 fake-quant reference vs fp16(AutoCast)+QDQ ONNX — observed
-    # max_diff 2.07 on vel logits with equal mAP; gate at 2.5.
+    # max_diff 2.07 on vel logits with equal mAP; gate at 2.5. onnx-vs-tensorrt: observed
+    # max_diff 8.83 on vel logits with equal mAP after restoring the blocks.0 skip; gate at 10.
     scenarios:
       - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 2.5 }
-      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 8.0 }
+      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
   evaluation:
     enabled: true
 
@@ -44,8 +45,14 @@ quantization:
   fuse_bn: true
   default_precision: int8
   # The PFN stays FP16: pillar features are latency-cheap and quantizing them buys nothing.
+  # The first SECOND stage also stays FP16 — the AWML 2.6 quant release recipe
+  # (deploy_config_int8_second_2_6_quant_release.py: keep_fp16=["pts_backbone.blocks.0"],
+  # "was skip_backbone_stages=[0]") skips stage 0 because quantizing it costs accuracy.
+  # The migration had dropped this entry; measured on 100 samples (TRT mAP): 0.4450 with
+  # blocks.0 quantized vs 0.4576 skipped (FP16 baseline band 0.4491-0.4516).
   skip_quantize:
     - pts_voxel_encoder
+    - pts_backbone.blocks.0
   # SECOND has no residual blocks, so the "residual_add" recipe would match nothing anyway.
   disable_recipes:
     - residual_add
