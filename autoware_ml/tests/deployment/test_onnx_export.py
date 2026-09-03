@@ -287,12 +287,27 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
             helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
             helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
             helper.make_node("Gemm", ["dq", "wdq", "b"], ["gemm_out"], name="gemm"),
-            helper.make_node("Mul", ["gemm_out", "g"], ["y"], name="mul"),
+            # A commuting pointwise chain into a re-quantization: the island must grow
+            # through the Relu so the quantized chain stays castless (a Cast here blocks
+            # TensorRT's Q propagation into the Gemm, which then materializes FP32).
+            helper.make_node("Relu", ["gemm_out"], ["relu_out"], name="relu"),
+            helper.make_node("QuantizeLinear", ["relu_out", "s", "zp"], ["q2"], name="q2"),
+            helper.make_node("DequantizeLinear", ["q2", "s", "zp"], ["dq2"], name="dq2"),
+            # mul consumes a DQ output, so it belongs to the island; its gain therefore
+            # stays FP32, and the plugin-only "g" shows the outside conversion instead.
+            helper.make_node("Mul", ["dq2", "g2"], ["y"], name="mul"),
         ],
         "qdq_island_graph",
         [x],
         [y],
-        [weight, bias, gain, scale, zero_point],
+        [
+            weight,
+            bias,
+            gain,
+            helper.make_tensor("g2", TensorProto.FLOAT, [4], np.ones(4, dtype=np.float32)),
+            scale,
+            zero_point,
+        ],
     )
     model = helper.make_model(
         graph,
@@ -311,7 +326,8 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     assert numpy_helper.to_array(inits["s"]) == scale_value
     assert inits["w"].data_type == TensorProto.FLOAT
     assert inits["b"].data_type == TensorProto.FLOAT
-    # Outside the island the conversion happened.
+    # The island mul's gain stays FP32; outside the island (plugin-only g) converts.
+    assert inits["g2"].data_type == TensorProto.FLOAT
     assert inits["g"].data_type == TensorProto.FLOAT16
 
     nodes = {n.name: n for n in converted.graph.node}
@@ -319,8 +335,12 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     # (the converter renames the tensors; what matters is that no node sits between).
     assert nodes["gemm"].input[0] == nodes["dq"].output[0]
     assert nodes["gemm"].input[1] == nodes["wdq"].output[0]
+    # The quantized chain into the re-quantization is castless: the Relu joined the
+    # island (Gemm -> Relu -> Q2 with no Cast on either edge).
+    assert nodes["relu"].input[0] == nodes["gemm"].output[0]
+    assert nodes["q2"].input[0] == nodes["relu"].output[0]
     # Q/DQ still read the scale directly (no Cast between the constant and the island).
-    for name in ("q", "dq", "wq", "wdq"):
+    for name in ("q", "dq", "wq", "wdq", "q2", "dq2"):
         assert nodes[name].input[1] == "s"
 
     # The island's boundaries are single casts: no fp16 round-trip pairs anywhere.

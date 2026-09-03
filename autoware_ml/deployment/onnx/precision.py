@@ -81,15 +81,25 @@ def _assign_missing_node_names(graph) -> None:
             taken.add(candidate)
 
 
+#: Pointwise/shape ops TensorRT's Q/DQ propagation commutes across. The backward walk
+#: from each QuantizeLinear grows the island through these so quantized chains stay
+#: castless end to end (conv -> relu -> concat -> next Q); anything else ends the region.
+_QDQ_COMMUTING_OPS = frozenset({"Relu", "LeakyRelu", "Clip", "Concat", "MaxPool", "Add"})
+
+
 def _quantized_island_names(graph) -> list[str]:
     """The nodes that must stay FP32 for the Q/DQ regions to survive an FP16 cast.
 
     An island is a Q/DQ pair *plus* what TensorRT's INT8 fusion pattern-matches around
     it: the scale/zero-point producers (their FP32 values are the quantization — rounding
-    them through FP16 is what broke the naive cast, measured mIoU 0.545 -> 0.067), and
-    the consumers of DequantizeLinear outputs (the quantized GEMM itself: a Cast between
+    them through FP16 is what broke the naive cast, measured mIoU 0.545 -> 0.067), the
+    consumers of DequantizeLinear outputs (the quantized GEMM itself: a Cast between
     DQ and its consumer defeats the DQ -> op -> Q fusion, measured as TensorRT's
-    "Per-tensor quantization/dequantization layer should have 1 scale factor element").
+    "Per-tensor quantization/dequantization layer should have 1 scale factor element"),
+    and the pointwise chain between a quantized op and the next QuantizeLinear (a Cast
+    there blocks Q propagation into the producer, forcing every quantized conv to
+    materialize an FP32 output: measured 4.76 ms vs 3.87 for the same CenterPoint
+    backbone when the chains stay castless).
     """
     producer_of = {out: node for node in graph.node for out in node.output}
     island: dict[str, None] = {}
@@ -107,6 +117,18 @@ def _quantized_island_names(graph) -> list[str]:
     for node in graph.node:
         if node.name not in island and any(name in dq_outputs for name in node.input):
             island[node.name] = None
+
+    # Grow each island backward from the Q data inputs through commuting pointwise ops,
+    # so the region between a quantized op and its re-quantization carries no casts.
+    pending = [node.input[0] for node in graph.node if node.op_type in _QUANTIZE_OPS and node.input]
+    while pending:
+        producer = producer_of.get(pending.pop())
+        if producer is None or producer.name in island:
+            continue
+        if producer.op_type not in _QDQ_COMMUTING_OPS:
+            continue
+        island[producer.name] = None
+        pending.extend(producer.input)
     return list(island)
 
 
@@ -149,9 +171,16 @@ def _strip_fp16_round_trips(graph) -> int:
     return removed_pairs
 
 
-def _island_input_names(graph) -> set[str]:
-    """Tensors consumed by island nodes in the converted graph (its FP32 entries)."""
-    island = set(_quantized_island_names(graph))
+def _island_input_names(graph, island_names: list[str]) -> set[str]:
+    """Tensors consumed by island nodes in the converted graph (its FP32 entries).
+
+    The island set is the one computed on the *original* graph: recomputing it after
+    the conversion loses the members grown through commuting chains (the converter's
+    inserted Casts interrupt the backward walk), which then get their boundary casts
+    retargeted to FP16 while their island-internal edges stay FP32 — a mixed-type
+    ElementWise that TensorRT rejects (hit on PTv3's residual Adds).
+    """
+    island = set(island_names)
     return {name for node in graph.node if node.name in island for name in node.input}
 
 
@@ -197,7 +226,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     # ("DIV must have same input types"). After a whole-graph conversion the only
     # legitimate FLOAT casts are the boundary ones feeding the kept-FP32 graph outputs.
     graph_outputs = {output.name for output in converted.graph.output}
-    island_inputs = _island_input_names(converted.graph) if island_names else set()
+    island_inputs = _island_input_names(converted.graph, island_names) if island_names else set()
     for node in converted.graph.node:
         if node.op_type != "Cast" or node.output[0] in graph_outputs:
             continue
