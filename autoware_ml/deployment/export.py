@@ -148,14 +148,21 @@ def export_stages(
                     )
                     cast_graph_to_fp16(onnx_path)
                 elif has_qdq:
-                    # AutoCast does not support Q/DQ models; the INT8 regions carry their
-                    # precision from the checkpoint and the rest of such a (plugin-free)
-                    # graph stays FP32.
+                    # AutoCast does not support Q/DQ models, but leaving the rest of the
+                    # graph FP32 makes every *un*-quantized region pay full price: with
+                    # CenterPoint's release recipe (backbone stage 0 deliberately kept out
+                    # of INT8) the as-is build ran that stage FP32 and cost the whole INT8
+                    # speedup back (backbone_neck_head 5.91 ms vs 2.50 all-INT8). So a
+                    # plugin-free Q/DQ graph takes the same island-aware whole-graph FP16
+                    # cast as plugin graphs: islands stay FP32 exactly as calibrated,
+                    # everything else runs FP16 (the pass PTv3 measured 25.7 -> 7.05 ms
+                    # with unchanged mIoU).
                     logger.info(
-                        "Stage %r carries Q/DQ nodes — precision comes from the quantized "
-                        "checkpoint; skipping AutoCast.",
+                        "Stage %r carries Q/DQ nodes — applying the whole-graph FP16 cast "
+                        "around its Q/DQ islands (AutoCast rejects quantized graphs).",
                         stage.name,
                     )
+                    cast_graph_to_fp16(onnx_path)
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})
             for transform in stage.onnx_transforms:

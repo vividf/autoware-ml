@@ -30,12 +30,13 @@ deploy:
     enabled: true
     # INT8 raw-logit diffs between backends are expected while metrics stay equal, so the
     # tolerances are empirically calibrated per scenario (whole-list override: Hydra lists replace).
-    # pytorch-vs-onnx: fp32 fake-quant reference vs fp16(AutoCast)+QDQ ONNX — observed
-    # max_diff 2.07 on vel logits with equal mAP; gate at 2.5. onnx-vs-tensorrt: observed
-    # max_diff 8.83 on vel logits with equal mAP after restoring the blocks.0 skip; gate at 10.
+    # Both gates measured on the blocks.0-skipped tree with the island-aware FP16 cast
+    # (un-quantized regions run FP16, islands stay FP32): pytorch fp32 fake-quant vs
+    # fp16+QDQ ONNX — observed 2.38 on vel logits, gate 3; onnx vs tensorrt — observed
+    # 13.09 on vel logits, gate 16. mAP equal across backends at both observations.
     scenarios:
-      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 2.5 }
-      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 3.0 }
+      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 16.0 }
   evaluation:
     enabled: true
 

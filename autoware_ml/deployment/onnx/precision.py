@@ -230,6 +230,13 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             if name in boundary_sources:
                 node.input[index] = boundary_sources[name]
 
+    # The conversion leaves stale FLOAT value_info entries behind for tensors that now
+    # carry FP16 — e.g. around the converter's own op-block-listed nodes (Max, TopK...),
+    # whose FLOAT boundary casts the retargeting above flips to FP16. value_info is an
+    # optional hint, but every stale entry is a hard type error in onnxruntime's loader
+    # (TensorRT's parser ignores them), so drop the hints and let backends re-infer.
+    del converted.graph.value_info[:]
+
     onnx.save(converted, str(onnx_path))
     logger.info("Cast %s to FP16 (graph I/O kept FP32).", onnx_path.name)
 
