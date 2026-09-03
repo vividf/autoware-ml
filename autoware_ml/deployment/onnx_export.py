@@ -35,9 +35,7 @@ from autoware_ml.deployment.onnx.modify import (  # noqa: F401
 )
 from autoware_ml.deployment.onnx.precision import (  # noqa: F401
     _assign_missing_node_names,
-    _island_input_names,
     _quantized_island_names,
-    _strip_fp16_round_trips,
     autocast_to_fp16,
     cast_graph_to_fp16,
     onnx_custom_op_domains,

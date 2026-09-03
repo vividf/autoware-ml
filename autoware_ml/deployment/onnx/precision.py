@@ -84,7 +84,20 @@ def _assign_missing_node_names(graph) -> None:
 #: Pointwise/shape ops TensorRT's Q/DQ propagation commutes across. The backward walk
 #: from each QuantizeLinear grows the island through these so quantized chains stay
 #: castless end to end (conv -> relu -> concat -> next Q); anything else ends the region.
+#: MAINTENANCE CONTRACT: this list approximates the propagation rules of the pinned
+#: TensorRT version. When a quantized chain breaks on an op missing here, the pass logs
+#: a warning naming it; extend the list (and re-run the three-model battery) then.
 _QDQ_COMMUTING_OPS = frozenset({"Relu", "LeakyRelu", "Clip", "Concat", "MaxPool", "Add"})
+
+#: Positions of the FLOAT-typed inputs of the Q/DQ ops (Q: data + scale, zero-point is
+#: int8; DQ: scale only, its data input is the quantized integer tensor). Every other
+#: island member (the quantized GEMMs and the commuting pointwise ops) is all-float.
+_ISLAND_FLOAT_INPUT_SLOTS = {
+    "QuantizeLinear": (0, 1),
+    "TRT_FP8QuantizeLinear": (0, 1),
+    "DequantizeLinear": (1,),
+    "TRT_FP8DequantizeLinear": (1,),
+}
 
 
 def _quantized_island_names(graph) -> list[str]:
@@ -100,6 +113,10 @@ def _quantized_island_names(graph) -> list[str]:
     there blocks Q propagation into the producer, forcing every quantized conv to
     materialize an FP32 output: measured 4.76 ms vs 3.87 for the same CenterPoint
     backbone when the chains stay castless).
+
+    fp32-typed islands are deliberate and load-bearing: retyping Q/DQ to fp16 (legal
+    since opset 19) hits a TensorRT 10.8/10.16 defect that emits NaN when the fp16
+    combined scale s_x*s_w goes subnormal (see fp16-typed-qdq-nogo.md).
     """
     producer_of = {out: node for node in graph.node for out in node.output}
     island: dict[str, None] = {}
@@ -132,142 +149,235 @@ def _quantized_island_names(graph) -> list[str]:
     return list(island)
 
 
-def _strip_fp16_round_trips(graph) -> int:
-    """Remove ``Cast(fp16) -> Cast(fp32)`` chains, reconnecting to the FP32 source.
+def _warn_broken_quantized_chains(graph, island: set) -> None:
+    """Log when a quantized chain ends on an op outside the commuting whitelist.
 
-    The converter inserts boundary casts around *every* blocked node, including between
-    two blocked neighbors, so island-internal edges become FP32 -> FP16 -> FP32 round
-    trips: the values (Q/DQ scales above all) come back rounded, and the extra nodes sit
-    inside TensorRT's fusion patterns. A genuine island boundary is a single Cast and is
-    left alone; only the adjacent pairs are collapsed.
+    A QuantizeLinear fed (via one non-island hop) from a quantized island op means the
+    backward growth stopped on that hop's op type: the chain gets a cast boundary and
+    the upstream quantized op materializes FP32 output instead of fusing int8-out.
+    Correctness is unaffected — this is a silent-latency guard, and the fix is usually
+    one entry in ``_QDQ_COMMUTING_OPS``.
     """
-    from onnx import TensorProto
-
-    def cast_target(node):
-        return next((a.i for a in node.attribute if a.name == "to"), None)
-
     producer_of = {out: node for node in graph.node for out in node.output}
-    graph_outputs = {output.name for output in graph.output}
-    removed_pairs = 0
-    for down in list(graph.node):
-        if down.op_type != "Cast" or cast_target(down) != TensorProto.FLOAT:
+    dq_consumers = {
+        node.name for node in graph.node if node.name in island and node.op_type not in _QDQ_OPS
+    }
+    for node in graph.node:
+        if node.op_type not in _QUANTIZE_OPS or not node.input:
             continue
-        if down.output[0] in graph_outputs:
+        hop = producer_of.get(node.input[0])
+        if hop is None or hop.name in island:
             continue
-        up = producer_of.get(down.input[0])
-        if up is None or up.op_type != "Cast" or cast_target(up) != TensorProto.FLOAT16:
-            continue
-        source = up.input[0]
-        for node in graph.node:
-            for index, name in enumerate(node.input):
-                if name == down.output[0]:
-                    node.input[index] = source
-        graph.node.remove(down)
-        removed_pairs += 1
-        if not any(up.output[0] in node.input for node in graph.node) and (
-            up.output[0] not in graph_outputs
+        if any(
+            producer_of.get(name) is not None and producer_of[name].name in dq_consumers
+            for name in hop.input
         ):
-            graph.node.remove(up)
-    return removed_pairs
-
-
-def _island_input_names(graph, island_names: list[str]) -> set[str]:
-    """Tensors consumed by island nodes in the converted graph (its FP32 entries).
-
-    The island set is the one computed on the *original* graph: recomputing it after
-    the conversion loses the members grown through commuting chains (the converter's
-    inserted Casts interrupt the backward walk), which then get their boundary casts
-    retargeted to FP16 while their island-internal edges stay FP32 — a mixed-type
-    ElementWise that TensorRT rejects (hit on PTv3's residual Adds).
-    """
-    island = set(island_names)
-    return {name for node in graph.node if node.name in island for name in node.input}
+            logger.warning(
+                "Quantized chain breaks at %s %r feeding %r: the op is not in "
+                "_QDQ_COMMUTING_OPS, so the upstream quantized op will materialize FP32 "
+                "output instead of fusing. Consider whitelisting it.",
+                hop.op_type,
+                hop.name,
+                node.name,
+            )
 
 
 def cast_graph_to_fp16(onnx_path: Path) -> None:
-    """Convert a whole graph to FP16 in place, keeping the I/O tensors FP32.
+    """Convert a graph to FP16 in place, around FP32 Q/DQ islands, keeping the I/O FP32.
 
-    The FP16 path for graphs AutoCast cannot process: AutoCast types the graph with
-    TensorRT's parser and calibrates per node, which needs every operator implemented in
-    the exporting process, while a plugin graph's compute lives almost entirely in its
-    plugin nodes anyway — per-node selection has nothing meaningful to keep in FP32. So
-    such graphs get the blunt conversion: every float initializer and internal tensor
-    becomes FP16 (the plugins run FP16 when their tensors are — filters and bias follow
-    the feature dtype), engines still build strongly typed, and ``keep_io_types`` holds
-    the artifact ABI at FP32.
+    The FP16 path for graphs AutoCast cannot process: plugin graphs (AutoCast types the
+    graph with TensorRT's parser, which rejects unregistered plugin ops) and quantized
+    graphs (AutoCast rejects Q/DQ models). Everything outside the quantization islands
+    becomes FP16 (plugins run FP16 when their tensors are — filters and bias follow the
+    feature dtype); the islands stay exactly as the checkpoint calibrated them, with
+    single Casts on the float edges where an island meets the FP16 sea; ``keep_io_types``
+    semantics hold the artifact ABI at FP32.
 
-    A quantized (Q/DQ) graph converts too, as FP16 *around* FP32 quantization islands:
-    the Q/DQ nodes, their scale/zero-point constants, and the GEMMs consuming the
-    dequantized tensors stay exactly as the checkpoint calibrated them (see
-    :func:`_quantized_island_names`), everything else becomes FP16, and the island
-    boundaries carry single Casts on the data path only.
+    Implemented in-house rather than via onnxconverter-common: the library inserted
+    boundary casts around every blocked node (round-trip pairs inside islands), left
+    stale value_info entries that hard-fail onnxruntime's loader, and needed the island
+    list protected from recomputation — three patch layers this pass makes unnecessary
+    by only ever creating casts at true island/IO boundaries.
     """
     import onnx
-    from onnx import TensorProto
-    from onnxconverter_common import float16
+    from onnx import TensorProto, helper, numpy_helper
 
     model = onnx.load(str(onnx_path))
-    _assign_missing_node_names(model.graph)
-    island_names = _quantized_island_names(model.graph)
-    converted = float16.convert_float_to_float16(
-        model, keep_io_types=True, node_block_list=island_names or None
-    )
-    if island_names:
-        removed = _strip_fp16_round_trips(converted.graph)
-        logger.info(
-            "Kept %d node(s) in the FP32 quantization islands; collapsed %d island-internal "
-            "FP16 round trip(s).",
-            len(island_names),
-            removed,
-        )
+    graph = model.graph
+    _assign_missing_node_names(graph)
+    island = set(_quantized_island_names(graph))
+    _warn_broken_quantized_chains(graph, island)
 
-    # The converter rewrites float tensors and initializers but leaves pre-existing
-    # int-to-FLOAT Cast nodes at FLOAT, which then meet FP16 tensors downstream
-    # ("DIV must have same input types"). After a whole-graph conversion the only
-    # legitimate FLOAT casts are the boundary ones feeding the kept-FP32 graph outputs.
-    graph_outputs = {output.name for output in converted.graph.output}
-    island_inputs = _island_input_names(converted.graph, island_names) if island_names else set()
-    for node in converted.graph.node:
-        if node.op_type != "Cast" or node.output[0] in graph_outputs:
+    node_by_name = {node.name: node for node in graph.node}
+    producer_of = {out: node for node in graph.node for out in node.output}
+    consumers_of: dict[str, list] = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers_of.setdefault(name, []).append(node)
+
+    def in_island(node) -> bool:
+        return node.name in island
+
+    # --- 1. Initializers: island consumers keep FP32; sea consumers get FP16 (a split
+    # copy when an initializer feeds both worlds).
+    fp16_twin: dict[str, str] = {}
+    new_initializers = []
+    for init in graph.initializer:
+        if init.data_type != TensorProto.FLOAT:
             continue
-        if node.output[0] in island_inputs:
-            # A boundary cast feeding a quantization island: FP32 by design.
+        users = consumers_of.get(init.name, [])
+        sea_users = [n for n in users if not in_island(n)]
+        island_users = [n for n in users if in_island(n)]
+        if not sea_users:
+            continue  # island-only (or unused): keep FP32
+        half = numpy_helper.from_array(
+            numpy_helper.to_array(init).astype("float16"),
+            init.name + "__fp16" if island_users else init.name,
+        )
+        if island_users:
+            new_initializers.append(half)
+            fp16_twin[init.name] = half.name
+            for node in sea_users:
+                for index, name in enumerate(node.input):
+                    if name == init.name:
+                        node.input[index] = half.name
+        else:
+            init.CopyFrom(half)
+    graph.initializer.extend(new_initializers)
+
+    # --- 2. Sea nodes' float tensor attributes (Constant, ConstantOfShape, ...) go FP16;
+    # island Constants (Q/DQ scales) keep their exact FP32 bytes.
+    for node in graph.node:
+        if in_island(node):
+            continue
+        for attribute in node.attribute:
+            if attribute.type == attribute.TENSOR and attribute.t.data_type == TensorProto.FLOAT:
+                attribute.t.CopyFrom(
+                    numpy_helper.from_array(
+                        numpy_helper.to_array(attribute.t).astype("float16"),
+                        attribute.t.name,
+                    )
+                )
+
+    # --- 3. Pre-existing sea casts to FLOAT (int64 -> float glue) now target FLOAT16;
+    # ones feeding an island float slot keep producing FP32 for it.
+    island_float_inputs = set()
+    for node in graph.node:
+        if not in_island(node):
+            continue
+        slots = _ISLAND_FLOAT_INPUT_SLOTS.get(node.op_type)
+        for index, name in enumerate(node.input):
+            if slots is None or index in slots:
+                island_float_inputs.add(name)
+    for node in graph.node:
+        if in_island(node) or node.op_type != "Cast":
+            continue
+        if node.output[0] in island_float_inputs:
             continue
         for attribute in node.attribute:
             if attribute.name == "to" and attribute.i == TensorProto.FLOAT:
                 attribute.i = TensorProto.FLOAT16
 
-    # A kept-FP32 graph output can also be consumed *inside* the graph (PTv3's encoder
-    # emits its per-stage point features and keeps pooling them). ``keep_io_types``
-    # inserts the boundary Cast under the output's name, so those internal consumers
-    # would read the FP32 copy and meet FP16 weights ("must have same input types").
-    # The boundary cast belongs to the output alone: rewire internal consumers to the
-    # FP16 tensor it came from.
-    boundary_sources: dict[str, str] = {}
-    for node in converted.graph.node:
-        if node.op_type != "Cast" or node.output[0] not in graph_outputs:
+    # New casts are appended with an anchor to splice after (None = graph front).
+    inserted: list[tuple] = []
+
+    def make_cast(source: str, target: str, to, anchor_name) -> None:
+        inserted.append(
+            (anchor_name, helper.make_node("Cast", [source], [target], to=to, name=target))
+        )
+
+    # --- 4. FP32 graph inputs feed sea consumers through one FP16 cast (island
+    # consumers keep reading the FP32 input directly).
+    for graph_input in graph.input:
+        if graph_input.type.tensor_type.elem_type != TensorProto.FLOAT:
             continue
-        if any(
-            attribute.name == "to" and attribute.i == TensorProto.FLOAT
-            for attribute in node.attribute
-        ):
-            boundary_sources[node.output[0]] = node.input[0]
-    for node in converted.graph.node:
-        if node.op_type == "Cast" and node.output[0] in boundary_sources:
+        sea_users = [n for n in consumers_of.get(graph_input.name, []) if not in_island(n)]
+        if not sea_users:
             continue
+        cast_name = graph_input.name + "__fp16"
+        make_cast(graph_input.name, cast_name, TensorProto.FLOAT16, None)
+        for node in sea_users:
+            for index, name in enumerate(node.input):
+                if name == graph_input.name:
+                    node.input[index] = cast_name
+
+    graph_input_names = {i.name for i in graph.input}
+
+    # --- 5. Island boundaries: a float edge entering an island from the sea gets one
+    # FP32 cast; a float island output consumed by the sea gets one FP16 cast.
+    for node in list(graph.node):
+        if not in_island(node):
+            continue
+        slots = _ISLAND_FLOAT_INPUT_SLOTS.get(node.op_type)
         for index, name in enumerate(node.input):
-            if name in boundary_sources:
-                node.input[index] = boundary_sources[name]
+            if slots is not None and index not in slots:
+                continue
+            source = producer_of.get(name)
+            if source is not None and in_island(source):
+                continue  # island-internal edge: castless by construction
+            if source is None and name not in graph_input_names:
+                continue  # initializer: island copies stayed FP32
+            if source is None and name in graph_input_names:
+                continue  # FP32 graph input read directly
+            cast_name = name + "__fp32"
+            if cast_name not in node_by_name:
+                make_cast(name, cast_name, TensorProto.FLOAT, source.name)
+                node_by_name[cast_name] = True
+            node.input[index] = cast_name
+        if node.op_type in _QUANTIZE_OPS:
+            continue  # integer outputs, always island-internal (feed DQ)
+        for out in node.output:
+            sea_users = [n for n in consumers_of.get(out, []) if not in_island(n)]
+            if not sea_users:
+                continue
+            cast_name = out + "__fp16"
+            make_cast(out, cast_name, TensorProto.FLOAT16, node.name)
+            for user in sea_users:
+                for index, name in enumerate(user.input):
+                    if name == out:
+                        user.input[index] = cast_name
 
-    # The conversion leaves stale FLOAT value_info entries behind for tensors that now
-    # carry FP16 — e.g. around the converter's own op-block-listed nodes (Max, TopK...),
-    # whose FLOAT boundary casts the retargeting above flips to FP16. value_info is an
-    # optional hint, but every stale entry is a hard type error in onnxruntime's loader
-    # (TensorRT's parser ignores them), so drop the hints and let backends re-infer.
-    del converted.graph.value_info[:]
+    # --- 6. FP32 graph outputs produced by sea nodes: the producer emits FP16 under an
+    # internal name, a boundary cast owns the output name, and internal consumers read
+    # the FP16 tensor (PTv3's encoder re-consumes its own per-stage outputs).
+    for graph_output in graph.output:
+        if graph_output.type.tensor_type.elem_type != TensorProto.FLOAT:
+            continue
+        producer = producer_of.get(graph_output.name)
+        if producer is None or in_island(producer):
+            continue
+        internal = graph_output.name + "__fp16"
+        for index, name in enumerate(producer.output):
+            if name == graph_output.name:
+                producer.output[index] = internal
+        for node in consumers_of.get(graph_output.name, []):
+            for index, name in enumerate(node.input):
+                if name == graph_output.name:
+                    node.input[index] = internal
+        make_cast(internal, graph_output.name, TensorProto.FLOAT, producer.name)
 
-    onnx.save(converted, str(onnx_path))
-    logger.info("Cast %s to FP16 (graph I/O kept FP32).", onnx_path.name)
+    # --- 7. Splice the new casts in (after their producer; graph-input casts up front)
+    # and drop the value_info hints: backends re-infer, and a stale FLOAT entry is a
+    # hard type error in onnxruntime's loader.
+    front = [cast for anchor, cast in inserted if anchor is None]
+    after: dict[str, list] = {}
+    for anchor, cast in inserted:
+        if anchor is not None:
+            after.setdefault(anchor, []).append(cast)
+    rebuilt = list(front)
+    for node in graph.node:
+        rebuilt.append(node)
+        rebuilt.extend(after.get(node.name, ()))
+    del graph.node[:]
+    graph.node.extend(rebuilt)
+    del graph.value_info[:]
+
+    onnx.save(model, str(onnx_path))
+    logger.info(
+        "Cast %s to FP16 around %d island node(s); graph I/O kept FP32.",
+        onnx_path.name,
+        len(island),
+    )
 
 
 def autocast_to_fp16(onnx_path: Path, sample_inputs: Mapping[str, Any]) -> None:
