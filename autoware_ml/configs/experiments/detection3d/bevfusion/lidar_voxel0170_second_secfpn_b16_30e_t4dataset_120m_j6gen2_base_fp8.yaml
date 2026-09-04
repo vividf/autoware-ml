@@ -42,9 +42,6 @@ quantization:
     - pts_neck
     - bbox_head.shared_conv
     - bbox_head.heatmap_head
-  # SECOND has no residual blocks, so the "residual_add" recipe would match nothing anyway.
-  disable_recipes:
-    - residual_add
   # Same calibration set as the INT8 reference recipe; FP8 amax comes from the max
   # calibrator (E4M3 convention), not histogram+MSE.
   ptq:

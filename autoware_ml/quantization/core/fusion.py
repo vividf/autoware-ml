@@ -21,24 +21,24 @@ Fusing BatchNorm into preceding convolutions is important for quantization becau
 """
 
 import logging
-from typing import Iterator, List, Tuple, Union
+from collections.abc import Iterator
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
 
 def fuse_bn_weights(
     conv_weight: torch.Tensor,
-    conv_bias: Union[torch.Tensor, None],
+    conv_bias: torch.Tensor | None,
     bn_mean: torch.Tensor,
     bn_var: torch.Tensor,
     bn_eps: float,
-    bn_weight: Union[torch.Tensor, None],
-    bn_bias: Union[torch.Tensor, None],
+    bn_weight: torch.Tensor | None,
+    bn_bias: torch.Tensor | None,
     is_transposed: bool = False,
-) -> Tuple[nn.Parameter, nn.Parameter]:
+) -> tuple[nn.Parameter, nn.Parameter]:
     """
     Fuse BatchNorm parameters into convolution weights.
 
@@ -134,7 +134,7 @@ def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
 
 def _iter_adjacent_named_children(
     model: nn.Module, prefix: str = ""
-) -> Iterator[Tuple[str, nn.Module, str, nn.Module]]:
+) -> Iterator[tuple[str, nn.Module, str, nn.Module]]:
     """
     Iterate adjacent sibling module pairs in the module tree.
 
@@ -164,7 +164,7 @@ def _iter_adjacent_named_children(
         yield from _iter_adjacent_named_children(child_module, child_prefix)
 
 
-def find_conv_bn_pairs(model: nn.Module) -> List[Tuple[str, str]]:
+def find_conv_bn_pairs(model: nn.Module) -> list[tuple[str, str]]:
     """
     Find all Conv-BN pairs in the model.
 
@@ -210,7 +210,7 @@ def find_conv_bn_pairs(model: nn.Module) -> List[Tuple[str, str]]:
     return pairs
 
 
-def _get_parent_module(model: nn.Module, name: str) -> Tuple[nn.Module, str]:
+def _get_parent_module(model: nn.Module, name: str) -> tuple[nn.Module, str]:
     """
     Get parent module and attribute name for a nested module.
 

@@ -23,7 +23,7 @@ Precision placement is declarative (modelopt-style): everything the plan reaches
 ``default_precision`` (INT8), and ``skip_quantize`` lists glob patterns (subtree match)
 excluded from quantization — an excluded module's runtime precision follows the deploy
 ``onnx.precision`` (FP16 via AutoCast). Architecture recipes are always-on and class-gated;
-``disable_recipes`` opts a config out of one.
+``disable_recipes`` opts a config out of one. ``calibration`` picks the amax algorithm.
 
 The FP input checkpoint, the training config, and
 the work directory are NOT config keys here: the checkpoint arrives via ``--weights``,
@@ -34,10 +34,10 @@ MLflow run context.
 from __future__ import annotations
 
 import logging
-
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, ClassVar
 
 from autoware_ml.utils.config_parsing import reject_unknown_keys
 
@@ -53,13 +53,122 @@ VALID_RECIPES = ("residual_add", "ese", "maxpool")
 class Precision(str, Enum):
     """Quantization target precision.
 
-    INT8 is the validated production path. FP8 (E4M3) has descriptors defined
-    (:mod:`.core.descriptors`) but no accuracy validation on hardware in this repo yet —
-    selecting it logs a warning.
+    INT8 is the production path for convolutions (CenterPoint release recipe). FP8 (E4M3,
+    per-tensor, max calibration) is validated for Linear layers on PTv3 and BEVFusion
+    (2026-09-02/03: within the FP16 band where INT8 Linear lost 6 mIoU) and is the
+    precision every Linear should take; conv FP8 is blocked at ONNX export today.
     """
 
     INT8 = "int8"
     FP8 = "fp8"
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """How activation ``amax`` is computed (``quantization.calibration``).
+
+    The calibration algorithm is part of the recipe — often a bigger accuracy lever than
+    the number of samples — so it lives in config and travels inside the checkpoint.
+
+    - ``mse`` (default) / ``entropy`` / ``percentile`` — histogram calibrator on every
+      activation quantizer; ``amax`` minimizes MSE / KL divergence, or clips at
+      ``percentile``.
+    - ``max`` — running max of the observed activations (no histogram); the FP8
+      convention and the fastest.
+    - ``smoothquant`` — modelopt's SmoothQuant (Xiao et al. 2022): max calibration, then
+      every INT8 quantized ``Linear`` migrates activation outliers into its weight through a
+      per-input-channel ``pre_quant_scale`` (``alpha`` balances the two sides; 0.5 is the
+      paper default). Convolutions are unaffected. Exports as a ``Mul`` before Q/DQ.
+
+    Weight quantizers always use max (their per-channel ``amax`` is exact); FP8 activation
+    quantizers always use max — ``percentile``/``mse``/``entropy`` therefore apply to INT8
+    activations only, and a config asking for a histogram method on an FP8-only tree
+    silently degenerates to max (there is nothing to histogram).
+    """
+
+    method: str = "mse"
+    percentile: float = 99.99
+    smoothquant_alpha: float = 0.5
+
+    METHODS = ("mse", "entropy", "percentile", "max", "smoothquant")
+    HISTOGRAM_METHODS = ("mse", "entropy", "percentile")
+    KNOWN_KEYS = frozenset({"method", "percentile", "smoothquant_alpha"})
+    _KEYS_BY_METHOD: ClassVar[Mapping[str, frozenset[str]]] = {
+        "mse": frozenset({"method"}),
+        "entropy": frozenset({"method"}),
+        "percentile": frozenset({"method", "percentile"}),
+        "max": frozenset({"method"}),
+        "smoothquant": frozenset({"method", "smoothquant_alpha"}),
+    }
+
+    @property
+    def activation_calibrator(self) -> str:
+        """modelopt calibrator kind the activation quantizers need: ``"histogram"`` or ``"max"``."""
+        return "histogram" if self.method in self.HISTOGRAM_METHODS else "max"
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> CalibrationConfig:
+        """Build from ``None`` (default), a method string, or a ``{method, ...}`` mapping.
+
+        Raises:
+            TypeError: If ``raw`` is neither a string nor a mapping.
+            ValueError: On an unknown method, a knob that does not belong to the chosen
+                method, or an out-of-range value.
+        """
+        if raw is None:
+            return cls()
+        if isinstance(raw, str):
+            raw = {"method": raw}
+        if not isinstance(raw, Mapping):
+            raise TypeError(
+                f"quantization.calibration must be a string or a dict, got {type(raw).__name__}"
+            )
+        reject_unknown_keys(raw, cls.KNOWN_KEYS, "quantization.calibration")
+        method = str(raw.get("method", "mse"))
+        if method not in cls.METHODS:
+            raise ValueError(
+                f"quantization.calibration.method must be one of {list(cls.METHODS)}, got {method!r}."
+            )
+        foreign = set(raw) - cls._KEYS_BY_METHOD[method]
+        if foreign:
+            raise ValueError(
+                f"quantization.calibration key(s) {sorted(foreign)} do not apply to method "
+                f"{method!r} (valid: {sorted(cls._KEYS_BY_METHOD[method] - {'method'})})."
+            )
+        config = cls(
+            method=method,
+            percentile=float(raw.get("percentile", 99.99)),
+            smoothquant_alpha=float(raw.get("smoothquant_alpha", 0.5)),
+        )
+        if not (0.0 < config.percentile <= 100.0):
+            raise ValueError(
+                f"quantization.calibration.percentile must be in (0, 100], got {config.percentile}."
+            )
+        if not (0.0 <= config.smoothquant_alpha <= 1.0):
+            raise ValueError(
+                "quantization.calibration.smoothquant_alpha must be in [0, 1], "
+                f"got {config.smoothquant_alpha}."
+            )
+        return config
+
+    def to_dict(self) -> dict[str, Any]:
+        """Raw mapping equivalent (round-trips through :meth:`from_raw`)."""
+        out: dict[str, Any] = {"method": self.method}
+        if self.method == "percentile":
+            out["percentile"] = self.percentile
+        if self.method == "smoothquant":
+            out["smoothquant_alpha"] = self.smoothquant_alpha
+        return out
+
+    def describe(self) -> str:
+        """One-line human-readable summary for logs."""
+        if self.method == "percentile":
+            return f"histogram percentile {self.percentile:g}"
+        if self.method == "smoothquant":
+            return f"smoothquant (alpha={self.smoothquant_alpha:g}, max calibration)"
+        if self.method == "max":
+            return "max"
+        return f"histogram {self.method}"
 
 
 @dataclass(frozen=True)
@@ -111,7 +220,7 @@ class QATScheduleConfig:
             "max_momentum",
         }
     )
-    _KEYS_BY_TYPE = {
+    _KEYS_BY_TYPE: ClassVar[Mapping[str, frozenset[str]]] = {
         "cosine": frozenset({"type", "final_lr_ratio"}),
         "one_cycle": frozenset(
             {
@@ -184,7 +293,7 @@ class QATScheduleConfig:
             )
         return config
 
-    def build_lightning_scheduler(self, peak_lr: float) -> tuple[Optional[dict], Optional[dict]]:
+    def build_lightning_scheduler(self, peak_lr: float) -> tuple[dict | None, dict | None]:
         """Return ``(model.scheduler, model.scheduler_config)`` Hydra nodes for this schedule.
 
         ``None, None`` for ``constant``. The annealing types return a partial
@@ -348,7 +457,7 @@ class PTQConfig:
 
     calibrate_samples: int
     batch_size: int = 1
-    calib_seed: Optional[int] = None
+    calib_seed: int | None = None
     calib_shuffle: bool = False
 
     # Typo guard — same rationale as QuantizationConfig.KNOWN_KEYS.
@@ -398,10 +507,14 @@ class QuantizationConfig:
     # excludes the matched module and all its descendants from quantization; their
     # runtime precision follows the deploy onnx.precision (FP16 via AutoCast).
     default_precision: Precision = Precision.INT8
-    skip_quantize: Tuple[str, ...] = ()
+    skip_quantize: tuple[str, ...] = ()
+    # How activation amax is computed (mse / entropy / percentile / max / smoothquant).
+    # Shared by PTQ and the QAT epoch-0 calibration; see CalibrationConfig.
+    calibration: CalibrationConfig = CalibrationConfig()
     # Architecture recipes (residual-add / eSE / maxpool) are attached always, gated by
-    # module class. List a recipe name here to opt this config out.
-    disable_recipes: Tuple[str, ...] = ()
+    # module class and scoped to the quantized submodules. List a recipe name here to opt
+    # this config out.
+    disable_recipes: tuple[str, ...] = ()
     # Quantize-stage only: build the model, prepare the quantized tree, log the full placement
     # record (which module gets which transform and why), and exit WITHOUT calibrating
     # or training. The way to inspect precision placement before spending GPU time.
@@ -411,8 +524,8 @@ class QuantizationConfig:
     # ``qat: null`` is fine, so a mode="qat" child config can drop an inherited block).
     # Deploy-load behavior NEVER branches on these: the loader rebuilds the identical
     # tree for PTQ and QAT checkpoints alike.
-    ptq: Optional[PTQConfig] = None
-    qat: Optional[QATConfig] = None
+    ptq: PTQConfig | None = None
+    qat: QATConfig | None = None
 
     # The full key set of the ``quantization`` config section. ``from_dict`` rejects
     # anything else: a misspelled key (``skip_quantizes: ...``) would otherwise silently
@@ -424,6 +537,7 @@ class QuantizationConfig:
             "fuse_bn",
             "default_precision",
             "skip_quantize",
+            "calibration",
             "disable_recipes",
             "dry_run",
             "ptq",
@@ -432,17 +546,17 @@ class QuantizationConfig:
     )
 
     @staticmethod
-    def _str_tuple(value: Any) -> Tuple[str, ...]:
+    def _str_tuple(value: Any) -> tuple[str, ...]:
         return tuple(str(v) for v in value) if value else ()
 
     @classmethod
-    def from_dict(cls, raw: Optional[Mapping[str, Any]]) -> QuantizationConfig:
+    def from_dict(cls, raw: Mapping[str, Any] | None) -> QuantizationConfig:
         """Build QuantizationConfig from a raw ``quantization`` mapping; empty/None → disabled.
 
         Raises:
             ValueError: If the dict contains keys outside :attr:`KNOWN_KEYS` (typo guard),
                 a ``ptq``/``qat`` block is present under the wrong mode, or
-                ``default_precision`` is anything other than ``"int8"``.
+                ``default_precision`` / ``calibration`` hold an unknown value.
         """
         if not raw:
             return cls()
@@ -476,13 +590,7 @@ class QuantizationConfig:
                 f"quantization.default_precision={raw_precision!r} — valid values: "
                 f"{[p.value for p in Precision]}; skip_quantize opts subtrees out."
             ) from None
-        if default_precision is not Precision.INT8:
-            logger.warning(
-                "quantization.default_precision=%s: descriptors are defined but this "
-                "precision has no accuracy validation in this repo yet — validate before "
-                "shipping.",
-                default_precision.value,
-            )
+        calibration = CalibrationConfig.from_raw(raw.get("calibration"))
         disable_recipes = cls._str_tuple(raw.get("disable_recipes"))
         unknown_recipes = sorted(set(disable_recipes) - set(VALID_RECIPES))
         if unknown_recipes:
@@ -496,6 +604,7 @@ class QuantizationConfig:
             fuse_bn=bool(raw.get("fuse_bn", True)),
             default_precision=default_precision,
             skip_quantize=cls._str_tuple(raw.get("skip_quantize")),
+            calibration=calibration,
             disable_recipes=disable_recipes,
             dry_run=bool(raw.get("dry_run", False)),
             ptq=PTQConfig.from_dict(ptq_raw) if ptq_raw is not None else None,
@@ -515,6 +624,7 @@ class QuantizationConfig:
             "fuse_bn": self.fuse_bn,
             "default_precision": self.default_precision.value,
             "skip_quantize": list(self.skip_quantize),
+            "calibration": self.calibration.to_dict(),
             "disable_recipes": list(self.disable_recipes),
             "dry_run": self.dry_run,
             "ptq": self.ptq.to_dict() if self.ptq is not None else None,

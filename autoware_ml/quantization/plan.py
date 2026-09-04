@@ -38,11 +38,11 @@ transform's home module for its mechanics):
 - ``skip_quantize``  — a matched module and its whole subtree stay un-quantized
   (:func:`.core.replace.expand_skip_quantize`).
 - ``replace_module`` — ``nn.Conv2d``/``nn.ConvTranspose2d``/``nn.Linear``
-  swapped for its quantized subclass (:mod:`.core.replace`).
+  converted in place into its modelopt quantized class (:mod:`.core.replace`).
 - ``wrap_module``    — a pool wrapped so Q/DQ lands on its input
-  (:class:`~.recipes.quant_forwards.QuantBeforePool`).
-- ``patch_forward``  — a residual/eSE block's ``forward`` replaced by its
-  ``Quant*Forward`` rewrite, with quantizers attached (:mod:`.recipes.attach`).
+  (:class:`~.recipes.quant_blocks.QuantBeforePool`).
+- ``convert_block``  — a residual block converted in place into its ``Quant*`` block
+  class, with a ``residual_quantizer`` attached (:mod:`.recipes.attach`).
 
 Stage code (the quantize entrypoints and the deploy loader) holds a plan and calls
 ``prepare`` — it never sees quantization internals. The record covers module-tree
@@ -52,10 +52,11 @@ Stage code (the quantize entrypoints and the deploy loader) holds a plan and cal
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import asdict, dataclass
 import logging
-from typing import Any, Mapping, Sequence, Tuple
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from autoware_ml.quantization.config import (
     VALID_MODULE_KINDS,
@@ -69,7 +70,13 @@ from autoware_ml.quantization.core.replace import (
     match_skip_quantize_roots,
     replace_quantizable_modules,
 )
-from autoware_ml.quantization.recipes.attach import RECIPE_ATTACHERS
+from autoware_ml.quantization.recipes.attach import (
+    RECIPE_ATTACHERS,
+    BlockSpecs,
+    ESEBlockSpec,
+    ResidualBlockSpec,
+    default_block_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +135,12 @@ class PlacementRecord:
         return {"decisions": [asdict(decision) for decision in self.decisions]}
 
     @classmethod
-    def from_json_dict(cls, data: Mapping[str, Any]) -> "PlacementRecord":
+    def from_json_dict(cls, data: Mapping[str, Any]) -> PlacementRecord:
         """Deserialize from :meth:`to_json_dict` output."""
         return cls([PlacementDecision(**entry) for entry in data.get("decisions", [])])
 
     def diff(
-        self, other: "PlacementRecord"
+        self, other: PlacementRecord
     ) -> tuple[list[PlacementDecision], list[PlacementDecision]]:
         """Compare decision multisets (order-insensitive).
 
@@ -147,7 +154,7 @@ class PlacementRecord:
         only_in_other = sorted((theirs - mine).elements(), key=lambda d: (d.module, d.transform))
         return only_in_self, only_in_other
 
-    def verify_matches(self, produced: "PlacementRecord", source: str) -> None:
+    def verify_matches(self, produced: PlacementRecord, source: str) -> None:
         """Raise unless ``self`` (a rebuilt tree) describes the same construction as ``produced``.
 
         Any drift means the ``load_state_dict`` that follows would silently mis-map
@@ -215,16 +222,24 @@ class QuantRules:
 
             A submodule absent on the model is skipped silently, so one rules object
             can serve model variants.
-        recipes: Architecture recipes to attach (subset of :data:`VALID_RECIPES`).
-            Recipes are class-gated: each fires only where the architecture has
-            that block, so zero matches are normal. Applied in canonical
-            :data:`VALID_RECIPES` order regardless of declaration order. Recipe
-            quantizers always follow ``default_precision`` (they are activation-side
-            glue shared with the conv inputs, not per-kind weights).
+        recipes: Architecture recipes to attach (subset of :data:`VALID_RECIPES`;
+            default: all). Recipes are class-gated: each fires only where the
+            architecture has that block, so zero matches are normal. Applied in
+            canonical :data:`VALID_RECIPES` order regardless of declaration order.
+            Recipe quantizers always follow ``default_precision`` (they are
+            activation-side glue shared with the conv inputs, not per-kind weights).
+        residual_blocks: Extra :class:`~.recipes.attach.ResidualBlockSpec` rows for the
+            ``residual_add`` recipe — the residual blocks this model owns (mmpretrain
+            ``ConvNeXtBlock``, VoVNet ``_OSA_module`` ...), matched before the repo-wide
+            defaults (:func:`~.recipes.attach.default_block_specs`).
+        ese_blocks: :class:`~.recipes.attach.ESEBlockSpec` rows for the ``ese`` recipe
+            (VoVNet ``eSEModule``).
     """
 
-    quantize_submodules: Mapping[str, Tuple[str, ...] | Mapping[str, str | None]]
-    recipes: Tuple[str, ...] = VALID_RECIPES
+    quantize_submodules: Mapping[str, tuple[str, ...] | Mapping[str, str | None]]
+    recipes: tuple[str, ...] = VALID_RECIPES
+    residual_blocks: tuple[ResidualBlockSpec, ...] = ()
+    ese_blocks: tuple[ESEBlockSpec, ...] = ()
 
     def __post_init__(self) -> None:
         for submodule_name, kinds in self.quantize_submodules.items():
@@ -235,7 +250,7 @@ class QuantRules:
                     f"{sorted(unknown)}; valid kinds: {list(VALID_MODULE_KINDS)}."
                 )
             if isinstance(kinds, Mapping):
-                for kind, precision_name in kinds.items():
+                for precision_name in kinds.values():
                     if precision_name is not None:
                         Precision(precision_name)  # raises ValueError on an unknown precision
         unknown_recipes = set(self.recipes) - set(VALID_RECIPES)
@@ -297,7 +312,11 @@ class QuantizationPlan:
         3. Module replacement per :attr:`rules.quantize_submodules` (minus the
            skip set).
         4. Architecture recipes in canonical order, minus
-           ``config.disable_recipes``.
+           ``config.disable_recipes``, scoped to the submodules of step 3.
+
+        The activation calibrator kind (histogram vs max) follows
+        ``config.calibration``; it changes no state_dict key, so a checkpoint
+        calibrated with one method loads into a tree prepared for another.
 
         Returns:
             ``model`` (mutated in place) for chaining convenience.
@@ -325,6 +344,7 @@ class QuantizationPlan:
         skip_names = expand_skip_quantize(model, self.config.skip_quantize, log=False)
 
         default_precision = self.config.default_precision
+        calibrator = self.config.calibration.activation_calibrator
         for submodule_name in self.rules.quantize_submodules:
             submodule = getattr(model, submodule_name, None)
             if submodule is None:
@@ -345,19 +365,39 @@ class QuantizationPlan:
                     kinds=tuple(kinds),
                     skip_names=skip_names,
                     prefix=submodule_name,
-                    on_replace=lambda name, old, new, reason=reason, suffix=suffix: record.add(
+                    on_replace=lambda name, original, new, reason=reason, suffix=suffix: record.add(
                         name,
                         "replace_module",
                         reason=reason,
-                        detail=f"{type(old).__name__} -> {type(new).__name__}{suffix}",
+                        detail=f"{original} -> {type(new).__name__}{suffix}",
                     ),
                     precision=precision,
+                    calibrator=calibrator,
                 )
 
+        # Recipes fire only inside the submodules the rules quantize: a block whose convs
+        # stay FP gets no residual / pool Q/DQ either.
+        roots = tuple(
+            name
+            for name in self.rules.quantize_submodules
+            if getattr(model, name, None) is not None
+        )
         disabled = set(self.config.disable_recipes)
+        specs = (
+            BlockSpecs(residual=tuple(self.rules.residual_blocks), ese=tuple(self.rules.ese_blocks))
+            + default_block_specs()
+        )
         for recipe_name in VALID_RECIPES:
             if recipe_name in self.rules.recipes and recipe_name not in disabled:
-                RECIPE_ATTACHERS[recipe_name](model, skip_names, record.add, default_precision)
+                RECIPE_ATTACHERS[recipe_name](
+                    model,
+                    precision=default_precision,
+                    calibrator=calibrator,
+                    roots=roots,
+                    skip_names=skip_names,
+                    specs=specs,
+                    on_apply=record.add,
+                )
 
         self.placement_record = record
         record.log_summary()

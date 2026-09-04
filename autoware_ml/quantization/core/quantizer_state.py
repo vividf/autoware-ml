@@ -18,83 +18,17 @@ Everything here inspects or toggles the ``TensorQuantizer`` modules of an alread
 prepared tree — nothing changes ``state_dict`` keys.
 """
 
-from contextlib import contextmanager
+from __future__ import annotations
+
 import logging
-from typing import Iterable, Type, Union
+from collections.abc import Iterable
+from contextlib import contextmanager
 
 import torch
-import torch.nn as nn
-
-from autoware_ml.quantization.core import modelopt as quant_backend
-
-TensorQuantizer = quant_backend.get_tensor_quantizer_cls()
+from modelopt.torch.quantization.nn import TensorQuantizer
+from torch import nn
 
 logger = logging.getLogger(__name__)
-
-
-def restore_root_logging() -> None:
-    """Undo the ``absl.logging`` root-logger hijack pulled in by the quantization backend.
-
-    Importing modelopt can import ``absl.logging``, which installs its own handler on the
-    root logger (only WARNING+ reaches stderr) — silently swallowing every later log record
-    of ONNX/TensorRT export and evaluation. This removes absl's handlers and restores the
-    CLI's ``logging.basicConfig`` shape when absl left the root logger bare. It is a no-op
-    when absl never hijacked (unit tests, plain training).
-    """
-    root = logging.getLogger()
-    absl_handlers = [h for h in root.handlers if type(h).__module__.startswith("absl")]
-    for handler in absl_handlers:
-        root.removeHandler(handler)
-    if absl_handlers and not root.handlers:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-        )
-    if absl_handlers and root.level > logging.INFO:
-        root.setLevel(logging.INFO)
-
-
-def tensor_quantizer_cls() -> Type:
-    """Return the backend ``TensorQuantizer`` class.
-
-    Also re-asserts the root logging configuration (see :func:`restore_root_logging`) —
-    kept here so every call site that touches the backend re-checks for the absl hijack.
-    """
-    restore_root_logging()
-    return TensorQuantizer
-
-
-def move_quantizer_amax_to_device(model: nn.Module, device: Union[str, torch.device]) -> int:
-    """Move every ``TensorQuantizer._amax`` tensor to ``device`` (post checkpoint-load fixup).
-
-    Shared by the CenterPoint and BEVFusion deploy loaders after ``load_state_dict``.
-
-    Returns:
-        Number of amax tensors moved.
-    """
-    quantizer_cls = tensor_quantizer_cls()
-    device = torch.device(device)
-    moved = 0
-    for _name, module in model.named_modules():
-        if isinstance(module, quantizer_cls):
-            if getattr(module, "_amax", None) is not None and module._amax.device != device:
-                module._amax = module._amax.to(device)
-                moved += 1
-    if moved:
-        logger.info("Moved %d quantizer amax tensors to %s", moved, device)
-    return moved
-
-
-def setup_quantization_for_onnx_export() -> None:
-    """Configure the quantization backend for proper ONNX export.
-
-    modelopt's ``TensorQuantizer`` traces to QuantizeLinear/DequantizeLinear ONNX ops natively,
-    so there is nothing to switch — kept as the single pre-export call site so the logging
-    re-assert below still runs.
-    """
-    # Re-assert deployment logging first (same absl-hijack concern as tensor_quantizer_cls).
-    tensor_quantizer_cls()
-    quant_backend.setup_onnx_export()
 
 
 def set_quantizers_enabled(module: nn.Module, enabled: bool) -> int:
@@ -175,17 +109,16 @@ def validate_quantizer_amax(model: nn.Module) -> None:
       rejects a zero scale.
 
     Disabled quantizers are skipped: they are not used in forward and may legitimately
-    carry ``amax=None`` (e.g. inside ``skip_quantize`` subtrees).
+    carry ``amax=None`` (e.g. inside ``skip_quantize`` subtrees, or modelopt's always-off
+    ``output_quantizer``).
 
     Raises:
         RuntimeError: If any enabled quantizer has ``amax`` that is ``None`` or non-finite.
     """
-    quantizer_cls = tensor_quantizer_cls()
-
     fatal: list[tuple[str, str]] = []
     clamped: list[str] = []
     for name, module in model.named_modules():
-        if not isinstance(module, quantizer_cls) or getattr(module, "_disabled", False):
+        if not isinstance(module, TensorQuantizer) or module._disabled:
             continue
         amax = getattr(module, "_amax", None)
         if amax is None:
@@ -216,8 +149,7 @@ def validate_quantizer_amax(model: nn.Module) -> None:
 
 
 def print_quantizer_status(model: nn.Module) -> None:
-    """
-    Log the status of all TensorQuantizers in the model.
+    """Log the status of all TensorQuantizers in the model.
 
     One INFO summary line (enabled / disabled / calibrated counts); the per-quantizer
     name, status, and amax details are emitted at DEBUG for debugging placement.
@@ -239,10 +171,8 @@ def print_quantizer_status(model: nn.Module) -> None:
         else:
             calibrated += 1
             if amax.numel() == 1:
-                # Scalar amax (per-tensor quantization)
                 detail = f"amax={amax.item():.6f}"
             else:
-                # Multi-element amax (per-channel quantization)
                 detail = (
                     f"amax=[{amax.numel()} elements] "
                     f"min={amax.min().item():.6f}, max={amax.max().item():.6f}"
@@ -260,23 +190,17 @@ def print_quantizer_status(model: nn.Module) -> None:
 
 
 def count_quantizers(model: nn.Module) -> dict:
-    """
-    Count enabled and disabled quantizers in the model.
-
-    Args:
-        model: PyTorch model
+    """Count enabled and disabled quantizers in the model.
 
     Returns:
         Dict with 'enabled', 'disabled', and 'total' counts
     """
     enabled = 0
     disabled = 0
-
     for _name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
             if module._disabled:
                 disabled += 1
             else:
                 enabled += 1
-
     return {"enabled": enabled, "disabled": disabled, "total": enabled + disabled}

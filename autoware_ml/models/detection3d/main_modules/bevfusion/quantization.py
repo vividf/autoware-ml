@@ -50,7 +50,6 @@ BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
         "pts_neck": ("conv",),
         "bbox_head": {"conv": None, "linear": "fp8"},
     },
-    recipes=("residual_add", "ese", "maxpool"),
 )
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from autoware_ml.quantization.config import (
+    CalibrationConfig,
     Precision,
     PTQConfig,
     QATConfig,
@@ -72,19 +73,59 @@ class TestQuantizationConfig:
         assert config.ptq is None
         assert config.qat == QATConfig(epochs=3, lr=1e-4)
 
-    def test_default_precision_values(self, caplog):
-        import logging
-
-        # FP8 parses (descriptors exist) but is loudly marked unvalidated.
-        with caplog.at_level(logging.WARNING, logger="autoware_ml.quantization.config"):
-            config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "fp8"})
+    def test_default_precision_values(self):
+        config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "fp8"})
         assert config.default_precision is Precision.FP8
-        assert "no accuracy validation" in caplog.text
         # Unknown precisions still die at parse time.
         with pytest.raises(ValueError, match="valid values"):
             QuantizationConfig.from_dict({"enabled": True, "default_precision": "int4"})
         config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "int8"})
         assert config.default_precision is Precision.INT8
+        assert QuantizationConfig.from_dict(config.to_dict()) == config
+
+
+class TestCalibrationConfig:
+    def test_default_is_histogram_mse(self):
+        config = QuantizationConfig.from_dict({"enabled": True})
+        assert config.calibration == CalibrationConfig()
+        assert config.calibration.method == "mse"
+        assert config.calibration.activation_calibrator == "histogram"
+        assert config.to_dict()["calibration"] == {"method": "mse"}
+
+    def test_accepts_method_string_and_mapping(self):
+        assert CalibrationConfig.from_raw("entropy").method == "entropy"
+        config = CalibrationConfig.from_raw({"method": "percentile", "percentile": 99.9})
+        assert config.percentile == 99.9
+        assert config.to_dict() == {"method": "percentile", "percentile": 99.9}
+        assert CalibrationConfig.from_raw(config.to_dict()) == config
+
+    def test_max_and_smoothquant_use_the_max_calibrator(self):
+        assert CalibrationConfig.from_raw("max").activation_calibrator == "max"
+        config = CalibrationConfig.from_raw({"method": "smoothquant", "smoothquant_alpha": 0.8})
+        assert config.activation_calibrator == "max"
+        assert config.to_dict() == {"method": "smoothquant", "smoothquant_alpha": 0.8}
+
+    def test_knob_must_match_method(self):
+        with pytest.raises(ValueError, match="do not apply"):
+            CalibrationConfig.from_raw({"method": "mse", "percentile": 99.0})
+        with pytest.raises(ValueError, match="do not apply"):
+            CalibrationConfig.from_raw({"method": "max", "smoothquant_alpha": 0.5})
+
+    def test_unknown_method_and_bounds(self):
+        with pytest.raises(ValueError, match="method must be one of"):
+            CalibrationConfig.from_raw("kl")
+        with pytest.raises(ValueError, match="percentile must be in"):
+            CalibrationConfig.from_raw({"method": "percentile", "percentile": 0.0})
+        with pytest.raises(ValueError, match="smoothquant_alpha must be in"):
+            CalibrationConfig.from_raw({"method": "smoothquant", "smoothquant_alpha": 1.5})
+        with pytest.raises(ValueError, match="quantization.calibration"):
+            CalibrationConfig.from_raw({"method": "mse", "methd": "mse"})
+
+    def test_travels_through_the_quantization_config(self):
+        config = QuantizationConfig.from_dict(
+            {"enabled": True, "calibration": {"method": "percentile", "percentile": 99.99}}
+        )
+        assert config.calibration.method == "percentile"
         assert QuantizationConfig.from_dict(config.to_dict()) == config
 
 

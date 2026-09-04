@@ -19,7 +19,8 @@ completion can import the Typer app without pulling Hydra and MLflow into the
 startup path.
 """
 
-import __main__
+import importlib
+import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -32,6 +33,7 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir, initialize_config_module
 from hydra.core.global_hydra import GlobalHydra
 
+import __main__
 from autoware_ml.utils.cli.helpers import adjust_argv, resolve_config_reference, run_lazy_script
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_HYDRA_RUN_DIR_ENV,
@@ -277,6 +279,29 @@ def prepare_runtime_environment(
     }
 
 
+def restore_root_logging() -> None:
+    """Undo the ``absl.logging`` root-logger hijack pulled in by nvidia-modelopt.
+
+    Importing modelopt (through ``autoware_ml.quantization``) imports ``absl.logging``,
+    which installs its own handler on the root logger (only WARNING+ reaches stderr) —
+    silently swallowing every later INFO record of export, evaluation and calibration.
+    Called once after the entrypoint module (and everything it imports) is loaded: removes
+    absl's handlers and restores the CLI's ``basicConfig`` shape when absl left the root
+    logger bare. A no-op when absl never hijacked (plain training).
+    """
+    root = logging.getLogger()
+    absl_handlers = [h for h in root.handlers if type(h).__module__.startswith("absl")]
+    for handler in absl_handlers:
+        root.removeHandler(handler)
+    if absl_handlers and not root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        )
+    if absl_handlers and root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
+
 def run_hydra_entrypoint(
     entrypoint_module: str,
     config_name: str,
@@ -316,4 +341,8 @@ def run_hydra_entrypoint(
         temporary_main_module(resolve_module_spec(entrypoint_module)),
         temporary_environment(env_updates),
     ):
+        # Import first so a modelopt-importing entrypoint has already pulled in absl,
+        # then repair the root logger before any INFO record is emitted.
+        importlib.import_module(entrypoint_module)
+        restore_root_logging()
         run_lazy_script(entrypoint_module, "main")

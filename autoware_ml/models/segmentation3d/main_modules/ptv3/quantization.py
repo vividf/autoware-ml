@@ -40,7 +40,6 @@ PTV3_QUANT_RULES = QuantRules(
         "encoder": ("linear",),
         "seg3d_head": ("linear",),
     },
-    recipes=("residual_add", "ese", "maxpool"),
 )
 
 

@@ -12,33 +12,36 @@
 
 ```text
 autoware_ml/quantization/
-├── config.py            # Hydra `quantization` 區塊的 typed view(唯一一次 parse;recipe 名稱驗證)
+├── config.py            # Hydra `quantization` 區塊的 typed view(唯一一次 parse;recipe 名稱驗證;CalibrationConfig)
 ├── checkpoint.py        # 自描述 checkpoint:config + placement record 內嵌在 state_dict 旁(無 sidecar)
 ├── loader.py            # 由 checkpoint 內嵌描述重建量化樹 → 比對 placement record → 載入
 ├── qat_callback.py      # QAT:Lightning callback(plan prepare、epoch-0 校準、frozen-amax、on_save 內嵌描述)
 ├── plan.py              # QuantRules / QuantizationPlan / PlacementRecord(stage 間的唯一介面)
 ├── core/
-│   ├── replace.py       # Conv/ConvTranspose/Linear → Quant* 子類替換引擎;expand_skip_quantize
-│   ├── modules/         # QuantConv2d / QuantConvTranspose2d / QuantLinear
-│   ├── descriptors.py   # per-precision descriptor 表(唯一寫 bit width 的地方)
-│   ├── calibration.py   # Calibrator(collect_stats / amax / .calib cache)
+│   ├── modelopt.py      # modelopt bug patch(histogram-MSE 簽名、lazy buffer 載入);import 即生效
+│   ├── descriptors.py   # per-precision descriptor 表(唯一寫 bit width 的地方;直接說 modelopt 語彙)
+│   ├── replace.py       # Conv/ConvTranspose/Linear → modelopt QuantModuleRegistry 原地轉換的 walker;expand_skip_quantize
+│   ├── calibration.py   # Calibrator(modelopt enable_stats_collection + 自家 forward loop;mse/entropy/percentile/max/smoothquant)
 │   ├── fusion.py        # dense Conv+BN fusion(BN → Identity)
-│   ├── utils.py         # disable/validate/count quantizers、ONNX export 設定
-│   └── backend.py       # modelopt backend 介面
-├── recipes/
-│   ├── attach.py        # residual-add / eSE / maxpool 的 quantizer 附掛 + hook 安裝
-│   └── quant_forwards.py # BasicBlock/SparseBasicBlock/ConvNeXt/OSA/eSE 的 forward 替換物件
-└── sparse/fusion.py     # SparseConv+BN fold(FP16 sparse encoder deploy)
+│   └── quantizer_state.py # disable/validate/count quantizers
+└── recipes/
+    ├── attach.py        # ResidualBlockSpec(class 物件比對)+ residual_add / maxpool attacher(RECIPE_ATTACHERS)
+    └── quant_blocks.py  # QuantBlockRegistry、QuantSparseBasicBlock、QuantBeforePool
 
 模型端宣告:
-models/detection3d/main_modules/centerpoint/quantization.py
-  → CENTERPOINT_QUANT_RULES + build_centerpoint_quantization_plan()
+models/<task>/main_modules/<model>/quantization.py
+  → <MODEL>_QUANT_RULES + build_<model>_quantization_plan()
 
 呼叫點(三處都必須建出同一棵樹):
   scripts/quantize.py             (PTQ / QAT 產出)
   quantization/qat_callback.py    (QAT)
   quantization/loader.py          (build_model 偵測到量化 checkpoint 時載入;deploy/test 皆走此)
 ```
+
+> 2026-09-04 起,Quant 模組與 residual block 都由 **modelopt registry 原地 class-patch**,
+> 不再有自家 `QuantConv2d`/`QuantLinear` 子類與 `Quant*Forward` monkeypatch;
+> state_dict key 是 modelopt 命名(`input_quantizer._amax` / `weight_quantizer._amax`)。
+> §2–§5 描述的是 2026-08 重構當時的狀態(保留作為決策史);現況見 §11。
 
 ## 2. 診斷:亂的根源
 
@@ -252,6 +255,8 @@ Generic resolver 負責 rules + config(`skip_quantize` / `disable_recipes`)→ p
 
 ## 9. 架構整理(2026-08-31,architecture review Phase 1–5)
 
+> 本節提到的 `core/backend.py`、`utils.py`、`*_or_none` 等已在 §11 進一步整理;保留為當時記錄。
+
 依 `work_dirs/reviews/architecture-review-2026-08-31.md` 的決議實作,8-sample PTQ
 bit-exact 驗證(state_dict keys、64 個 amax、weights 全零差)通過:
 
@@ -340,3 +345,30 @@ ORT 算得對)會踩 TRT 10.8/10.16 的缺陷——fp16 合併 scale 落入 subn
 產生 NaN、build 零警告。完整證據與重測工具:`work_dirs/reviews/fp16-typed-qdq-nogo.md`
 (金絲雀 = PTv3 INT8 QAT)。island 的運作規則(誰進島、cast 放哪、每條規則的實測代價)
 見 `deployment/onnx/precision.py` 的 docstrings。
+
+## 11. 引擎改走 modelopt registry(2026-09-04,quantization-vs-modelopt review 的 A/B 項)
+
+依 `work_dirs/reviews/quantization-vs-modelopt-comparison-README.md` 的結論實作。
+驗收:CenterPoint INT8 PTQ 與重構前 ckpt **逐 tensor bit-exact**(124 tensor、56 amax 零差,
+placement record 58 筆一致),deploy 100 frames mAP pytorch/onnx/TRT 0.4559/0.4564/0.4538、
+model_graphs 4.40 ms(09-03:同值 / 4.44 ms);276 tests 綠(2 個 CLI 失敗為既有)。
+
+| 改動 | 內容 | 為什麼 |
+| --- | --- | --- |
+| **B1 Quant 模組 = modelopt 的** | `core/modules/` 刪除;`replace.py` 的 walker 改呼叫 `QuantModuleRegistry.convert(module)` 原地 class-patch,再以 `set_from_attribute_config` 套 descriptors。兩種 clone(rebuild / `vars()` transplant)與 `_clear_module_hooks` 一併消失 | 與 modelopt 同功能的 ~500 行自製碼;class-patch 不重建物件,原本 transplant 路徑要補的 hook / fake-tensor 問題根本不會發生 |
+| **state_dict key 改 modelopt 命名** | `_input_quantizer` → `input_quantizer`、`_weight_quantizer` → `weight_quantizer`;多一個永遠 disabled 的 `output_quantizer`(無 buffer,不進 state_dict) | pytorch-quantization 遺產;modelopt 的 SmoothQuant / `print_quant_summary` / `fold_weight` 都以 `input_quantizer` 尋址。**09-04 前的量化 ckpt 需重跑 quantize**(實驗性 ckpt,依慣例不設相容層) |
+| **B2 校準方法進 config** | `quantization.calibration: {method: mse\|entropy\|percentile\|max\|smoothquant, percentile, smoothquant_alpha}`(`CalibrationConfig`,預設 mse = 舊行為);`Calibrator` 改為 modelopt `enable_stats_collection` + 自家 forward loop + 逐 quantizer `load_calib_amax(method)`;smoothquant 委派 modelopt `smoothquant()`。`AMAX_METHOD` 常數與 `QATCallback.amax_method` 刪除 | 校準演算法是配方的一部分,必須隨 checkpoint 自描述;plan 依 method 選 histogram / max calibrator(不改 state_dict key) |
+| **recipe 只在 `quantize_submodules` 子樹內生效** | plan 把宣告的 submodule 名當 `roots` 傳給 attacher;子樹外的 residual block / pool 不掛 Q/DQ | 改 class 比對後 BEVFusion sparse encoder 的 `SparseBasicBlock` 會被命中(舊 config 靠 `disable_recipes` 擋),但 sparse 側走 libspconv exporter,quantizer 只會在 PyTorch fake-quant、永遠到不了 engine(實測 pytorch 0.4261 vs TRT 0.4232 的假差)。conv 沒量化的 block 本來就不該有 residual Q |
+| **B3 recipe 以 class 物件比對** | `ResidualBlockSpec(block_cls, quant_block_cls, share_from, fresh_if_downsample)`,`isinstance` 比對、first-match;`QuantRules.residual_blocks` 讓模型自帶 spec;framework 預設 spec 只有 repo 自己定義的 `SparseBasicBlock`(`default_residual_specs()`,spconv 缺席時為空) | 消滅 class-name substring 比對與排序敏感;模型端本來就 import 得到自己的 block 類別 |
+| **B4 `Quant*Forward` → `QuantModule` 子類** | `recipes/quant_blocks.py`:`QuantBlockRegistry`(`_DMRegistryCls`)原地 class-patch,forward 是正式方法;`_setup` 不建 quantizer,由 attacher 決定 fresh(submodule)/ shared(plain attribute)。record transform 名 `patch_forward` → `convert_block` | 與 B1 同一套機制;去掉 `self = self.obj` 的 forward 物件 |
+| **VoVNet recipe 改成「框架出 QuantModule、模型出 spec」** | `QuantOSAModule`、`QuantESEModule` 留在 `recipes/quant_blocks.py`(forward 鏡射 VoVNet 原版);目標類別由模型端 `QuantRules.residual_blocks` / `ese_blocks` 宣告(`ResidualBlockSpec(_OSA_module, QuantOSAModule, share_from=("concat.0",), osa_concat=True)`、`ESEBlockSpec(eSEModule, QuantESEModule)`)。`VALID_RECIPES = ("residual_add", "ese", "maxpool")` | AWML CenterPoint **VoV99**(`deploy_config_int8_vov99.py`)與 StreamPETR 的 VoVNet-CP 都用這組放置;類別今天不在 repo,測試用同結構 stand-in(`test_recipes.py::TestVoVNetRecipes`:placement 結構、quantizer 關閉時數值等價、single-Q fan-out 計數) |
+| **ConvNeXt recipe 移到獨立 branch** | `QuantConvNeXtBlock` + 測試在 `feat/quantization-convnext-recipe`(`recipes/quant_convnext.py`、`tests/quantization/test_recipe_convnext.py`,單一 commit);使用時 rebase 到量化引擎 branch,模型端加一行 `ResidualBlockSpec(ConvNeXtBlock, QuantConvNeXtBlock, share_from=("depthwise_conv",))` | 使用者決定(09-04):ConvNeXt_PC 尚無遷移排程,主線不留;mmdet `BasicBlock` 手抄本則直接刪除 |
+| A 類清理 | `core/backend.py` 死 shim 刪;`core/modelopt.py` 只剩兩個 bug patch(import 即生效),optional-dep 機制(`resolve/require/_ENV_VAR/exports_qdq_natively/setup_onnx_export`)刪;`restore_root_logging` 搬到 `cli/runtime.py`(entrypoint import 後呼叫一次);`quantization/sparse/` 刪(`encoders/sparse.py` 早有自己的 spconv BN fold);三模型宣告刪掉與預設相同的 `recipes=`;int8/fp8 config 刪掉「反正 match 不到」的 `disable_recipes`;`Precision` docstring 更新 FP8 已驗證 | review R1–R13 |
+| PTv3 INT8 recipe | `ptv3/..._int8.yaml` 改 `calibration: smoothquant α=0.5`(C2 實測 TRT mIoU 0.7787 vs mse 0.7150、FP16 0.7792) | 校準失守不是格式失守;INT8 PTQ 免 QAT 回 FP16 帶 |
+| 測試 | 新增 `test_replace_registry.py`(原地轉換、descriptor 表、state_dict 命名、與手算 fake-quant 零差、ONNX Q/DQ、amax 載入)、`test_recipes.py`(shared/fresh、class 比對、quantizer 關閉時數值等價、maxpool、SparseBasicBlock)、`test_calibration.py`(五種 method、percentile < max、SmoothQuant 的 pre_quant_scale round-trip 與 ONNX Mul) | recipes 原本零直接測試 |
+
+另外 `core/modelopt.py` 的 lazy-buffer 載入 patch 現在同時建立 `_amax` 與 `_pre_quant_scale`
+(SmoothQuant 的 per-channel 比例),modelopt 0.46 本身仍缺這個 override(單元測試 `test_calibrated_state_dict_loads_into_a_fresh_tree` 對照)。
+
+刻意不做:B5(把 modelopt `quantizer_state` 快照併入 checkpoint payload)——兩套驗證來源會混淆權威,
+PlacementRecord 已足夠;要讓 ckpt 脫離模型程式碼自重建時再議。

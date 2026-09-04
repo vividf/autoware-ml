@@ -24,19 +24,17 @@ It never branches on ``mode``: a QAT checkpoint loads exactly like a PTQ one.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import torch
 
 from autoware_ml.quantization.checkpoint import QuantizationDescription
-from autoware_ml.quantization.core.replace import expand_skip_quantize
 from autoware_ml.quantization.core.quantizer_state import (
     disable_quantizers_in,
-    move_quantizer_amax_to_device,
-    setup_quantization_for_onnx_export,
     validate_quantizer_amax,
 )
+from autoware_ml.quantization.core.replace import expand_skip_quantize
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +50,8 @@ def _load_checkpoints_into_model(
     ``apply_matching_weights``: an uncalibrated ``TensorQuantizer`` has no ``_amax``
     buffer yet, so the matching-weights key pre-filter would silently drop every
     calibrated ``_amax`` from the checkpoint. modelopt's (patched)
-    ``_load_from_state_dict`` creates the buffer on load instead.
+    ``_load_from_state_dict`` creates the buffer on load instead
+    (:mod:`autoware_ml.quantization.core.modelopt`).
 
     Args:
         model: Model already prepared by the shared quantization plan.
@@ -99,11 +98,12 @@ def load_quantized_model(
        drift is a hard failure here instead of a silent weight mis-map.
     3. Load the checkpoint(s) with ``load_state_dict(strict=False)`` (see
        :func:`_load_checkpoints_into_model`) and enforce full key coverage.
-    4. Move quantizer amax tensors to ``device`` and disable the quantizers inside the
-       ``skip_quantize`` subtrees — the same shared loop the quantize stage ran.
+    4. Move to ``device`` (the calibrated scales are buffers and move with the model) and
+       disable the quantizers inside the ``skip_quantize`` subtrees — the same shared
+       loop the quantize stage ran.
     5. Validate the remaining (enabled) quantizer amax values (TensorRT requires
-       positive finite scales).
-    6. Configure the backend for ONNX export (modelopt emits Q/DQ natively).
+       positive finite scales). modelopt's ``TensorQuantizer`` emits Q/DQ natively on
+       ONNX export; nothing to configure.
 
     Args:
         model: Freshly built model with NO weights loaded yet.
@@ -141,12 +141,10 @@ def load_quantized_model(
 
     model.to(device)
     model.eval()
-    move_quantizer_amax_to_device(model, device)
     # Disable BEFORE validating: a skip_quantize quantizer legitimately carries amax=None
     # and must not fail validation (disabled quantizers are skipped).
     disable_quantizers_in(model, skip_layers)
     validate_quantizer_amax(model)
-    setup_quantization_for_onnx_export()
 
     logger.info("Quantized checkpoint loaded successfully")
     return model

@@ -21,7 +21,7 @@ quantizable, so only the BN-fuse and skip_quantize decisions are exercised.
 from __future__ import annotations
 
 import pytest
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.plan import (
@@ -106,7 +106,7 @@ class TestPrepareRecordsDecisions:
                 "enabled": True,
                 "mode": "ptq",
                 "skip_quantize": ["some_tower"],
-                "disable_recipes": ["residual_add", "ese", "maxpool"],
+                "disable_recipes": ["residual_add", "maxpool"],
                 "ptq": {"calibrate_samples": 4},
             }
         )

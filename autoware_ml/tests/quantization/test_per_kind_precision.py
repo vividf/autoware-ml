@@ -71,8 +71,8 @@ def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     plan = QuantizationPlan(rules=rules, config=_config())
     plan.prepare(model)
 
-    conv_bits = model.body.conv._weight_quantizer.num_bits
-    linear_bits = model.body.linear._weight_quantizer.num_bits
+    conv_bits = model.body.conv.weight_quantizer.num_bits
+    linear_bits = model.body.linear.weight_quantizer.num_bits
     assert conv_bits == 8
     assert linear_bits == (4, 3)  # FP8 E4M3
 
@@ -108,8 +108,9 @@ def test_attention_out_proj_is_never_replaced() -> None:
     plan.prepare(model)
 
     assert type(model.body.attn.out_proj).__name__ == "NonDynamicallyQuantizableLinear"
-    assert not hasattr(model.body.attn.out_proj, "_weight_quantizer")
-    assert model.body.linear._weight_quantizer.num_bits == (4, 3)
+    assert not hasattr(model.body.attn.out_proj, "weight_quantizer")
+    assert "weight_quantizer" not in "".join(model.body.attn.state_dict().keys())
+    assert model.body.linear.weight_quantizer.num_bits == (4, 3)
     replaced = [
         d.module for d in plan.placement_record.decisions if d.transform == "replace_module"
     ]

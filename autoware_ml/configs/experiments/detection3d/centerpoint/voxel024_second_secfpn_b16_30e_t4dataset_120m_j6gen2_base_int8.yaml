@@ -54,10 +54,9 @@ quantization:
   skip_quantize:
     - pts_voxel_encoder
     - pts_backbone.blocks.0
-  # SECOND has no residual blocks, so the "residual_add" recipe would match nothing anyway.
-  disable_recipes:
-    - residual_add
   # Reference recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+  # `calibration: {method: mse|entropy|percentile|max|smoothquant}` picks the amax
+  # algorithm (default mse); see CalibrationConfig.
   ptq:
     calibrate_samples: 400
     batch_size: 1

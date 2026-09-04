@@ -23,8 +23,6 @@ must load into a loader-prepared tree with ``strict=True``.
 Requires nvidia-modelopt (skipped otherwise).
 """
 
-# ruff: noqa: E402  (imports follow the importorskip guards below)
-
 from __future__ import annotations
 
 import pytest
@@ -32,17 +30,17 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("modelopt")
 
-from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import PillarFeatureNet
-from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import (
+from autoware_ml.models.detection3d.backbones.second import SECONDBackbone  # noqa: E402
+from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import PillarFeatureNet  # noqa: E402
+from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import (  # noqa: E402
     PointPillarsScatter,
 )
-from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
-from autoware_ml.models.detection3d.heads.centerhead import CenterHead
-from autoware_ml.models.detection3d.main_modules.centerpoint import CenterPointDetectionModel
-from autoware_ml.models.detection3d.necks.second_fpn import SECONDFPN
-from autoware_ml.models.multi_task_base_model import LogDictConfigs
-from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.quantization.config import QuantizationConfig
+from autoware_ml.models.detection3d.heads.centerhead import CenterHead  # noqa: E402
+from autoware_ml.models.detection3d.main_modules.centerpoint import CenterPointDetectionModel  # noqa: E402
+from autoware_ml.models.detection3d.necks.second_fpn import SECONDFPN  # noqa: E402
+from autoware_ml.models.multi_task_base_model import LogDictConfigs  # noqa: E402
+from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor  # noqa: E402
+from autoware_ml.quantization.config import QuantizationConfig  # noqa: E402
 
 _POINT_CLOUD_RANGE = [-10.0, -10.0, -3.0, 10.0, 10.0, 5.0]
 _VOXEL_SIZE = [0.5, 0.5, 8.0]
@@ -151,11 +149,10 @@ class TestTreeParity:
         )
 
     def test_skip_quantize_subtree_has_no_quantizers(self):
-        from autoware_ml.quantization import tensor_quantizer_cls
+        from modelopt.torch.quantization.nn import TensorQuantizer as tq_cls
 
         model = _tiny_centerpoint()
         model.build_quantization_plan(_CONFIG).prepare(model)
-        tq_cls = tensor_quantizer_cls()
         kept = [
             name
             for name, module in model.named_modules()
@@ -168,3 +165,8 @@ class TestTreeParity:
             if isinstance(module, tq_cls) and name.startswith("pts_backbone")
         ]
         assert quantized, "the backbone tower must carry quantizers"
+        # modelopt naming: the calibrated scales live under input_quantizer / weight_quantizer.
+        assert all(
+            name.endswith(("input_quantizer", "weight_quantizer", "output_quantizer"))
+            for name in quantized
+        )

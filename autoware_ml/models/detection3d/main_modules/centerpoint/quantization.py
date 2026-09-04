@@ -49,7 +49,6 @@ CENTERPOINT_QUANT_RULES = QuantRules(
         "bbox_head": ("conv",),
         "pts_voxel_encoder": ("linear",),
     },
-    recipes=("residual_add", "ese", "maxpool"),
 )
 
 

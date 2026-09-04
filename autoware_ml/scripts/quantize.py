@@ -25,22 +25,23 @@ Both outputs embed their :class:`~autoware_ml.quantization.QuantizationDescripti
 (config + placement record) next to the ``state_dict``, so ``deploy`` and ``test``
 rebuild the identical tree from the checkpoint alone — no ``quantization`` config, no
 mode branch, no sidecar files.
-Reference PTQ recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+Reference PTQ recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax
+(``quantization.calibration`` picks the amax method; see ``CalibrationConfig``).
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 import random
+from pathlib import Path
 
 import hydra
-from hydra.core.hydra_config import HydraConfig
 import lightning as L
 import numpy as np
-from omegaconf import DictConfig, OmegaConf, open_dict
 import torch
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from autoware_ml.builders.database_builder import build_database, build_datamodule
@@ -59,9 +60,9 @@ from autoware_ml.quantization import (
     expand_skip_quantize,
     print_quantizer_status,
     save_quantized_checkpoint,
+    validate_quantizer_amax,
 )
 from autoware_ml.quantization.config import QuantizationConfig
-from autoware_ml.quantization.core.quantizer_state import validate_quantizer_amax
 from autoware_ml.quantization.qat_callback import QATCallback, default_calib_forward
 from autoware_ml.utils.mlflow_helpers import resolve_deploy_lineage
 from autoware_ml.utils.runtime import (
@@ -81,7 +82,6 @@ _CONFIG_PATH = get_config_path()
 
 # Deliberately a fixed constant, not a config key: the reference calibration method
 # (CUDA-CenterPoint parity) is histogram + MSE amax, and the release numbers depend on it.
-AMAX_METHOD = "mse"
 _MAX_CALIB_WORKERS = 4
 
 
@@ -188,18 +188,18 @@ def run_ptq(
         shuffle=ptq.calib_shuffle,
     )
     logger.info(
-        "PTQ calibration: %d samples in %d batches (batch_size=%d, seed=%s, shuffle=%s, method=%s)",
+        "PTQ calibration: %d samples in %d batches (batch_size=%d, seed=%s, shuffle=%s, %s)",
         ptq.calibrate_samples,
         calibrate_batches,
         ptq.batch_size,
         ptq.calib_seed,
         ptq.calib_shuffle,
-        AMAX_METHOD,
+        quantization_config.calibration.describe(),
     )
     Calibrator(model).calibrate(
         dataloader,
         num_batches=calibrate_batches,
-        method=AMAX_METHOD,
+        calibration=quantization_config.calibration,
         forward_fn=default_calib_forward,
     )
 
@@ -255,7 +255,7 @@ def run_qat(
     callbacks = instantiate_callbacks(
         cfg, logger_enabled=logger_enabled, checkpoint_dir=checkpoints_dir
     )
-    callbacks.append(QATCallback(quantization_config, amax_method=AMAX_METHOD))
+    callbacks.append(QATCallback(quantization_config))
 
     trainer_root_dir = (
         run_context.artifact_dir if run_context is not None else cfg.experiment_run_dir

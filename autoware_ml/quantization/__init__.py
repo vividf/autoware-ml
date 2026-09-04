@@ -21,13 +21,12 @@ PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layer
   stages and quantization: ``QuantRules`` (a model's declaration) + ``QuantizationPlan``
   (rules bound to config; ``prepare`` builds the tree AND records a ``PlacementRecord``
   of every placement decision).
-- :mod:`~autoware_ml.quantization.core`    — model-agnostic engine (quant modules, BN fusion,
-  calibration, the ReplaceModule walker, utils).
+- :mod:`~autoware_ml.quantization.core`    — model-agnostic engine on nvidia-modelopt
+  (descriptor tables, in-place module conversion through modelopt's ``QuantModuleRegistry``,
+  BN fusion, calibration, quantizer state).
 - :mod:`~autoware_ml.quantization.recipes` — architecture-specific Q/DQ placement as
-  matcher+action recipes (forward hooks + the ``ResidualBlockSpec`` registry for
-  ResNet / VoVNet / ConvNeXt residual blocks, eSE, MaxPool).
-- :mod:`~autoware_ml.quantization.sparse`  — spconv sparse-encoder helpers (FP16 deploy —
-  SparseConv+BN fold only).
+  matcher+action recipes (quantized block classes + ``ResidualBlockSpec`` rows for residual
+  blocks, the MaxPool input wrapper).
 - :mod:`~autoware_ml.quantization.config`  — typed view of the Hydra ``quantization`` section.
 - :mod:`~autoware_ml.quantization.checkpoint` — self-describing quantized checkpoints (config +
   placement record embedded next to the ``state_dict``; no sidecar files).
@@ -46,9 +45,9 @@ and the placement record embedded in the checkpoint lets the loader machine-chec
 of trusting it. Because the config travels inside the checkpoint, ``deploy`` and ``test`` need
 no ``quantization`` section at all.
 
-The names exported here are the package's real external API. Deeper internals (quant module
-classes, per-layer rebuild helpers, single Conv-BN fold) stay importable from their defining
-``core.*`` modules but are deliberately not re-exported.
+The names exported here are the package's real external API. Deeper internals (descriptor
+tables, the single Conv-BN fold, the block registry) stay importable from their defining
+modules but are deliberately not re-exported.
 """
 
 from .checkpoint import (
@@ -58,22 +57,20 @@ from .checkpoint import (
     read_quantization,
     save_quantized_checkpoint,
 )
-from .config import PTQConfig, QATConfig, QuantizationConfig
+from .config import CalibrationConfig, PTQConfig, QATConfig, QuantizationConfig
 from .core.calibration import Calibrator
 from .core.fusion import fuse_model_bn
+from .core.quantizer_state import (
+    disable_quantizers_in,
+    print_quantizer_status,
+    quantizers_disabled,
+    set_quantizers_enabled,
+    validate_quantizer_amax,
+)
 from .core.replace import (
     expand_skip_quantize,
     match_skip_quantize_roots,
     replace_quantizable_modules,
-)
-from .core.quantizer_state import (
-    disable_quantizers_in,
-    move_quantizer_amax_to_device,
-    print_quantizer_status,
-    quantizers_disabled,
-    set_quantizers_enabled,
-    setup_quantization_for_onnx_export,
-    tensor_quantizer_cls,
 )
 from .loader import load_quantized_model
 from .plan import PlacementDecision, PlacementRecord, QuantizationPlan, QuantRules
@@ -81,6 +78,7 @@ from .plan import PlacementDecision, PlacementRecord, QuantizationPlan, QuantRul
 __all__ = [
     # Typed config
     "QuantizationConfig",
+    "CalibrationConfig",
     "PTQConfig",
     "QATConfig",
     # Plan (the single interface between deployment stages and quantization)
@@ -103,12 +101,10 @@ __all__ = [
     "Calibrator",
     # Fusion
     "fuse_model_bn",
-    # Utils
+    # Quantizer state
     "disable_quantizers_in",
     "quantizers_disabled",
     "set_quantizers_enabled",
-    "tensor_quantizer_cls",
-    "move_quantizer_amax_to_device",
+    "validate_quantizer_amax",
     "print_quantizer_status",
-    "setup_quantization_for_onnx_export",
 ]

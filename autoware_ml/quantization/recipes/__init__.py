@@ -14,12 +14,12 @@
 
 """Model-architecture-specific quantization recipes.
 
-The generic engine in :mod:`autoware_ml.quantization.core` inserts Q/DQ into any Conv2d/Linear submodule.
-This package holds the parts that must know a specific backbone's block structure: the forward
-hooks that reposition Q/DQ for TensorRT-friendly fusion (:mod:`.quant_forwards`) and the functions
-that walk a model to attach quantizers + install those hooks (:mod:`.attach`).
+The generic engine in :mod:`autoware_ml.quantization.core` converts any Conv2d/Linear leaf.
+This package holds the parts that must know a block's structure: the quantized block
+classes that reposition Q/DQ for TensorRT-friendly fusion (:mod:`.quant_blocks`) and the
+recipes that walk a model to convert blocks / wrap pools (:mod:`.attach`).
 
 No re-exports on purpose: every consumer imports from the concrete submodule
-(``recipes.attach`` / ``recipes.quant_forwards``), which is also the only place these names are
+(``recipes.attach`` / ``recipes.quant_blocks``), which is also the only place these names are
 maintained.
 """

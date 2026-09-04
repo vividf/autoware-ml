@@ -40,19 +40,20 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import lightning as L
+from modelopt.torch.quantization.nn import TensorQuantizer
+
 from autoware_ml.quantization.checkpoint import QuantizationDescription, attach_quantization
 from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.core.calibration import Calibrator
-from autoware_ml.quantization.core.replace import expand_skip_quantize
 from autoware_ml.quantization.core.quantizer_state import (
     count_quantizers,
     disable_quantizers_in,
-    tensor_quantizer_cls,
     validate_quantizer_amax,
 )
+from autoware_ml.quantization.core.replace import expand_skip_quantize
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ class QATCallback(L.Callback):
     """Turn a training run into frozen-amax QAT fine-tuning.
 
     Args:
-        quantization_config: Parsed ``quantization`` config (mode must be ``qat``).
-        amax_method: Method for computing amax ("mse", "entropy", "percentile", "max").
+        quantization_config: Parsed ``quantization`` config (mode must be ``qat``); its
+            ``calibration`` block drives the epoch-0 calibration.
         calib_forward_fn: Optional ``fn(model, batch)`` overriding the default
             calibration forward (``model.preprocess_batch`` + ``forward``).
     """
@@ -70,8 +71,7 @@ class QATCallback(L.Callback):
     def __init__(
         self,
         quantization_config: QuantizationConfig,
-        amax_method: str = "mse",
-        calib_forward_fn: Optional[Callable] = None,
+        calib_forward_fn: Callable | None = None,
     ) -> None:
         if quantization_config.mode != "qat" or quantization_config.qat is None:
             raise ValueError(
@@ -79,7 +79,6 @@ class QATCallback(L.Callback):
                 f"(got mode={quantization_config.mode!r})."
             )
         self.config = quantization_config
-        self.amax_method = amax_method
         self.calib_forward_fn = calib_forward_fn
         self._quantized = False
         self._calibrated = False
@@ -109,7 +108,7 @@ class QATCallback(L.Callback):
                 "unquantized module tree. Start from --weights (an FP checkpoint) instead."
             )
 
-        if any(isinstance(m, tensor_quantizer_cls()) for m in pl_module.modules()):
+        if any(isinstance(m, TensorQuantizer) for m in pl_module.modules()):
             raise RuntimeError(
                 "QATCallback: the module tree is already quantized. QAT starts from an FP "
                 "checkpoint and prepares the tree itself; preparing again would double-insert "
@@ -152,7 +151,7 @@ class QATCallback(L.Callback):
         Calibrator(pl_module).calibrate(
             dataloader,
             num_batches=num_batches,
-            method=self.amax_method,
+            calibration=self.config.calibration,
             forward_fn=self.calib_forward_fn or default_calib_forward,
         )
         # Calibration switches the module to eval; hand it back to the training loop hot.

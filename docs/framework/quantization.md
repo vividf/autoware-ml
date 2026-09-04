@@ -6,7 +6,7 @@ together. Everything here is model-agnostic; CenterPoint is the reference model.
 
 ## Overview
 
-```
+```text
 autoware-ml train    --config-name experiments/...            # FP training
 autoware-ml quantize --config-name experiments/..._int8 \
     --weights <FP best.ckpt>                                  # PTQ or QAT -> self-describing checkpoint
@@ -19,7 +19,7 @@ autoware-ml test     --config-name experiments/... \
 A deployment run (`deploy`) is three peer stages sharing one exported-artifact
 directory and one set of backend pipelines:
 
-```
+```text
 export        one ONNX (+ TensorRT) artifact per exportable stage       [deploy.onnx / deploy.tensorrt]
 verification  cross-backend numerical parity on the final raw outputs   [deploy.verification]
 evaluation    per-backend GT metrics + latency, same keys as `test`     [deploy.evaluation]
@@ -31,7 +31,7 @@ checkpoint carries its own description (see *Self-describing checkpoints*), and
 
 ## Architecture
 
-```
+```text
 autoware_ml/deployment/            model-agnostic; no model name appears here
 ├── stages.py        Stage graph declaration: GraphStage (exportable) / TorchStage (glue)
 ├── config.py        DeployConfig — typed `deploy:` section, typo-guarded, per-stage layout
@@ -49,19 +49,33 @@ autoware_ml/metrics/report.py      the metric-key convention: {split}/{backend}/
                                    shared by MetricEvalMixin (trainer) and evaluation/
 
 autoware_ml/quantization/
-├── config.py        typed `quantization:` section (typo guard, recipe-name guard, Precision enum)
+├── config.py        typed `quantization:` section (typo guard, recipe-name guard, Precision enum,
+│                    CalibrationConfig = the amax algorithm)
 ├── plan.py          QuantRules (per-model declaration) + QuantizationPlan (the stage interface)
 │                    + PlacementRecord (recorded placement decisions)
 ├── checkpoint.py    self-describing checkpoints: config + placement record embedded next to state_dict
 ├── loader.py        rebuild + verify + load from that description
 ├── qat_callback.py  Lightning callback: frozen-amax STE fine-tuning; embeds the description on save
-├── core/            engine: modelopt seam, quant modules, replace, BN fusion, calibration, utils
-└── recipes/         architecture recipes (residual-add / eSE / maxpool), class-gated
+├── core/            engine on nvidia-modelopt: descriptor tables, in-place conversion through
+│                    modelopt's QuantModuleRegistry (replace.py), BN fusion, Calibrator, quantizer state,
+│                    the two modelopt bug patches (modelopt.py)
+└── recipes/         architecture recipes, class-gated: residual_add (ResidualBlockSpec rows ->
+                     QuantModule block classes, in place), ese (VoVNet eSE single-Q placement)
+                     and maxpool (QuantBeforePool wrapper)
+
+The engine owns no quantized module classes of its own: an `nn.Conv2d` becomes modelopt's
+`QuantConv2d` by patching the instance's class in place (`QuantModuleRegistry.convert`), so the
+object, its weights and `isinstance(m, nn.Conv2d)` all survive, and the calibrated scales live
+under modelopt's names — `<layer>.input_quantizer._amax` / `<layer>.weight_quantizer._amax`
+(SmoothQuant adds `input_quantizer._pre_quant_scale`). Residual blocks are converted the same
+way through the recipes' `QuantBlockRegistry`.
 
 Precision is wired end to end: `quantization.default_precision` flows from the plan
 through the replace engine and the recipes into `core/descriptors.py`, the single
 per-precision descriptor table. Adding a precision (e.g. FP8) = a `Precision` enum
 member + one row per descriptor table (+ a capability check in the TensorRT builder).
+The activation calibrator (histogram vs max) follows `quantization.calibration`; it changes
+no state_dict key.
 
 autoware_ml/models/detection3d/main_modules/centerpoint/   everything CenterPoint-specific
 ├── model.py         CenterPointDetectionModel (forward / loss / decode + the three hooks below)
@@ -71,11 +85,20 @@ autoware_ml/models/detection3d/main_modules/centerpoint/   everything CenterPoin
 
 ### Model integration: three hooks
 
+A model with residual / eSE blocks of its own declares them in its `QuantRules.residual_blocks`
+/ `ese_blocks` (`ResidualBlockSpec(block_cls, quant_block_cls, share_from, fresh_if_downsample,
+osa_concat)`, `ESEBlockSpec(block_cls, quant_block_cls)`); the framework ships the quantized
+block classes for VoVNet `_OSA_module` / `eSEModule` (`recipes/quant_blocks.py`) and the spec
+for the repo's own spconv `SparseBasicBlock` (the ConvNeXt block is parked on branch
+`feat/quantization-convnext-recipe`). Recipes
+fire only inside the submodules listed in `quantize_submodules` — a block whose convolutions
+stay FP gets no residual, eSE or pool Q/DQ.
+
 A model supports deployment and quantization by implementing three methods on
 `MultiTaskBaseModel`:
 
 | Hook | Returns | Used by |
-|---|---|---|
+| --- | --- | --- |
 | `build_stages()` | ordered `Stage`s (`GraphStage` = one ONNX/TRT artifact, `TorchStage` = glue that always runs in PyTorch) | export (trace inputs, artifact names, I/O names), pipelines, verification, evaluation, latency breakdown |
 | `assemble_predictions(fields)` | predictions from the final stage's tensors, keyed as the stage declares | evaluation (metrics on any backend). Default composes `assemble_outputs` + `decode_outputs`, so a model whose graph emits the head's raw maps implements only `assemble_outputs` |
 | `build_quantization_plan(config)` | the model's `QuantizationPlan` | quantize (PTQ / QAT) and the checkpoint loader |
@@ -90,7 +113,7 @@ Adding a model = one directory `models/<task>/main_modules/<model>/{model,stages
 
 ### Stage graph
 
-```
+```text
 CenterPoint:  pillar_decorate (torch) -> pts_voxel_encoder (graph) -> scatter (torch) -> pts_backbone_neck_head (graph)
 ```
 
@@ -142,7 +165,9 @@ quantization:                             # read by `quantize` only
   fuse_bn: true
   default_precision: int8                 # int8 is the only supported value today
   skip_quantize: [pts_voxel_encoder]      # glob patterns, subtree match, zero-match warns
-  disable_recipes: [residual_add]         # residual_add | ese | maxpool — an unknown name raises
+  calibration: mse                        # mse (default) | entropy | percentile | max | smoothquant;
+                                          # or {method: percentile, percentile: 99.99} / {method: smoothquant, smoothquant_alpha: 0.5}
+  disable_recipes: []                     # residual_add | ese | maxpool — an unknown name raises
   dry_run: false                          # true: log the placement record and exit (no GPU, no data)
   ptq: { calibrate_samples: 400, batch_size: 1, calib_seed: 0, calib_shuffle: false }
   # qat: { epochs: 3, lr: 1.0e-5, schedule: cosine, freeze_unquantized: true, val_check_interval: 0.25, calibrate_samples: 400 }
@@ -163,8 +188,12 @@ must use the full key.)
 ## Quantization
 
 Reference PTQ recipe: **400 samples @ batch_size=1, seed 0, histogram + MSE
-amax**, calibrated on the **validation split** through the clean test-time
-pipeline. QAT recipe (Wu et al. 2020 *Integer Quantization for Deep Learning
+amax** (`quantization.calibration: mse`), calibrated on the **validation split** through
+the clean test-time pipeline. `calibration` is part of the recipe and travels inside the
+checkpoint: `entropy` / `percentile` are the other histogram estimators, `max` is the FP8
+convention (and the fastest), `smoothquant` migrates activation outliers of every INT8
+`Linear` into its weight (modelopt's SmoothQuant; convolutions unaffected; exports as a
+`Mul` before the Q/DQ pair). QAT recipe (Wu et al. 2020 *Integer Quantization for Deep Learning
 Inference* §7 / App. A.2; confirmed on the CenterPoint replay 2026-08-27):
 `epochs` ≈ 10% of the original training, `lr` = the schedule **peak** ≈ 1% of the
 original training's peak lr (1e-3 → **1e-5** here), `schedule: cosine` (start at
