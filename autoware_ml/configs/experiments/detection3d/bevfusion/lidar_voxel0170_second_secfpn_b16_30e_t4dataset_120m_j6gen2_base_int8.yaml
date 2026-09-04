@@ -37,12 +37,18 @@ quantization:
   default_precision: int8
   # Keep the validated conv-only INT8 tree: the model rules also pin the decoder FFN
   # linears to FP8 (see the *_fp8 experiment); this recipe measures INT8 convolutions.
+  # The two input-side blocks stay FP16: the per-block sensitivity sweep (2026-09-04,
+  # work_dirs/reviews/quant-sensitivity-bevfusion.md) charges them -2.2 / -1.8 mAP alone
+  # while every other block is within +-0.1; with both skipped the 100-frame TRT mAP is
+  # 0.4513 (FP16 0.4512, all-conv INT8 0.4217) and the dense stage runs 1.60 ms
+  # (FP16 1.77, all-conv INT8 1.44).
   skip_quantize:
     - bbox_head.decoder
-  # SECOND has no residual blocks, so the "residual_add" recipe would match nothing anyway.
-  disable_recipes:
-    - residual_add
+    - pts_neck.blocks.0
+    - pts_backbone.blocks.0
   # Reference recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+  # `calibration: {method: mse|entropy|percentile|max|smoothquant}` picks the amax
+  # algorithm (default mse); see CalibrationConfig.
   ptq:
     calibrate_samples: 400
     batch_size: 1
