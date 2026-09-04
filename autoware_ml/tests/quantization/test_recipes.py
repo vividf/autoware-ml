@@ -36,6 +36,7 @@ from autoware_ml.quantization.recipes.attach import (  # noqa: E402
     RECIPE_ATTACHERS,
     BlockSpecs,
     ESEBlockSpec,
+    RecipeContext,
     ResidualBlockSpec,
     attach_ese_recipe,
     attach_residual_add_recipe,
@@ -99,16 +100,19 @@ class _Model(nn.Module):
         return self.body(x)
 
 
-def _apply(recipe: str, model: nn.Module, skip=frozenset(), on_apply=None) -> int:
-    return RECIPE_ATTACHERS[recipe](
-        model,
+def _ctx(roots=("body",), skip=frozenset(), specs=None, on_apply=None) -> RecipeContext:
+    return RecipeContext(
         precision=Precision.INT8,
         calibrator="histogram",
-        roots=("body",),
-        skip_names=set(skip),
-        specs=BlockSpecs(residual=(_SPEC,)),
+        roots=roots,
+        skip_names=frozenset(skip),
+        specs=specs if specs is not None else BlockSpecs(residual=(_SPEC,)),
         on_apply=on_apply,
     )
+
+
+def _apply(recipe: str, model: nn.Module, skip=frozenset(), on_apply=None) -> int:
+    return RECIPE_ATTACHERS[recipe](model, _ctx(skip=skip, on_apply=on_apply))
 
 
 class TestResidualAddRecipe:
@@ -120,13 +124,7 @@ class TestResidualAddRecipe:
         block, down = model.body.block, model.body.down
         record = []
         count = attach_residual_add_recipe(
-            model,
-            precision=Precision.INT8,
-            calibrator="histogram",
-            roots=("body",),
-            skip_names=set(),
-            specs=BlockSpecs(residual=(_SPEC,)),
-            on_apply=lambda *a: record.append(a),
+            model, _ctx(roots=("body",), on_apply=lambda *a: record.append(a))
         )
         assert count == 2
         # In place, class patched, identity kept.
@@ -170,17 +168,7 @@ class TestResidualAddRecipe:
                 self.conv1 = nn.Conv2d(2, 2, 1)
 
         other = _Other()
-        assert (
-            attach_residual_add_recipe(
-                other,
-                precision=Precision.INT8,
-                calibrator="histogram",
-                roots=("conv1",),
-                skip_names=set(),
-                specs=BlockSpecs(residual=(_SPEC,)),
-            )
-            == 0
-        )
+        assert attach_residual_add_recipe(other, _ctx(roots=("conv1",))) == 0
 
     def test_subclass_with_its_own_forward_does_not_match(self):
         class _Custom(_DenseBlock):
@@ -190,14 +178,7 @@ class TestResidualAddRecipe:
         model = nn.Module()
         model.custom = _Custom(4)
         with pytest.raises(KeyError):
-            attach_residual_add_recipe(
-                model,
-                precision=Precision.INT8,
-                calibrator="histogram",
-                roots=("custom",),
-                skip_names=set(),
-                specs=BlockSpecs(residual=(_SPEC,)),
-            )
+            attach_residual_add_recipe(model, _ctx(roots=("custom",)))
 
     def test_rules_declare_model_owned_blocks(self):
         config = QuantizationConfig.from_dict(
@@ -289,14 +270,7 @@ class TestSparseBasicBlockSpec:
         replace_quantizable_modules(
             model, kinds=("conv",), precision=Precision.INT8
         )  # spconv convs are not nn.Conv2d
-        count = attach_residual_add_recipe(
-            model,
-            precision=Precision.INT8,
-            calibrator="histogram",
-            roots=("block",),
-            skip_names=set(),
-            specs=specs,
-        )
+        count = attach_residual_add_recipe(model, _ctx(roots=("block",), specs=specs))
         assert count == 1
         assert type(model.block).__name__ == "QuantSparseBasicBlock"
         # No shareable input quantizer on a SubMConv3d -> fresh quantizer, saved in the state_dict.
@@ -461,13 +435,7 @@ class TestVoVNetRecipes:
         model = nn.Module()
         model.head = _ESELike(4)
         model.other = _ESELike(4)
-        kwargs = {
-            "precision": Precision.INT8,
-            "calibrator": "histogram",
-            "roots": ("head",),
-            "skip_names": set(),
-            "specs": _VOV_SPECS,
-        }
-        assert attach_ese_recipe(model, **kwargs) == 1
-        assert attach_ese_recipe(model, **kwargs) == 0
+        ctx = _ctx(roots=("head",), specs=_VOV_SPECS)
+        assert attach_ese_recipe(model, ctx) == 1
+        assert attach_ese_recipe(model, ctx) == 0
         assert type(model.other) is _ESELike

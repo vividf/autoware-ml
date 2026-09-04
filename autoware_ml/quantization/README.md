@@ -372,3 +372,30 @@ model_graphs 4.40 ms(09-03:同值 / 4.44 ms);276 tests 綠(2 個 CLI 失敗為�
 
 刻意不做:B5(把 modelopt `quantizer_state` 快照併入 checkpoint payload)——兩套驗證來源會混淆權威,
 PlacementRecord 已足夠;要讓 ckpt 脫離模型程式碼自重建時再議。
+
+## 12. 第二次架構檢視(2026-09-04,commit 之後逐檔重讀)
+
+重讀對象:`plan.py`、`recipes/attach.py`、`recipes/quant_blocks.py`、`core/replace.py`、`core/calibration.py`、
+`core/quantizer_state.py`、`core/descriptors.py`、`config.py`、`checkpoint.py`、`loader.py`、`qat_callback.py`、
+`scripts/quantize.py`(共 3,929 行,重構前 4,433)。
+
+### 動了的兩處
+
+| 位置 | 問題 | 改法 |
+| --- | --- | --- |
+| `QuantizationPlan.prepare` | 90 行一口氣做四件事,`on_replace` 用 lambda 預設參數綁 `reason`/`suffix` 的技巧不好讀 | 拆成 `_fuse_bn` / `_resolve_skip_quantize` / `_replace_modules` / `_apply_recipes` 四個命名步驤,`prepare` 本體 8 行;record 內容逐字不變(CenterPoint dry-run 仍 58 decisions,tree-parity 測試綠) |
+| `recipes/attach.py` | 三個 attacher 各自接 6 個關鍵字參數,其中兩個要 `del skip_names` / `del specs` 才能維持「統一簽名」 | 引入 `RecipeContext`(precision / calibrator / roots / skip_names / specs / on_apply,加 `new_input_quantizer()` 與 `record()`),attacher 簽名統一為 `(model, ctx) -> count`;plan 建一次 context |
+
+### 看過但刻意不動
+
+- **`config.py` 632 行是最大的檔**:四個 dataclass 各自手寫 `from_dict` / `to_dict` / 範圍檢查。冗長但每個鍵的錯誤訊息都是為使用者寫的(typo guard、「config lie」),值得那些行數;不引入 pydantic 一類的依賴。
+- **`core/replace.py` 同時裝著 `skip_quantize` 解析與模組轉換**:兩個關注點在一個檔,但 `expand_skip_quantize` 的語意(子樹展開)正是 walker 的 `skip_names` 契約,拆開反而要跨檔讀。
+- **record 詞彙 `replace_module` vs `convert_block`**:leaf 與 block 現在都是「原地 class-patch」,`replace_module` 這個名字說的是舊機制;保留是因為它是 checkpoint 內 placement record 的格式字串,改名 = 所有量化 ckpt 重跑。等下一次無論如何要重跑 ckpt 的改動再一併改。
+- **`recipes/quant_blocks.py` 的 forward 是上游的手抄本**(VoVNet OSA/eSE、spconv block):這是這條路徑的本質成本(modelopt 的 HF plugin 也一樣);測試用 stand-in 鎖住結構,真類別遷入時再加一個「與原 forward 在 quantizer 關閉時相等」的測試即可。
+- **`scripts/quantize.py` 489 行**:PTQ / QAT / dry-run 三條 orchestration + MLflow 樣板;與 `deploy.py` 同型,沒有量化邏輯滲入。
+
+### 讀法(給新讀者的一條路)
+
+`__init__.py` docstring → `plan.py`(`QuantRules` 宣告什麼、`prepare` 四步)→ `core/replace.py`(一個 leaf 怎麼被轉)→
+`recipes/attach.py`(一個 block 怎麼被轉、spec 從哪來)→ `core/calibration.py` → `checkpoint.py` + `loader.py`(自描述與驗證)。
+模型端只需看 `models/*/main_modules/*/quantization.py` 的 15 行宣告。

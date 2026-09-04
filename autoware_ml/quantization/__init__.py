@@ -25,8 +25,8 @@ PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layer
   (descriptor tables, in-place module conversion through modelopt's ``QuantModuleRegistry``,
   BN fusion, calibration, quantizer state).
 - :mod:`~autoware_ml.quantization.recipes` — architecture-specific Q/DQ placement as
-  matcher+action recipes (quantized block classes + ``ResidualBlockSpec`` rows for residual
-  blocks, the MaxPool input wrapper).
+  matcher+action recipes: quantized block classes selected by ``ResidualBlockSpec`` /
+  ``ESEBlockSpec`` rows (residual blocks, VoVNet eSE), plus the MaxPool input wrapper.
 - :mod:`~autoware_ml.quantization.config`  — typed view of the Hydra ``quantization`` section.
 - :mod:`~autoware_ml.quantization.checkpoint` — self-describing quantized checkpoints (config +
   placement record embedded next to the ``state_dict``; no sidecar files).

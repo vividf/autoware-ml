@@ -28,14 +28,14 @@ them). They are also **scoped to the submodules the model's rules quantize**
 convolutions are not quantized gets no residual Q/DQ either — BEVFusion's spconv encoder
 holds ``SparseBasicBlock`` modules but deploys through the libspconv exporter, so a quantizer
 there would fake-quantize in PyTorch and never reach the engine. Every attacher has the one
-:data:`RecipeAttacher` signature the plan calls, and takes an ``on_apply(module, transform,
-reason, detail)`` callback — the placement recording hook of
+:data:`RecipeAttacher` signature ``(model, ctx: RecipeContext) -> count``; the context carries
+the ``on_apply(module, transform, reason, detail)`` placement recording hook of
 :class:`~autoware_ml.quantization.plan.QuantizationPlan`.
 
 Block specs come from two places: the model's :attr:`QuantRules.residual_blocks` /
-:attr:`QuantRules.ese_blocks` (a model declares the block classes it owns — mmpretrain's
-``ConvNeXtBlock`` or VoVNet's ``_OSA_module`` / ``eSEModule`` live in the model package, not
-here) and :func:`default_block_specs` (blocks the repo itself defines — today the spconv
+:attr:`QuantRules.ese_blocks` (a model declares the block classes it owns — VoVNet's
+``_OSA_module`` / ``eSEModule`` live in the model package, not here) and
+:func:`default_block_specs` (blocks the repo itself defines — today the spconv
 ``SparseBasicBlock``). Matching is ``isinstance`` on the declared class, first spec wins;
 there is no name or substring matching.
 """
@@ -43,7 +43,7 @@ there is no name or substring matching.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 
 #: Placement recording hook: ``on_apply(module_name, transform, reason, detail)``.
 OnApply = Callable[[str, str, str, str], None]
+
+
+# --------------------------------------------------------------------------- specs
 
 
 @dataclass(frozen=True)
@@ -129,8 +132,8 @@ def default_block_specs() -> BlockSpecs:
     """Block specs for the blocks this repo defines itself.
 
     ``SparseBasicBlock`` lives next to spconv; when spconv is not installed no such block
-    can exist in any model, so the spec set is simply empty. VoVNet / ConvNeXt blocks are
-    not defined in this repo: the model that brings them declares their specs.
+    can exist in any model, so the spec set is simply empty. VoVNet blocks are not defined
+    in this repo: the model that brings them declares their specs.
     """
     try:
         from autoware_ml.models.detection3d.encoders.sparse import SparseBasicBlock
@@ -148,14 +151,44 @@ def default_block_specs() -> BlockSpecs:
     )
 
 
-def _new_input_quantizer(precision: Precision, calibrator: str) -> TensorQuantizer:
-    """A fresh ``TensorQuantizer`` on the conv-input activation descriptor.
+@dataclass(frozen=True)
+class RecipeContext:
+    """Everything an attacher needs besides the model — built once per ``prepare``.
 
-    Recipes use the same descriptor as the conv/linear input quantizers
-    (:func:`~autoware_ml.quantization.core.descriptors.input_desc`), so residual / pool /
-    eSE quantizers calibrate consistently with the layers around them.
+    Attributes:
+        precision: Target precision of every quantizer a recipe creates.
+        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``).
+        roots: Dotted names of the quantized submodules (the recipe scope).
+        skip_names: Expanded ``skip_quantize`` set. Honored by ``maxpool`` only: the block
+            recipes convert inside skipped subtrees too (so the state_dict layout never
+            depends on ``skip_quantize``) and their quantizers are disabled after load.
+        specs: Block specs to match (model declarations + repo defaults).
+        on_apply: Optional placement recording hook.
     """
-    return TensorQuantizer(input_desc(precision, calibrator))
+
+    precision: Precision
+    calibrator: str
+    roots: tuple[str, ...]
+    skip_names: frozenset[str] = frozenset()
+    specs: BlockSpecs = BlockSpecs()
+    on_apply: OnApply | None = None
+
+    def new_input_quantizer(self) -> TensorQuantizer:
+        """A fresh ``TensorQuantizer`` on the conv-input activation descriptor.
+
+        Recipes use the same descriptor as the conv/linear input quantizers
+        (:func:`~autoware_ml.quantization.core.descriptors.input_desc`), so residual / pool /
+        eSE quantizers calibrate consistently with the layers around them.
+        """
+        return TensorQuantizer(input_desc(self.precision, self.calibrator))
+
+    def record(self, module: str, transform: str, reason: str, detail: str) -> None:
+        """Forward one placement decision to ``on_apply`` (no-op without a hook)."""
+        if self.on_apply is not None:
+            self.on_apply(module, transform, reason, detail)
+
+
+# --------------------------------------------------------------------------- matching
 
 
 def _submodule_by_path(module: nn.Module, path: str) -> nn.Module | None:
@@ -195,55 +228,38 @@ def _in_scope(name: str, roots: tuple[str, ...]) -> bool:
     return any(name == root or name.startswith(root + ".") for root in roots)
 
 
-def _match_spec(module: nn.Module, specs: tuple[_BlockSpec, ...]) -> _BlockSpec | None:
-    for spec in specs:
-        if isinstance(module, spec.block_cls):
-            return spec
-    return None
-
-
-def _convertible_blocks(model: nn.Module, roots: tuple[str, ...], specs: tuple[_BlockSpec, ...]):
+def _convertible_blocks(
+    model: nn.Module, roots: tuple[str, ...], specs: tuple[_BlockSpec, ...]
+) -> Iterator[tuple[str, nn.Module, _BlockSpec]]:
     """Yield ``(name, module, spec)`` for every not-yet-converted block under ``roots`` a spec matches."""
     for name, module in list(model.named_modules()):
         if isinstance(module, QuantModule) or not _in_scope(name, roots):
             continue  # already converted (a leaf Conv/Linear, or a block from a previous prepare)
-        spec = _match_spec(module, specs)
-        if spec is not None:
-            yield name, module, spec
+        for spec in specs:
+            if isinstance(module, spec.block_cls):
+                yield name, module, spec
+                break
 
 
-def attach_residual_add_recipe(
-    model: nn.Module,
-    *,
-    precision: Precision,
-    calibrator: str,
-    roots: tuple[str, ...],
-    skip_names: set[str],
-    specs: BlockSpecs,
-    on_apply: OnApply | None = None,
-) -> int:
-    """Convert every matched residual block under ``roots`` and give it its residual-branch Q/DQ.
+# --------------------------------------------------------------------------- recipes
+
+
+def attach_residual_add_recipe(model: nn.Module, ctx: RecipeContext) -> int:
+    """Convert every matched residual block under ``ctx.roots`` and give it its residual-branch Q/DQ.
 
     Follows lidar-ai-solution (CUDA-BEVFusion): quantize only the identity branch, not the
-    conv-path output, so TensorRT fuses Conv+Add. ``skip_names`` is deliberately ignored:
-    blocks inside ``skip_quantize`` subtrees are converted too (the state_dict layout must
-    not depend on ``skip_quantize``) and their quantizers are disabled after load.
+    conv-path output, so TensorRT fuses Conv+Add. Blocks inside ``skip_quantize`` subtrees
+    are converted too (see :class:`RecipeContext`).
 
     Args:
         model: Model whose residual blocks get the recipe.
-        precision: Target precision of the attached quantizers.
-        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``).
-        roots: Dotted names of the quantized submodules (recipe scope).
-        skip_names: Unused here (see above); part of the uniform attacher signature.
-        specs: The block specs; only :attr:`BlockSpecs.residual` is read.
-        on_apply: Optional placement recording hook.
+        ctx: Recipe context; only :attr:`BlockSpecs.residual` of its specs is read.
 
     Returns:
         Number of blocks converted.
     """
-    del skip_names
     count = 0
-    for name, module, spec in _convertible_blocks(model, roots, specs.residual):
+    for name, module, spec in _convertible_blocks(model, ctx.roots, ctx.specs.residual):
         assert isinstance(spec, ResidualBlockSpec)
         spec.ensure_registered()
         original = type(module).__name__
@@ -254,9 +270,7 @@ def attach_residual_add_recipe(
             n_inputs = len(module.layers)
             module.add_module(
                 "concat_input_quantizers",
-                nn.ModuleList(
-                    [_new_input_quantizer(precision, calibrator) for _ in range(n_inputs)]
-                ),
+                nn.ModuleList([ctx.new_input_quantizer() for _ in range(n_inputs)]),
             )
             how = f"concat_input_quantizers[{n_inputs}]; " + (
                 "identity=True: [0] is the single Q at the block input (no residual quantizer)"
@@ -266,7 +280,7 @@ def attach_residual_add_recipe(
         else:
             shared, how = _resolve_residual_quantizer(module, spec)
             if shared is None:
-                module.add_module("residual_quantizer", _new_input_quantizer(precision, calibrator))
+                module.add_module("residual_quantizer", ctx.new_input_quantizer())
             else:
                 # A TensorQuantizer cannot be the child of two parents: bind the shared one as
                 # a plain attribute. The quantized forward still calls it, so ONNX tracing sees
@@ -274,102 +288,70 @@ def attach_residual_add_recipe(
                 object.__setattr__(module, "residual_quantizer", shared)
             how = f"residual_quantizer: {how}"
         count += 1
-        if on_apply is not None:
-            on_apply(
-                name,
-                "convert_block",
-                f"recipe 'residual_add': matched {spec.block_cls.__name__}",
-                f"{original} -> {type(module).__name__}; {how}",
-            )
+        ctx.record(
+            name,
+            "convert_block",
+            f"recipe 'residual_add': matched {spec.block_cls.__name__}",
+            f"{original} -> {type(module).__name__}; {how}",
+        )
     if count:
         logger.info("Converted %d residual blocks (residual_add recipe)", count)
     return count
 
 
-def attach_ese_recipe(
-    model: nn.Module,
-    *,
-    precision: Precision,
-    calibrator: str,
-    roots: tuple[str, ...],
-    skip_names: set[str],
-    specs: BlockSpecs,
-    on_apply: OnApply | None = None,
-) -> int:
-    """Convert every matched eSE block under ``roots``: single Q at the input + gate quantizer.
+def attach_ese_recipe(model: nn.Module, ctx: RecipeContext) -> int:
+    """Convert every matched eSE block under ``ctx.roots``: single Q at the input + gate quantizer.
 
-    Both quantizers are fresh submodules (their ``amax`` lands in the state_dict). Like
-    ``residual_add``, ``skip_names`` is ignored here and skipped subtrees are disabled after load.
+    Both quantizers are fresh submodules (their ``amax`` lands in the state_dict). Blocks
+    inside ``skip_quantize`` subtrees are converted too (see :class:`RecipeContext`).
 
     Args:
         model: Model whose eSE blocks get the recipe.
-        precision: Target precision of the attached quantizers.
-        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``).
-        roots: Dotted names of the quantized submodules (recipe scope).
-        skip_names: Unused here; part of the uniform attacher signature.
-        specs: The block specs; only :attr:`BlockSpecs.ese` is read.
-        on_apply: Optional placement recording hook.
+        ctx: Recipe context; only :attr:`BlockSpecs.ese` of its specs is read.
 
     Returns:
         Number of blocks converted.
     """
-    del skip_names
     count = 0
-    for name, module, spec in _convertible_blocks(model, roots, specs.ese):
+    for name, module, spec in _convertible_blocks(model, ctx.roots, ctx.specs.ese):
         spec.ensure_registered()
         original = type(module).__name__
         QuantBlockRegistry.convert(module)
-        module.add_module("pool_input_quantizer", _new_input_quantizer(precision, calibrator))
-        module.add_module("mul_gate_quantizer", _new_input_quantizer(precision, calibrator))
+        module.add_module("pool_input_quantizer", ctx.new_input_quantizer())
+        module.add_module("mul_gate_quantizer", ctx.new_input_quantizer())
         count += 1
-        if on_apply is not None:
-            on_apply(
-                name,
-                "convert_block",
-                f"recipe 'ese': matched {spec.block_cls.__name__}",
-                f"{original} -> {type(module).__name__}; pool_input_quantizer + mul_gate_quantizer "
-                "(single Q at the eSE input, both Mul operands INT8)",
-            )
+        ctx.record(
+            name,
+            "convert_block",
+            f"recipe 'ese': matched {spec.block_cls.__name__}",
+            f"{original} -> {type(module).__name__}; pool_input_quantizer + mul_gate_quantizer "
+            "(single Q at the eSE input, both Mul operands INT8)",
+        )
     if count:
         logger.info("Converted %d eSE blocks (ese recipe)", count)
     return count
 
 
-def attach_maxpool_recipe(
-    model: nn.Module,
-    *,
-    precision: Precision,
-    calibrator: str,
-    roots: tuple[str, ...],
-    skip_names: set[str],
-    specs: BlockSpecs,
-    on_apply: OnApply | None = None,
-) -> int:
-    """Replace every ``nn.MaxPool2d`` under ``roots`` with ``QuantBeforePool(quantizer, pool)``.
+def attach_maxpool_recipe(model: nn.Module, ctx: RecipeContext) -> int:
+    """Replace every ``nn.MaxPool2d`` under ``ctx.roots`` with ``QuantBeforePool(quantizer, pool)``.
 
     Adds Q/DQ on the pool input so MaxPool runs on INT8 in the TensorRT graph. Honors
-    ``skip_names`` (boundary-safe subtree match) because wrapping changes the module tree.
+    ``ctx.skip_names`` (boundary-safe subtree match) because wrapping changes the module tree.
 
     Args:
         model: Model whose MaxPool2d modules get wrapped.
-        precision: Target precision of the attached quantizers.
-        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``).
-        roots: Dotted names of the quantized submodules (recipe scope).
-        skip_names: skip_quantize subtree names to leave untouched.
-        specs: Unused here; part of the uniform attacher signature.
-        on_apply: Optional placement recording hook.
+        ctx: Recipe context (scope and ``skip_names``; specs unused).
 
     Returns:
         Number of MaxPool2d modules wrapped.
     """
-    del specs
     name_to_module = dict(model.named_modules())
     to_replace = []  # (full_name, parent_module, child_name, pool_module)
     for name, module in model.named_modules():
         if not isinstance(module, nn.MaxPool2d) or isinstance(module, QuantBeforePool):
             continue
         # Boundary-safe subtree matches: "backbone.block1" must not match "backbone.block10".
-        if not _in_scope(name, roots) or _in_scope(name, tuple(skip_names)):
+        if not _in_scope(name, ctx.roots) or _in_scope(name, tuple(ctx.skip_names)):
             continue
         parent_name, _, child_name = name.rpartition(".")
         parent = name_to_module.get(parent_name) if parent_name else model
@@ -378,23 +360,20 @@ def attach_maxpool_recipe(
         to_replace.append((name, parent, child_name, module))
 
     for full_name, parent, child_name, pool_module in to_replace:
-        parent.add_module(
-            child_name, QuantBeforePool(_new_input_quantizer(precision, calibrator), pool_module)
+        parent.add_module(child_name, QuantBeforePool(ctx.new_input_quantizer(), pool_module))
+        ctx.record(
+            full_name,
+            "wrap_module",
+            "recipe 'maxpool': MaxPool2d input Q/DQ",
+            "MaxPool2d -> QuantBeforePool",
         )
-        if on_apply is not None:
-            on_apply(
-                full_name,
-                "wrap_module",
-                "recipe 'maxpool': MaxPool2d input Q/DQ",
-                "MaxPool2d -> QuantBeforePool",
-            )
     if to_replace:
         logger.info("Attached Q/DQ before %d MaxPool2d modules", len(to_replace))
     return len(to_replace)
 
 
-#: Uniform attacher signature the plan calls (all keyword arguments after ``model``).
-RecipeAttacher = Callable[..., int]
+#: Uniform attacher signature the plan calls.
+RecipeAttacher = Callable[[nn.Module, RecipeContext], int]
 
 #: The recipe registry: recipe name -> attacher. ``QuantizationPlan.prepare`` applies
 #: these in ``config.VALID_RECIPES`` order (``residual_add`` before ``ese`` so a VoVNet OSA

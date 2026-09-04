@@ -74,6 +74,7 @@ from autoware_ml.quantization.recipes.attach import (
     RECIPE_ATTACHERS,
     BlockSpecs,
     ESEBlockSpec,
+    RecipeContext,
     ResidualBlockSpec,
     default_block_specs,
 )
@@ -322,18 +323,32 @@ class QuantizationPlan:
             ``model`` (mutated in place) for chaining convenience.
         """
         record = PlacementRecord()
-
         if self.config.fuse_bn:
-            model.eval()
-            for conv_name, bn_name in find_conv_bn_pairs(model):
-                record.add(
-                    conv_name,
-                    "fuse_bn",
-                    reason="adjacent Conv+BN pair",
-                    detail=f"folds {bn_name}; BN becomes Identity",
-                )
-            fuse_model_bn(model)
+            self._fuse_bn(model, record)
+        skip_names = self._resolve_skip_quantize(model, record)
+        roots = self._replace_modules(model, skip_names, record)
+        self._apply_recipes(model, roots, skip_names, record)
+        self.placement_record = record
+        record.log_summary()
+        return model
 
+    # ------------------------------------------------------------------ prepare steps
+
+    @staticmethod
+    def _fuse_bn(model: Any, record: PlacementRecord) -> None:
+        """Step 1: fold every adjacent Conv+BN pair (whole model, independent of skip_quantize)."""
+        model.eval()
+        for conv_name, bn_name in find_conv_bn_pairs(model):
+            record.add(
+                conv_name,
+                "fuse_bn",
+                reason="adjacent Conv+BN pair",
+                detail=f"folds {bn_name}; BN becomes Identity",
+            )
+        fuse_model_bn(model)
+
+    def _resolve_skip_quantize(self, model: Any, record: PlacementRecord) -> set[str]:
+        """Step 2: record the matched skip roots and return the expanded skip set."""
         for pattern, root_name in match_skip_quantize_roots(model, self.config.skip_quantize):
             record.add(
                 root_name,
@@ -341,14 +356,24 @@ class QuantizationPlan:
                 reason=f"skip_quantize pattern {pattern!r}",
                 detail="module and all descendants stay un-quantized",
             )
-        skip_names = expand_skip_quantize(model, self.config.skip_quantize, log=False)
+        return expand_skip_quantize(model, self.config.skip_quantize, log=False)
 
+    def _replace_modules(
+        self, model: Any, skip_names: set[str], record: PlacementRecord
+    ) -> tuple[str, ...]:
+        """Step 3: convert the declared module kinds under each declared submodule.
+
+        Returns:
+            The declared submodule names present on the model — the recipe scope.
+        """
         default_precision = self.config.default_precision
         calibrator = self.config.calibration.activation_calibrator
+        roots: list[str] = []
         for submodule_name in self.rules.quantize_submodules:
             submodule = getattr(model, submodule_name, None)
             if submodule is None:
-                continue
+                continue  # one rules object serves model variants
+            roots.append(submodule_name)
             by_precision: dict[Precision, list[str]] = {}
             for kind, precision in self.rules.resolved_kinds(
                 submodule_name, default_precision
@@ -356,49 +381,45 @@ class QuantizationPlan:
                 by_precision.setdefault(precision, []).append(kind)
             for precision, kinds in by_precision.items():
                 reason = f"submodule rule: {submodule_name} ({', '.join(kinds)})"
-                # The precision appears in the recorded detail only when it deviates
-                # from the default, so records of existing single-precision
-                # checkpoints stay byte-identical and keep verifying.
+                # The precision appears in the recorded detail only when it deviates from
+                # the default, so records of single-precision checkpoints stay identical.
                 suffix = "" if precision is default_precision else f" @{precision.value}"
+
+                def on_replace(name: str, original: str, new: Any, reason=reason, suffix=suffix):
+                    record.add(
+                        name,
+                        "replace_module",
+                        reason=reason,
+                        detail=f"{original} -> {type(new).__name__}{suffix}",
+                    )
+
                 replace_quantizable_modules(
                     submodule,
                     kinds=tuple(kinds),
                     skip_names=skip_names,
                     prefix=submodule_name,
-                    on_replace=lambda name, original, new, reason=reason, suffix=suffix: record.add(
-                        name,
-                        "replace_module",
-                        reason=reason,
-                        detail=f"{original} -> {type(new).__name__}{suffix}",
-                    ),
+                    on_replace=on_replace,
                     precision=precision,
                     calibrator=calibrator,
                 )
+        return tuple(roots)
 
-        # Recipes fire only inside the submodules the rules quantize: a block whose convs
-        # stay FP gets no residual / pool Q/DQ either.
-        roots = tuple(
-            name
-            for name in self.rules.quantize_submodules
-            if getattr(model, name, None) is not None
+    def _apply_recipes(
+        self, model: Any, roots: tuple[str, ...], skip_names: set[str], record: PlacementRecord
+    ) -> None:
+        """Step 4: architecture recipes in canonical order, scoped to ``roots``."""
+        context = RecipeContext(
+            precision=self.config.default_precision,
+            calibrator=self.config.calibration.activation_calibrator,
+            roots=roots,
+            skip_names=frozenset(skip_names),
+            specs=BlockSpecs(
+                residual=tuple(self.rules.residual_blocks), ese=tuple(self.rules.ese_blocks)
+            )
+            + default_block_specs(),
+            on_apply=record.add,
         )
         disabled = set(self.config.disable_recipes)
-        specs = (
-            BlockSpecs(residual=tuple(self.rules.residual_blocks), ese=tuple(self.rules.ese_blocks))
-            + default_block_specs()
-        )
         for recipe_name in VALID_RECIPES:
             if recipe_name in self.rules.recipes and recipe_name not in disabled:
-                RECIPE_ATTACHERS[recipe_name](
-                    model,
-                    precision=default_precision,
-                    calibrator=calibrator,
-                    roots=roots,
-                    skip_names=skip_names,
-                    specs=specs,
-                    on_apply=record.add,
-                )
-
-        self.placement_record = record
-        record.log_summary()
-        return model
+                RECIPE_ATTACHERS[recipe_name](model, context)

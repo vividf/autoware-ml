@@ -31,12 +31,16 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("modelopt")
 
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone  # noqa: E402
-from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import PillarFeatureNet  # noqa: E402
+from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import (  # noqa: E402
+    PillarFeatureNet,
+)
 from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import (  # noqa: E402
     PointPillarsScatter,
 )
 from autoware_ml.models.detection3d.heads.centerhead import CenterHead  # noqa: E402
-from autoware_ml.models.detection3d.main_modules.centerpoint import CenterPointDetectionModel  # noqa: E402
+from autoware_ml.models.detection3d.main_modules.centerpoint import (  # noqa: E402
+    CenterPointDetectionModel,
+)
 from autoware_ml.models.detection3d.necks.second_fpn import SECONDFPN  # noqa: E402
 from autoware_ml.models.multi_task_base_model import LogDictConfigs  # noqa: E402
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor  # noqa: E402

@@ -28,10 +28,11 @@ There are no sidecar files: the calibrated ``_amax`` buffers live in the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
 

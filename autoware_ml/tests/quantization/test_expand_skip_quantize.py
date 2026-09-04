@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.quantization.core.replace import expand_skip_quantize
 
