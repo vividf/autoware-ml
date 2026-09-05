@@ -1,0 +1,144 @@
+# @package _global_
+defaults:
+  - /experiments/default_experiment
+  - /optimizers@optimizer: default_adamw
+  - /labels/segmentation3d@segmentation3d: t4dataset_20class
+  - /metrics/t4dataset@metrics: default_segmentation3d_metrics
+  - _self_
+
+database: ???
+point_cloud_range: ???
+grid_size: ???
+metric_ranges: ???
+
+data_preprocessor:
+  preprocessor_modules:
+    # Point *selection* already happened in the GridSample transform (dropping points
+    # means dropping their labels); this only assembles the batch the backbone reads.
+    - _target_: autoware_ml.preprocessing.segmentation3d.point_grid_preprocessor.PointGridPreprocessor
+      grid_size: ${grid_size}
+      point_cloud_range: ${point_cloud_range}
+
+trainer:
+  max_epochs: ???
+  check_val_every_n_epoch: ???
+  gradient_clip_val: 10.0
+
+deploy:
+  onnx:
+    dynamo: false
+    opset_version: 17
+    do_constant_folding: false
+    # The quantized regions carry their own scales (Q/DQ); everything else runs FP16,
+    # which AutoCast bakes into the exported graphs (engines build strongly typed).
+    precision: fp16
+  # Stage names come from PTv3SegmentationModel.build_stages(); the exported artifacts
+  # are <stage_name>.onnx / .engine. The serialization glue (serialize_points) is a
+  # TorchStage and has no artifact.
+  #
+  # No `deploy.stages.<name>.onnx.dynamic_axes` here: every PTv3 tensor is indexed by a
+  # point count, so the graphs declare their own axes (GraphStage.onnx_dynamic_axes).
+  # TensorRT shape profiles depend on the grid and live in the experiment variant.
+  # TensorRT build, verification, and evaluation are heavyweight and stay opt-in here.
+  tensorrt:
+    enabled: false
+    # PTv3's graphs carry autoware:: plugin ops (sparse convolution, argsort,
+    # segment_csr); the engines need the runtime library that implements them, built
+    # into the image (docker/tensorrt_plugins).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
+  verification:
+    # PTv3SegmentationModel.verification_caveat declares why raw-output parity is not a
+    # meaningful gate here (shuffle_orders makes the PyTorch reference stochastic); even
+    # when enabled, the gate skips loudly. Per-backend mIoU (deploy.evaluation) is the
+    # gate that means something.
+    enabled: false
+    num_verify_batches: 1
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 1.0e-2 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 1.0e-2 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      # Every PTv3 graph stage falls back to torch on ONNX Runtime (it has no
+      # implementation of the autoware:: plugin ops), so an "onnx" run would be the
+      # pytorch run under another name.
+      onnx: { enabled: false, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
+
+model:
+  _target_: autoware_ml.models.segmentation3d.main_modules.ptv3.PTv3SegmentationModel
+  metrics: ${metrics}
+  grid_size: ${grid_size}
+  point_cloud_range: ${point_cloud_range}
+  log_dict_configs:
+    _target_: autoware_ml.models.multi_task_base_model.LogDictConfigs
+    _convert_: all
+    on_step: true
+    on_epoch: true
+    prog_bar: true
+    sync_dist: true
+
+  encoder:
+    _target_: autoware_ml.models.segmentation3d.encoders.ptv3.PointTransformerV3Encoder
+    in_channels: 4 # x, y, z, intensity
+    order: [z, z-trans, hilbert, hilbert-trans]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 2, 2]
+    enc_channels: [32, 64, 128, 256, 512]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [512, 512, 512, 512, 512]
+    mlp_ratio: 4
+    qkv_bias: true
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: true
+    shuffle_orders: true
+    enable_rpe: false
+    enable_flash: true
+    upcast_attention: false
+    upcast_softmax: false
+
+  seg3d_head:
+    _target_: autoware_ml.models.segmentation3d.heads.ptv3.PTv3SegDecoderHead
+    num_classes: ${segmentation3d.num_classes}
+    ignore_index: ${segmentation3d.ignore_index}
+    order: ${model.encoder.order}
+    enc_channels: ${model.encoder.enc_channels}
+    dec_depths: [0, 0, 1, 1]
+    dec_channels: [64, 64, 128, 256]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [512, 512, 512, 512]
+    mlp_ratio: ${model.encoder.mlp_ratio}
+    qkv_bias: ${model.encoder.qkv_bias}
+    qk_scale: ${model.encoder.qk_scale}
+    attn_drop: ${model.encoder.attn_drop}
+    proj_drop: ${model.encoder.proj_drop}
+    drop_path: ${model.encoder.drop_path}
+    pre_norm: ${model.encoder.pre_norm}
+    enable_rpe: ${model.encoder.enable_rpe}
+    enable_flash: ${model.encoder.enable_flash}
+    upcast_attention: ${model.encoder.upcast_attention}
+    upcast_softmax: ${model.encoder.upcast_softmax}
+    lovasz_weight: 1.0
+
+  optimizer: ${optimizer}
+  # Attention blocks train at a tenth of the base rate (they carry the pretrained
+  # inductive bias); the groups come from build_optimizer_groups().
+  optimizer_group_overrides:
+    block:
+      lr: ???
+  scheduler:
+    _target_: torch.optim.lr_scheduler.OneCycleLR
+    _partial_: true
+    max_lr: ???
+    pct_start: 0.04
+    anneal_strategy: cos
+    div_factor: 10.0
+    final_div_factor: 100.0
+  scheduler_config:
+    interval: step
