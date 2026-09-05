@@ -4,238 +4,198 @@ icon: lucide/package
 
 # Deployment
 
-Autoware-ML exports trained models for production use. The pipeline converts
-PyTorch checkpoints to optimized inference formats, one deployable module at a
-time, and stamps every exported module with its identity and provenance.
+Autoware-ML exports trained models for production use, checks that the exported
+graphs match the PyTorch model numerically, and scores every backend against
+ground truth — all derived from one declaration on the model: its **stage graph**.
 
 ## Deployment Pipeline
 
 ```text
-Checkpoint (.ckpt) -> ONNX (.onnx) -> graph modifiers -> precision -> metadata stamp -> TensorRT (.engine)
+Checkpoint (.ckpt) -> export  (<stage>.onnx, <stage>.engine per exportable stage)
+                   -> verify  (pytorch vs onnx vs tensorrt on raw outputs)
+                   -> evaluate (GT metrics + latency per backend, same keys as `test`)
 ```
-
-Each stage runs per module. The stamp is applied to the final ONNX, so the
-shipped file always carries its own metadata.
 
 ## Basic Usage
 
 ```bash
 autoware-ml deploy \
-    --config-name <task>/<model>/<config> \
-    --weights mlruns/<task>/<model>/<config>/<run_id>/artifacts/checkpoints/best.ckpt
+    --config-name experiments/<task>/<model>/<config> \
+    --weights mlruns/<...>/artifacts/checkpoints/best.ckpt
 ```
 
-`--weights` accepts one or more checkpoint paths and is the only way to supply
-parameters to the export model. For a single-task export, pass one
-checkpoint. For a multi-head export, pass one `--weights` per source
-checkpoint (see [Multi-head exports](#multi-head-exports)).
+`deploy` operates on `experiments/` configs. `--weights` accepts one or more
+checkpoint paths; later checkpoints overwrite earlier ones on overlapping keys, and
+every model parameter must be covered. A **quantized** checkpoint produced by
+`autoware-ml quantize` is detected automatically from its embedded description —
+no `quantization` config is needed to deploy it (see
+[Quantization](../framework/quantization.md)).
 
-!!! warning
-    Pass `--release vMAJOR.MINOR.PATCH` if the model is version controlled.
-    Without it the artifacts are stamped `unversioned`, which is fine for
-    quick iteration but never for a release build.
-
-This generates one ONNX (`<module>.onnx`) and one TensorRT engine
-(`<module>.engine`) per deployable module, when both stages are enabled and
-supported by the model. The deploy command also creates a dedicated MLflow run
-linked to the source training run and logs exported artifacts there.
-
-You can disable either stage during iteration:
+Artifacts land in the deploy run's MLflow artifact directory under `exports/`, one
+`<stage_name>.onnx` / `<stage_name>.engine` per exportable stage. Disable either
+exporter during iteration; verification and evaluation then reuse the artifacts
+already present in that directory:
 
 ```bash
-autoware-ml deploy \
-    --config-name <task>/<model>/<config> \
-    --weights mlruns/<task>/<model>/<config>/<run_id>/artifacts/checkpoints/best.ckpt \
+autoware-ml deploy --config-name experiments/<...> --weights <ckpt> \
     deploy.tensorrt.enabled=false
 ```
 
-By default, deploy writes outputs into the deploy MLflow run's artifact
-directory under `exports/`. Without MLflow logging, outputs land next to the
-checkpoint.
+## The Stage Graph
 
-When MLflow logging is enabled, any custom `output_dir` must stay inside that
-run artifact directory. Leave `output_dir` unset to use the default
-`exports/` location, or disable MLflow logging if you need to export outside
-the run artifact tree.
+A model declares its inference as an ordered list of stages over named tensors
+(`MultiTaskBaseModel.build_stages()`):
 
-**Custom output directory inside MLflow artifacts:**
+- **`GraphStage`** — exportable: a module plus the names it reads (its ONNX inputs)
+  and writes (its ONNX outputs). One `GraphStage` = one artifact.
+- **`TorchStage`** — glue that is never exported (pillar decoration, BEV scatter);
+  it runs in PyTorch on every backend.
 
-```bash
-autoware-ml deploy \
-    --config-name <task>/<model>/<config> \
-    --weights mlruns/<task>/<model>/<config>/<run_id>/artifacts/checkpoints/best.ckpt \
-    output_dir=mlruns/<task>/<model>/<config>/<deploy_run_id>/artifacts/custom_exports
+```text
+CenterPoint:  pillar_decorate -> pts_voxel_encoder -> scatter -> pts_backbone_neck_head
+              (torch)           (graph)              (torch)    (graph)
 ```
 
-## Export Modules
-
-A model exports one or more deployable modules. Models without a dedicated
-export split produce a single module named `end_to_end`.
-
-Every exported module must have a matching entry under `deploy.onnx.modules`,
-and artifact files are named after the module. A module missing from the
-config fails the deploy immediately.
-
-## Multi-head exports
-
-Multi-head export models can expose multiple deployable modules from one
-configured model. `--weights` can merge checkpoints from independently
-trained parts of that model into a single export:
-
-```bash
-autoware-ml deploy \
-    --config-name detection3d/ptv3/voxel012_122m_t4dataset_j6gen2 \
-    --weights mlruns/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt \
-    --weights mlruns/detection3d/ptv3/voxel012_122m_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt
-```
-
-Checkpoints are applied in the order they appear on the command line, and
-later checkpoints overwrite any keys already set by earlier ones. Each
-checkpoint only contributes the state-dict keys that exist on the export
-model and match its tensor shapes. Keys missing from the model are skipped.
-Keys with a matching name but mismatching shape raise an error immediately.
-
-**Full coverage is enforced.** After all checkpoints are loaded, deploy
-verifies that every parameter in the export model has been covered by at
-least one of the supplied `--weights`. If any parameter is left
-uninitialized, the command fails up front with the list of missing keys
-instead of producing an ONNX or engine that contains untrained layers. Add
-or replace `--weights` entries until every key is covered.
-
-## ONNX Metadata
-
-Every exported module carries its identity and provenance inside the ONNX
-file: producer, git commit of the export, release (encoded into
-`model_version` as `major * 10000 + minor * 100 + patch`), the config name,
-export date, and the linked deploy run.
-
-Per-module inference parameters come from the deploy config's `metainfo`
-block. The pipeline serializes whatever the config declares without
-interpreting it:
-
-```yaml
-deploy:
-  onnx:
-    modules:
-      <module>:
-        metainfo:
-          class_names: ${dataset.detection3d.class_names}
-```
-
-Each `metainfo` value is stamped as one compact JSON document (scalars,
-strings, lists and mappings, nested as declared), while the provenance
-properties above are plain strings, so a consumer reads a parameter with any
-JSON parser. Non-finite floats, values JSON cannot represent, and keys that
-collide with the automatically stamped properties fail at export time.
+From that one declaration the framework derives the export units and their trace
+inputs, the artifact names, the per-backend inference pipeline, verification, and
+the latency breakdown. `forward()` stays hand-written for training; a test pins it
+to the staged PyTorch run.
 
 ## Configuration
 
-### ONNX Settings
-
-Shared settings live at `deploy.onnx`. Per-module settings under
-`deploy.onnx.modules.<module>` override them:
+Global options live under `deploy.onnx` / `deploy.tensorrt`; everything
+shape-related is per stage under `deploy.stages.<stage_name>`, keyed by the names
+the model declares (a name that does not match raises):
 
 ```yaml
 deploy:
   onnx:
     enabled: true
-    dynamo: true
-    opset_version: 21
-    precision: fp32
-    dynamic_shapes:
-      input_tensor: { 2: height, 3: width }
-    modules:
-      end_to_end:
-        output_names: [output]
-```
-
-**input_names / output_names**: exported input names default to the export
-spec's forward parameter names. Output names are declared per module.
-
-**precision**: `fp32` exports the model unchanged. `fp16` halves the weights and
-internal tensors but keeps graph inputs and outputs fp32, so consumers keep their
-fp32 buffers either way. Calibrated precisions such as `int8` are out of scope here.
-
-An fp16 export only works if the inference engine honors its dtypes instead of
-reassigning them. In Autoware, that means `trt_precision: strongly-typed` on the
-node.
-
-**dynamic_shapes**: Keys are exported input names, values map dimension indices
-to symbolic names. For the default export path these names come from
-`forward()`. Models with explicit export wrappers define their own exported
-input names through `build_export_spec()`.
-You can also provide symbolic bounds when export needs them:
-
-```yaml
-deploy:
-  onnx:
-    dynamic_shapes:
-      points:
-        0: { name: num_points, min: 2 }
-```
-
-Set `dynamo: false` for models that rely on legacy ONNX symbolic functions
-instead of `torch.export`. In that mode, `dynamic_axes` is passed to the legacy
-exporter directly, and `dynamic_shapes` can still be used as a shorthand to
-derive equivalent symbolic axes.
-
-### TensorRT Settings
-
-```yaml
-deploy:
+    dynamo: false            # legacy exporter for models relying on symbolic functions
+    opset_version: 17
+    do_constant_folding: false
+    # fp16 converts every exported stage WITHOUT Q/DQ nodes to mixed FP16 (ModelOpt
+    # AutoCast); quantized stages keep the precision their checkpoint bakes in.
+    # Engines always build strongly typed, so this is where FP16 is decided.
+    precision: fp16
   tensorrt:
     enabled: true
-    workspace_size: 8589934592  # 8 GiB
-    input_shapes:
-      input:
-        min_shape: [1, 3, 224, 224]
-        opt_shape: [1, 3, 256, 256]   # Optimized for this
-        max_shape: [1, 3, 512, 512]
+    workspace_size: 4294967296
+    # No precision knob here: engines build strongly typed (see deploy.onnx.precision).
+  stages:
+    pts_voxel_encoder:
+      onnx:
+        # Optional per-stage override of deploy.onnx.precision (fp32 | fp16) — for a
+        # pipeline whose stages need different precisions; unset inherits the global.
+        # precision: fp32
+        dynamic_axes:
+          input_features: { 0: num_voxels, 1: num_max_points }
+          pillar_features: { 0: num_voxels }
+      tensorrt:
+        input_shapes:
+          input_features:
+            min_shape: [1000, 32, 11]
+            opt_shape: [20000, 32, 11]
+            max_shape: [96000, 32, 11]
+    pts_backbone_neck_head:
+      onnx:
+        dynamic_axes:
+          spatial_features: { 0: batch_size, 2: H, 3: W }
+      tensorrt:
+        input_shapes:
+          spatial_features:
+            min_shape: [1, 32, 1020, 1020]
+            opt_shape: [1, 32, 1020, 1020]
+            max_shape: [1, 32, 1020, 1020]
 ```
 
+With `dynamo: true`, use `dynamic_shapes` (`{input: {dim: name | {name, min, max}}}`)
+instead of `dynamic_axes`. Input and output *names* are never configured — they are
+the stage declaration.
+
 !!! tip
-    TensorRT optimizes most aggressively for `opt_shape`. Set this to your typical inference resolution.
+    TensorRT optimizes most aggressively for `opt_shape`. Set it to your typical
+    inference shape.
 
-Engines are always built strongly typed: the builder uses exactly the precisions
-the ONNX carries and never picks its own. Choose the engine's numerics with
-`deploy.onnx.precision`.
+### Verification
 
-## Model-Owned Export Wrappers
+```yaml
+deploy:
+  verification:
+    enabled: true
+    tolerance: 0.01           # strict default for FP32 graphs
+    num_verify_batches: 1
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda } }
+      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 1.0 }
+```
 
-The preferred deployment path is to keep export logic inside the model. Models
-with deployment-specific requirements should override `build_export_spec()` and
-return an explicit export module plus example tensor inputs.
+Each scenario runs both backends on the same preprocessed batches and compares the
+final raw graph outputs element-wise. Lossy backends (fp16 engines, INT8) set an
+explicit per-scenario `tolerance` rather than loosening the default. A failing
+scenario fails the deploy run.
 
-This keeps export-time behavior close to the model implementation and avoids
-ad hoc post-processing for most cases.
+### Evaluation
+
+```yaml
+deploy:
+  evaluation:
+    enabled: true
+    num_samples: -1           # -1 = whole test split
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
+```
+
+Every backend is scored with the model's own metric suites — the same code
+`autoware-ml test` runs — and reported under the same keys:
+`test/<backend>/<suite>/<metric>` (e.g. `test/tensorrt/detection3d/mAP`) plus
+`latency/<backend>/<stage>_mean_ms`. PyTorch is one backend among three, so the three
+columns line up in MLflow.
 
 ## Optional Graph Modification
 
-Post-export ONNX graph modification is still available as a fallback, shared
-across modules or per module:
+Post-export ONNX graph modification is available as a fallback and applies to every
+exported stage:
 
 ```yaml
 deploy:
   onnx:
-    modules:
-      <module>:
-        modify_graph:
-          _target_: my_module.OnnxGraphModifier
-          # modifier-specific parameters
+    modify_graph:
+      _target_: my_module.OnnxGraphModifier
+      # modifier-specific parameters
 ```
-
-Use for operator replacement, shape inference fixes, or custom plugin insertion.
-Modifiers run before the precision conversion and the metadata stamp, so the
-shipped file reflects them.
 
 ## Overriding at Runtime
 
-Override deployment settings from CLI:
-
 ```bash
-autoware-ml deploy \
-    --config-name <task>/<model>/<config> \
-    --weights mlruns/<task>/<model>/<config>/<run_id>/artifacts/checkpoints/best.ckpt \
-    deploy.tensorrt.input_shapes.input.opt_shape=[1,3,256,256] \
-    deploy.tensorrt.workspace_size=8589934592
+autoware-ml deploy --config-name experiments/<...> --weights <ckpt> \
+    deploy.stages.pts_backbone_neck_head.tensorrt.input_shapes.spatial_features.opt_shape=[1,32,1020,1020] \
+    deploy.evaluation.num_samples=1000
 ```
+
+## Adding Deployment to a Model
+
+Implement these hooks on your `MultiTaskBaseModel` subclass, in the model's own
+directory (`models/<task>/main_modules/<model>/`):
+
+1. `build_stages()` — the stage graph (`stages.py`).
+2. Turn the final stage's tensors — which the stage declares as `(onnx_name, key)`
+   pairs — into predictions. Which hook depends on what the deployed graph emits:
+   - the head's raw output maps: implement `assemble_outputs(fields)` and the default
+     `assemble_predictions` decodes them with the model's own `decode_outputs`;
+   - detections, because the runtime ABI decodes in-graph: override
+     `assemble_predictions(fields)` instead. There is no head output to rebuild, so
+     `assemble_outputs` stays unimplemented. Reuse the head's post-processing rather
+     than restating it, so the deployed behaviour cannot drift from the model's
+     (see `TransFusionHead.decode_detections`).
+3. `build_eval_output_from_predictions(batch, predictions)` — pair predictions with
+   ground truth for the metric suites. Training, validation and deployment all score
+   through this one method.
+4. `build_quantization_plan(config)` — only if the model supports INT8
+   (`quantization.py`).
+
+Nothing model-specific goes into `autoware_ml/deployment`, `autoware_ml/evaluation`,
+or `autoware_ml/quantization`; a test asserts no model name appears there.
