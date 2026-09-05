@@ -174,8 +174,7 @@ class StagedPipeline:
         self.fallback_stage_names: tuple[str, ...] = tuple(
             stage.name
             for stage in graph_stages(self.stages)
-            if self.backend is not Backend.PYTORCH
-            and self.backend in stage.torch_fallback_backends
+            if self.backend is not Backend.PYTORCH and self.backend in stage.torch_fallback_backends
         )
         for stage in graph_stages(self.stages):
             if self.backend is Backend.PYTORCH or self.backend in stage.torch_fallback_backends:
@@ -248,6 +247,8 @@ class PipelineCache:
 
     Verification and evaluation both need pipelines for the same backends; loading
     an ONNX session or deserializing a TensorRT engine twice per deploy run is waste.
+    One instance lives for one deploy run over one set of artifacts — there is no
+    invalidation: if an artifact on disk changes, use a fresh cache.
     """
 
     def __init__(

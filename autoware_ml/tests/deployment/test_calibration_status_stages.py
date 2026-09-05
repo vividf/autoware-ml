@@ -87,7 +87,7 @@ def test_fetch_glue_reads_fused_img_from_batch_inputs() -> None:
 def test_graph_exports_to_onnx_with_the_abi_names(tmp_path) -> None:
     import onnx
 
-    from autoware_ml.deployment.onnx_export import export_to_onnx
+    from autoware_ml.deployment.onnx.export import export_to_onnx
 
     stages = build_calibration_status_stages(_tiny_model())
     graph = stages[-1]

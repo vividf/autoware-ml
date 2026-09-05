@@ -22,7 +22,7 @@ Every network is built STRONGLY TYPED: the ONNX graph's own tensor types are
 binding, and precision therefore lives in the ONNX, not in builder flags —
 quantized precisions come from Quantize/DequantizeLinear nodes (explicit
 quantization), FP16 from the exported graph's tensor types
-(:func:`autoware_ml.deployment.onnx.precision.autocast_to_fp16`). This matches the
+(:func:`autoware_ml.deployment.onnx.autocast.autocast_to_fp16`). This matches the
 TensorRT direction: the weak-typing precision flags (``BuilderFlag.FP16`` & co)
 were deprecated in TensorRT 10.12 and removed in TensorRT 11, where all networks
 are strongly typed.
@@ -87,6 +87,11 @@ def _parse_onnx_file(parser: Any, onnx_path: Path) -> None:
     if not parser.parse(onnx_data):
         errors = [parser.get_error(i) for i in range(parser.num_errors)]
         error_msg = "\n".join(f"TensorRT parser error {i}: {err}" for i, err in enumerate(errors))
+        if "plugin" in error_msg.lower() or "INVALID_NODE" in error_msg:
+            error_msg += (
+                "\nHint: if this graph carries custom ops (e.g. autoware::*), make sure "
+                "deploy.tensorrt.plugin_libraries lists the plugin .so for this environment."
+            )
         raise RuntimeError(f"Failed to parse ONNX file:\n{error_msg}")
 
     logger.info("Successfully parsed ONNX file")

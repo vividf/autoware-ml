@@ -17,7 +17,7 @@
 TODO(vividf): delete this whole module once every legacy ``BaseModel`` (ptv3 / frnet /
 transfusion / bevfusion / calibration_status) migrates to
 ``MultiTaskBaseModel.build_stages()`` (design doc Q5). Everything current lives in
-:mod:`autoware_ml.deployment.onnx_export` (ONNX primitive) and
+:mod:`autoware_ml.deployment.onnx` (ONNX primitives) and
 :mod:`autoware_ml.deployment.backends.tensorrt_builder` (engine build); the wrappers
 here only adapt the legacy ``deploy.onnx.modules`` DictConfig schema onto them.
 """
@@ -36,8 +36,8 @@ import torch
 
 from autoware_ml.deployment.backends.tensorrt_builder import build_engine
 from autoware_ml.deployment.config import ShapeProfile
-from autoware_ml.deployment.onnx_export import export_to_onnx as _export_to_onnx
-from autoware_ml.deployment.onnx_export import (  # noqa: F401  (legacy re-exports)
+from autoware_ml.deployment.onnx.export import export_to_onnx as _export_to_onnx
+from autoware_ml.deployment.onnx.modify import (  # noqa: F401  (legacy re-exports)
     modify_onnx_graph,
     should_modify_graph,
 )
@@ -162,7 +162,7 @@ def export_to_onnx(
     dynamic_axes_override: dict[str, dict[int, str]] | None,
     output_path: Path,
 ) -> None:
-    """Legacy DictConfig adapter over :func:`autoware_ml.deployment.onnx_export.export_to_onnx`."""
+    """Legacy DictConfig adapter over :func:`autoware_ml.deployment.onnx.export.export_to_onnx`."""
     if not input_param_names:
         raise ValueError("Model forward signature has no parameters.")
     _export_to_onnx(

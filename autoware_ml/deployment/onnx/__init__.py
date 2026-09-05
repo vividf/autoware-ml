@@ -22,10 +22,12 @@ from autoware_ml.deployment.onnx.export import (
     normalize_dynamic_shapes_for_model,
 )
 from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_graph
-from autoware_ml.deployment.onnx.precision import (
+from autoware_ml.deployment.onnx.autocast import (
     autocast_to_fp16,
-    cast_graph_to_fp16,
     keep_topk_in_fp16,
+)
+from autoware_ml.deployment.onnx.precision import (
+    cast_graph_to_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,
 )

@@ -61,7 +61,7 @@ from torch import nn
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
 from autoware_ml.models.detection3d.feature_extractors import LidarBEVFeatureExtractor
-from autoware_ml.deployment.onnx.precision import keep_topk_in_fp16
+from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 

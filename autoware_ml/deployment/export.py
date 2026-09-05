@@ -36,8 +36,8 @@ from autoware_ml.deployment.backends.tensorrt_builder import build_engine
 from autoware_ml.deployment.config import DeployConfig, OnnxPrecision
 from autoware_ml.deployment.onnx.export import export_to_onnx
 from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_graph
+from autoware_ml.deployment.onnx.autocast import autocast_to_fp16
 from autoware_ml.deployment.onnx.precision import (
-    autocast_to_fp16,
     cast_graph_to_fp16,
     onnx_custom_op_domains,
     onnx_has_qdq,

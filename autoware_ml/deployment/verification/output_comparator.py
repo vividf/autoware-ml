@@ -41,6 +41,11 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import torch
 
+#: Headroom multiplier for the gate suggested on a verification failure. Observed
+#: max_diff varies a little run to run (kernel/tactic nondeterminism), so the suggested
+#: gate leaves margin above one observation without becoming a rubber stamp.
+SUGGESTED_GATE_HEADROOM = 1.25
+
 
 @dataclass(frozen=True)
 class OutputDiffSummary:
@@ -190,7 +195,8 @@ class OutputComparator:
             else (
                 f"{path}: max_diff={max_diff:.6f} > tolerance={tolerance:.6f} (shape={ref_np.shape}). "
                 "Raw-logit diffs between backends are expected for quantized/FP16 stages; if the "
-                f"per-backend metrics stay equal, recalibrate this scenario's gate to ~{max_diff * 1.25:.1f} "
+                f"per-backend metrics stay equal, recalibrate this scenario's gate to "
+                f"~{max_diff * SUGGESTED_GATE_HEADROOM:.1f} "
                 "and record the observed value in the config comment."
             )
         )

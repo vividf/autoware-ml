@@ -19,14 +19,14 @@ from __future__ import annotations
 from omegaconf import OmegaConf
 import torch
 
-from autoware_ml.deployment.onnx_export import (
+from autoware_ml.deployment.onnx.export import (
     build_dynamic_axes,
     build_dynamic_shapes,
     export_to_onnx,
     normalize_dynamic_shapes_for_model,
-    onnx_has_qdq,
-    should_modify_graph,
 )
+from autoware_ml.deployment.onnx.modify import should_modify_graph
+from autoware_ml.deployment.onnx.precision import onnx_has_qdq
 
 
 def test_build_dynamic_axes_from_axes_spec() -> None:
@@ -160,7 +160,7 @@ def test_cast_graph_to_fp16_converts_internals_and_keeps_io(tmp_path) -> None:
     import onnx
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     n = helper.make_tensor_value_info("n", TensorProto.INT32, [2])
@@ -215,7 +215,7 @@ def test_cast_graph_to_fp16_rewires_internal_consumers_of_kept_fp32_outputs(tmp_
     import onnx
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     feat = helper.make_tensor_value_info("feat", TensorProto.FLOAT, [2, 4])
@@ -265,7 +265,7 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     import onnx
     from onnx import TensorProto, helper, numpy_helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     # 0.0001 is not representable in fp16 (rounds to ~0.00010002); a round trip shows.
     scale_value = np.float32(1e-4)
@@ -372,7 +372,7 @@ def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) ->
     import onnx
     from onnx import TensorProto, helper, numpy_helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     scale_value = np.float32(1e-4)  # not representable in fp16; a round trip shows
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
@@ -450,7 +450,7 @@ def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_
     import onnx
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])
@@ -508,7 +508,7 @@ def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
     import pytest
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx_export import cast_graph_to_fp16
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     cond = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
@@ -540,7 +540,7 @@ def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -
     import onnx
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx.precision import keep_topk_in_fp16
+    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 8])
     values = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
