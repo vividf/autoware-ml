@@ -355,6 +355,7 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
         outputs = self(**forward_inputs)
         return self.predict_outputs(batch_inputs_dict, outputs)
 
+    # TODO(vividf): legacy export contract — new models must implement MultiTaskBaseModel.build_stages() (stage-graph export) instead; remove this path once the last BaseModel migrates.
     def build_export_spec(self, batch_inputs_dict: Mapping[str, Any]) -> ExportSpec:
         """Build the default deployment export specification for the model.
 
