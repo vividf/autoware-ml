@@ -32,6 +32,13 @@ from autoware_ml.utils.session import AUTOWARE_ML_SESSION_OPTION, TMUX_BASE_COMM
 
 register_config_resolvers()
 
+#: Config family prefixes ("tasks/..." vs "experiments/...") shared by the CLI's
+#: dispatch table, the completion callbacks, and the runtime resolvers. Defined here
+#: (not in cli/runtime.py) so importing them never drags in the heavy runtime module —
+#: CLI startup must not import mlflow/hydra transitively.
+TASK_CONFIG_PREFIX = "tasks"
+EXPERIMENT_CONFIG_PREFIX = "experiments"
+
 _NUMERIC_VALUE_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
@@ -286,9 +293,9 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         root = command_args[0]
         last = command_args[-1]
 
-        if root in {"train", "test", "deploy"} and last == "--config-name":
+        if root in {"train", "test", "deploy", "quantize"} and last == "--config-name":
             return complete_config_value(incomplete, "tasks")
-        if root in {"train", "test", "deploy"} and last == "--weights":
+        if root in {"train", "test", "deploy", "quantize"} and last == "--weights":
             return complete_path_value(incomplete, file_suffixes=(".ckpt",))
         if root == "train" and last == "--resume-checkpoint":
             return complete_path_value(incomplete, file_suffixes=(".ckpt",))
@@ -314,6 +321,7 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         "train",
         "test",
         "deploy",
+        "quantize",
         "create-dataset",
         "mlflow",
     ]
@@ -354,6 +362,7 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         "train": ["--config-name", "--weights", "--resume-checkpoint"],
         "test": ["--config-name", "--weights"],
         "deploy": ["--config-name", "--weights"],
+        "quantize": ["--config-name", "--weights"],
         "create-dataset": ["--dataset", "--task", "--root-path", "--out-dir"],
         "mlflow": ["ui", "export"],
     }
