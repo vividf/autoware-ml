@@ -1,0 +1,19 @@
+_target_: autoware_ml.datamodule.multi_task.t4dataset.multi_task_t4dataset.MultiTaskT4Dataset
+_convert_: all
+
+defaults:
+  - segmentation3d@dataset_tasks.segmentation3d: default_segmentation3d
+  - ../../transforms@transforms: default_segmentation3d_train_transforms
+
+database_root_path: ${database.root_path}
+
+# Always None since we run splitter in the process
+dataset_records_dataframe: null
+
+# Segmentation carries no 3D boxes; the multi-task dataset allows 0 here.
+max_num_3d_gt_bboxes: 0
+
+split_type:
+  _target_: autoware_ml.types.dataset.SplitType
+  _convert_: all
+  _args_: [train]

@@ -195,6 +195,7 @@ class PTv3SegmentationModel(PTv3BaseModel):
         """Return ordered PTv3 segmentation export output names."""
         return ["pred_labels", "pred_probs"]
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_spec(self, batch: Mapping[str, torch.Tensor]) -> ExportSpec:
         """Build the ONNX export specification.
 

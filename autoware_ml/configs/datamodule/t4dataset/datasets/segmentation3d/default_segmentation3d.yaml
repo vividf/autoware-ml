@@ -5,3 +5,7 @@ database_root_path: ${database.root_path}
 
 # Always set to None since we run splitter in the process
 dataset_records_dataframe: null
+
+# Raw category name -> training label; see labels/segmentation3d.
+class_mapping: ${segmentation3d.class_mapping}
+ignore_label_index: ${segmentation3d.ignore_index}

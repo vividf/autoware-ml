@@ -1,0 +1,43 @@
+_target_: autoware_ml.transforms.multi_task.base.MultiTaskTransformsCompose
+_convert_: all
+
+# Point-wise labels annotate the keyframe only, so this pipeline never accumulates
+# sweeps: an extra sweep would add points no label covers.
+pipeline:
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.loading.LoadPointsFromFile
+    _convert_: all
+
+    load_dim: ${database.lidar_pointcloud_num_features}
+    use_dim: [0, 1, 2, 3] # Refer PointFieldIndex: [x, y, z, intensity]
+    bev_remove_radius: 0.0
+
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalRotScaleTrans
+    _convert_: all
+
+    # Segmentation has no heading target, so the full circle is available.
+    yaw_rot_range: [-3.14159, 3.14159]
+    scale_ratio_range: [0.9, 1.1]
+    translation_std: [0.5, 0.5, 0.2]
+
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalBEVRandomFlip
+    _convert_: all
+
+    horizontal_flip_ratio: 0.5
+    vertical_flip_ratio: 0.5
+
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRangeFilter
+    _convert_: all
+
+    points_range: ${point_cloud_range}
+
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRandomShuffle
+    _convert_: all
+
+  # Last: it quantizes the cloud to one point per cell and records the pre-quantization
+  # points and labels, which the metrics score against.
+  - _target_: autoware_ml.transforms.multi_task.point_cloud.grid_sampling.GridSample
+    _convert_: all
+
+    grid_size: ${grid_size}
+    point_cloud_range: ${point_cloud_range}
+    mode: train
