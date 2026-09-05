@@ -38,7 +38,6 @@ from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.types.dataset import SplitType
-from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
 
 
@@ -73,6 +72,15 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
     built-in support for flexible optimizer and scheduler configuration.
     All parameters are explicitly typed for IDE support and type checking.
     """
+
+    #: Why this model's raw graph outputs cannot be compared across backends, or
+    #: ``None`` when they can. Cross-backend verification (deploy.verification) compares
+    #: the final raw tensors element-wise; a model for which that comparison is invalid
+    #: *by construction* — a PyTorch reference that is stochastic at inference, decoded
+    #: outputs whose proposal ties reorder — declares the reason here, and the gate
+    #: skips loudly instead of the reason living in a config comment. Per-backend
+    #: ground-truth metrics (deploy.evaluation) are the gate that remains meaningful.
+    verification_caveat: str | None = None
 
     def __init__(
         self,
@@ -347,36 +355,101 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
             else None,
         )
 
-    def build_export_spec(self, multi_task_batch_inputs: MultiTaskBatchInputs) -> ExportSpec:
-        """Build the single-module deployment export specification.
+    def preprocess_batch(
+        self, batch: MultiTaskGTBatch, device: torch.device
+    ) -> MultiTaskBatchInputs:
+        """Move a collated batch to ``device`` and apply runtime preprocessing.
 
-        :meth:`forward` consumes a :class:`MultiTaskBatchInputs` and returns a
-        :class:`MultiTaskOutputs`, neither of which the ONNX exporter can trace, so
-        there is no generic signature-based default. Models that support deployment
-        must override this hook and flatten the batch into the tensor arguments of
-        the exported graph.
-
-        Args:
-            multi_task_batch_inputs: Example preprocessed batch used for export.
-
-        Returns:
-            Export specification for deployment.
-        """
-        raise NotImplementedError("Model must implement build_export_spec()")
-
-    def build_export_specs(
-        self, multi_task_batch_inputs: MultiTaskBatchInputs
-    ) -> dict[str, ExportSpec]:
-        """Build per-module deployment export specifications.
-
-        The default implementation wraps :meth:`build_export_spec` as a single
-        ``end_to_end`` module. Models with separate exportable sub-graphs
-        override this to return one spec per architectural component.
+        The single spelling of "device transfer + :meth:`on_after_batch_transfer`" used
+        outside the Lightning loop: deployment export/verification/evaluation and
+        quantization calibration all preprocess through here, so every consumer feeds
+        the model exactly the tensors the trainer would.
 
         Args:
-            multi_task_batch_inputs: Example preprocessed batch used for export.
+            batch: Collated batch from a dataloader.
+            device: Device the preprocessing (e.g. voxelization) runs on.
 
         Returns:
-            Ordered mapping of module name to export specification.
+            Preprocessed model inputs.
         """
-        return {"end_to_end": self.build_export_spec(multi_task_batch_inputs)}
+        return self.on_after_batch_transfer(batch.to_device(device), 0)
+
+    def build_stages(self) -> Sequence[Any]:
+        """Declare the model's inference stage graph for deployment.
+
+        The stage graph is the *one* declaration deployment derives everything from:
+        ONNX export units, artifact names, backend inference, verification, and
+        evaluation (see :mod:`autoware_ml.deployment.stages`). Exportable stages
+        (:class:`~autoware_ml.deployment.stages.GraphStage`) become one ONNX/TensorRT
+        artifact each; the rest (:class:`~autoware_ml.deployment.stages.TorchStage`)
+        always run in PyTorch on every backend. :meth:`forward` stays hand-written; a
+        parity test pins it to the PyTorch run of these stages.
+
+        Models that support deployment override this.
+
+        Returns:
+            Ordered stages, ending with the ``GraphStage`` whose outputs feed
+            :meth:`assemble_outputs`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deployment: build_stages() is not implemented."
+        )
+
+    def assemble_outputs(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskOutputs:
+        """Wrap the final stage's named output tensors into the model's typed outputs.
+
+        For a deployed graph that emits the head's raw output maps: the backend returns
+        the final ``GraphStage``'s tensors keyed by dataclass *field* name (the stage
+        declares the ONNX-name -> field mapping), and this hook rebuilds the
+        :class:`MultiTaskOutputs` the model's own decode consumes. A graph that performs
+        the decoding itself never produces head outputs — such a model overrides
+        :meth:`assemble_predictions` instead and leaves this hook alone.
+
+        Args:
+            outputs: Field name -> tensor, as declared by the final stage.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deployment: assemble_outputs() is not implemented."
+        )
+
+    def assemble_predictions(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskPredictions:
+        """Turn a deployed graph's raw output tensors into task-level predictions.
+
+        The one hook deployment needs, because predictions are what evaluation consumes.
+        The default covers graphs that emit the head's raw maps by composing the model's
+        own two steps, so those models implement nothing extra. A graph whose runtime ABI
+        decodes in-graph overrides this and skips :meth:`assemble_outputs` entirely —
+        there is no intermediate head output to fabricate.
+
+        Args:
+            outputs: Field name -> tensor, as declared by the final stage.
+
+        Returns:
+            Task-level predictions, as :meth:`decode_outputs` would produce.
+        """
+        return self.decode_outputs(self.assemble_outputs(outputs))
+
+    def build_eval_output_from_predictions(
+        self, batch: MultiTaskBatchInputs, predictions: MultiTaskPredictions
+    ) -> dict[str, Any]:
+        """Pair decoded predictions with ground truth for the metric suites.
+
+        Both evaluation paths converge here: training and validation reach it through
+        :meth:`build_eval_output` after decoding the model's outputs, and deployment
+        reaches it directly with the predictions a backend produced. Keeping the pairing
+        in one place is what lets the two paths be scored identically.
+
+        Args:
+            batch: The preprocessed batch holding the ground truth.
+            predictions: Decoded predictions from either path.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not report metrics: "
+            "build_eval_output_from_predictions() is not implemented."
+        )
+
+    def build_eval_output(  # type: ignore[override]
+        self, batch: MultiTaskBatchInputs, outputs: MultiTaskOutputs
+    ) -> dict[str, Any]:
+        """Decode model outputs and pair them with ground truth (training / validation)."""
+        return self.build_eval_output_from_predictions(batch, self.decode_outputs(outputs))

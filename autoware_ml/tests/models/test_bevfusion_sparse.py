@@ -60,7 +60,18 @@ def test_sparse_encoder_prepare_for_export_replaces_sparse_convolutions() -> Non
         for module in export_encoder.modules()
     )
     assert any(isinstance(module, ExportableSparseConv3d) for module in export_encoder.modules())
-    assert torch.equal(export_encoder.conv_input[0].weight, encoder.conv_input[0].weight)
+
+    # BN is folded into the convolutions, so the deployed graph is BatchNorm-free while
+    # the training encoder keeps its BN layers.
+    assert not any(isinstance(module, torch.nn.BatchNorm1d) for module in export_encoder.modules())
+    assert any(isinstance(module, torch.nn.BatchNorm1d) for module in encoder.modules())
+
+    batch_norm = encoder.conv_input[1]
+    fold_scale = batch_norm.weight / torch.sqrt(batch_norm.running_var + batch_norm.eps)
+    # spconv kernels are (out_channels, *kernel, in_channels), so the per-output-channel
+    # fold scale applies along dim 0.
+    expected_weight = encoder.conv_input[0].weight * fold_scale.view(-1, 1, 1, 1, 1)
+    assert torch.equal(export_encoder.conv_input[0].weight, expected_weight)
 
     export_encoder.conv_input[0].weight.data.add_(1.0)
     assert not torch.equal(export_encoder.conv_input[0].weight, encoder.conv_input[0].weight)
