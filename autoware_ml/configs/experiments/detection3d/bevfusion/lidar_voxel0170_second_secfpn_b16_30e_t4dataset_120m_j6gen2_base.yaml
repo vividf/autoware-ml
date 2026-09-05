@@ -1,0 +1,213 @@
+# @package _global_
+defaults:
+  - base
+  - /database@database: t4dataset/t4dataset_j6gen2_base
+  - /datamodule@datamodule: t4dataset/default_detection3d_datamodule
+  - /metrics/t4dataset@metric_ranges: default_120m_metric_ranges
+  - _self_
+
+batch_size: 16
+num_workers: 16
+max_num_3d_gt_bboxes: 500
+
+experiment_group_name: bevfusion/${database.version}/j6gen2_base
+experiment_name: lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m
+point_cloud_range: [-122.4, -122.4, -3.0, 122.4, 122.4, 5.0]
+voxel_size: [0.17, 0.17, 0.2]
+out_size_factor: 8
+max_time_lag: 0.2
+
+eval_class_range:
+  car: 121.0
+  truck: 121.0
+  bus: 121.0
+  bicycle: 121.0
+  pedestrian: 121.0
+  traffic_cone: 121.0
+  barrier: 121.0
+
+trainer:
+  max_epochs: 30
+  check_val_every_n_epoch: 5
+
+deploy:
+  stages:
+    bevfusion_sparse:
+      tensorrt:
+        input_shapes:
+          # Voxel count varies per frame; the max matches the evaluation pillar budget
+          # (eval_max_voxels), which is the largest the runtime can hand the engine.
+          voxels:
+            min_shape: [1000, 32, 5]
+            opt_shape: [80000, 32, 5]
+            max_shape: [160000, 32, 5]
+          coors:
+            min_shape: [1000, 3]
+            opt_shape: [80000, 3]
+            max_shape: [160000, 3]
+          num_points_per_voxel:
+            min_shape: [1000]
+            opt_shape: [80000]
+            max_shape: [160000]
+    bevfusion_dense:
+      tensorrt:
+        input_shapes:
+          # Static BEV canvas: (batch, output_channels * dense_z, *dense_output_shapes[:2]).
+          lidar_bev:
+            min_shape: [1, 256, 180, 180]
+            opt_shape: [1, 256, 180, 180]
+            max_shape: [1, 256, 180, 180]
+
+model:
+  pts_middle_encoder:
+    sparse_shape: [1440, 1440, 41]
+    dense_output_shapes: [180, 180, 2]
+  bbox_head:
+    num_proposals: 500
+    num_classes: 7
+    # Export emits fusion-ready attention (no max-subtraction before softmax) so
+    # TensorRT's Myelin fuses the decoder attention into one MHA kernel — the max-sub
+    # pattern blocks the fusion (measured 0.68 vs 0.25 ms). Same graph shape as the AWML
+    # 2.8 deployment (plain matmul-softmax-matmul); training is untouched (export copy).
+    fuse_export_attention: true
+    dense_heatmap_pooling_classes: [car, truck, bus, barrier]
+    # Reference-trained head geometry (mmdet3d SeparateHead head_conv=64, PyTorch
+    # default BN eps/momentum) — required to load the parity-verified checkpoint.
+    head_hidden_channels: 64
+    norm_eps: 1.0e-5
+    norm_momentum: 0.1
+    # Reference form: single biased Conv2d, signed output (no BN+ReLU clipping).
+    # TODO(vividf): remove once BEVFusion is retrained natively (AWML reference
+    # checkpoint no longer needed).
+    shared_conv_norm_act: false
+    nms_type: circle
+    # mmdet3d's circle_nms 0.25 is a SQUARED distance -> 0.5 m Euclidean radius here.
+    nms_min_radius: 0.5
+    nms_groups:
+      - class_names: [car, truck, bus]
+        nms_radius: 0.5
+        post_max_size: 300
+      - class_names: [bicycle]
+        nms_radius: 0.0
+        post_max_size: 50
+      - class_names: [pedestrian]
+        nms_radius: 0.0
+        post_max_size: 100
+      - class_names: [traffic_cone]
+        nms_radius: 0.0
+        post_max_size: 100
+      - class_names: [barrier]
+        nms_radius: 0.0
+        post_max_size: 50
+    bbox_coder:
+      post_center_range: [-200.0, -200.0, -10.0, 200.0, 200.0, 10.0]
+      score_threshold: [0.015, 0.010, 0.010, 0.020, 0.030, 0.040, 0.020]
+
+datamodule:
+  # Overwrite dataloader
+  train_dataloader:
+    shuffle: true
+  predict_dataloader:
+    shuffle: false
+    batch_size: 1
+
+  # Overwrite transforms
+  train_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+    transforms:
+      _target_: autoware_ml.transforms.multi_task.base.MultiTaskTransformsCompose
+      _convert_: all
+
+      pipeline:
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.loading.LoadPointsFromFile
+          _convert_: all
+
+          load_dim: ${database.lidar_pointcloud_num_features}
+          use_dim: [0, 1, 2, 3] # Refer PointFieldIndex for the name of each dimensionality, [x, y, z, intensity]
+          bev_remove_radius: 0.0
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.loading.LoadMultiSweepPointsFromFile
+          _convert_: all
+
+          sweeps_num: 2
+          bev_remove_radius: 1.0
+          test_mode: false
+          use_timestamp_difference: true
+          load_dim: ${database.lidar_pointcloud_num_features}
+          use_dim: [0, 1, 2, 3] # Refer PointFieldIndex for the name of each dimensionality, [x, y, z, intensity]
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalRotScaleTrans
+          _convert_: all
+
+          # In radians, the range of rotation angles for random rotation around the Z-axis.
+          # The range is specified as [min_angle, max_angle].
+          yaw_rot_range: [-0.78539816, 0.78539816]
+          # The range of scale factors for random scaling.
+          scale_ratio_range: [0.95, 1.05]
+          # The standard deviation for Gaussian translation noise.
+          translation_std: [0.5, 0.5, 0.2]
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.GlobalBEVRandomFlip
+          _convert_: all
+
+          horizontal_flip_ratio: 0.5
+          vertical_flip_ratio: 0.5
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRangeFilter
+          _convert_: all
+
+          points_range: ${point_cloud_range}
+
+        - _target_: autoware_ml.transforms.multi_task.point_cloud.geometry.PointsRandomShuffle
+          _convert_: all
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesLabelNameFilter
+          _convert_: all
+
+          label_names_to_keep: ${database.database_task_configs.detection3d.label_names}
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesBEVDistanceFilter
+          _convert_: all
+
+          bev_range:
+            - ${point_cloud_range.0}
+            - ${point_cloud_range.1}
+            - ${point_cloud_range.3}
+            - ${point_cloud_range.4}
+
+        # Order matters, it first filters bboxes within the default meters with less than 2 points.
+        # Then it filters bboxes within 60 meters with less than 3 points
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesMinPointsFilter
+          _convert_: all
+
+          min_points: 2
+          bev_range:
+            - ${point_cloud_range.0}
+            - ${point_cloud_range.1}
+            - ${point_cloud_range.3}
+            - ${point_cloud_range.4}
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.geometry.BBoxesMinPointsFilter
+          _convert_: all
+
+          min_points: 3
+          bev_range: [-60.0, -60.0, 60.0, 60.0]
+
+        - _target_: autoware_ml.transforms.multi_task.bboxes_3d.loading.BBoxesAttributeFilter
+          _convert_: all
+
+          attributes_to_filter:
+            bicycle:
+              - vehicle_state.parked
+              - cycle_state.without_rider
+              - motorcycle_state.without_rider
+
+  test_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+  validation_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
+
+  predict_dataset:
+    max_num_3d_gt_bboxes: ${max_num_3d_gt_bboxes}
