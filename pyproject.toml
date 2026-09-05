@@ -26,12 +26,27 @@ dependencies = [
     "numpy==1.26.4",
     "nuscenes-devkit==1.2.0",
     "nvidia-ml-py==13.610.43",
+    # Quantization (PTQ/QAT) backend. Required: the quantization plan is part of every
+    # model's build path (build_quantization_plan), so all environments carry modelopt.
+    # huggingface_hub/safetensors are transitive imports of modelopt 0.46.0 that its
+    # wheel does not declare.
+    "nvidia-modelopt==0.46.0",
+    "huggingface_hub>=0.30,<2.0",
+    "safetensors>=0.4,<1.0",
     "optuna==4.8.0",
     "onnx==1.21.0",
-    "onnx_graphsurgeon==0.5.8",
-    "onnxconverter-common==1.16.0",
+    "onnx_graphsurgeon==0.6.1",
     "onnxruntime-gpu==1.24.4",
     "onnxscript==0.6.2",
+    # ModelOpt AutoCast (modelopt.onnx) hard-imports these at package import; they are
+    # the [onnx] extra of nvidia-modelopt, pinned here explicitly (pixi never installs
+    # extras of already-pinned packages).
+    "onnxslim==0.1.96",
+    "onnxconverter-common==1.16.0",
+    "polygraphy==0.53.4",
+    "ml_dtypes==0.5.4",
+    "lief==1.0.0",
+    "cppimport==26.4.17",
     "opencv-python-headless==4.11.0.86",
     "optuna-dashboard==0.20.0",
     "polars>=1.38.1,<2.0.0",
@@ -42,7 +57,20 @@ dependencies = [
     "scipy==1.17.1",
     "spconv-cu120==2.3.6",
     "t4-devkit @ git+https://github.com/tier4/t4-devkit.git@v0.6.0",
-    "tensorrt-cu12==10.16.0.72",
+    # TensorRT: pinned to 10.8 for now. The deployment target (Jetson AGX Thor,
+    # JetPack 7.2.1) ships TensorRT 10.16.2, but 10.16.x cannot build this
+    # project's INT8 Q/DQ graphs on sm_120 workstations (Myelin
+    # tactics_tiled_layout assertion; see NVIDIA/TensorRT #4715), so local
+    # verification/evaluation would be impossible. 10.8 also matches the AWML
+    # reference numbers. TODO: move to the Thor JetPack line (10.16.x) once the
+    # INT8 ONNX has been smoke-built with trtexec on Thor hardware (sm_110).
+    # The 10.8 meta-wheel does not declare its bindings/libs as dependencies
+    # (older TRT wheels fetched them from setup.py, which pixi/uv never run),
+    # so pin all three explicitly — otherwise `import tensorrt` fails with
+    # "No module named tensorrt_bindings".
+    "tensorrt-cu12==10.8.0.43",
+    "tensorrt-cu12-bindings==10.8.0.43",
+    "tensorrt-cu12-libs==10.8.0.43",
     "torch==2.9.1+cu128",
     "torchvision==0.24.1+cu128",
     "transforms3d==0.4.2"
@@ -115,6 +143,10 @@ test = "pytest autoware_ml/tests/ -v"
 [tool.pixi.feature.dev.dependencies]
 bear = "*"
 compilers = "*"
+# nvcc 12.8 rejects host gcc > 14; an unpinned solve pulls gcc 15 and the CUDA
+# extension build fails. Keep in sync with the CUDA toolkit version.
+gcc = "14.*"
+gxx = "14.*"
 ninja = "*"
 pkg-config = "*"
 tmux = "*"
@@ -148,3 +180,8 @@ docs = { features = ["docs"], solve-group = "docs", no-default-feature = true }
 [tool.ruff.lint]
 # Ignore F722 error to fix the error for JaxTyping in string typing, which is not used in our codebase.
 ignore = ["F722"]
+
+[tool.pytest.ini_options]
+# autoware_ml/scripts holds stage entrypoint scripts, not tests; experiment_test.py
+# would otherwise match the *_test.py collection pattern and fail collection.
+addopts = "--ignore=autoware_ml/scripts"
