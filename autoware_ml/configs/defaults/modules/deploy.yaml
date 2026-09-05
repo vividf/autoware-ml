@@ -1,12 +1,48 @@
 # @package _global_
 
+# Deployment (see autoware_ml/deployment/config.py for the typed schema).
+# Per-stage settings live under deploy.stages.<stage_name>, keyed by the names the
+# model declares in build_stages(); artifact names are derived from the same names
+# (<stage_name>.onnx / .engine), so nothing is spelled twice.
 deploy:
   onnx:
     enabled: true
     dynamo: true
     opset_version: 21
-    modify_graph: null
+    do_constant_folding: true
+    # Precision of the exported graphs. TensorRT builds strongly typed (weak typing
+    # was removed in TensorRT 11), so precision lives in the ONNX:
+    #   fp32 — export as traced.
+    #   fp16 — run ModelOpt AutoCast on every exported stage WITHOUT Q/DQ nodes
+    #          (quantized stages keep the precision their checkpoint bakes in).
     precision: fp32
+    modify_graph: null
   tensorrt:
     enabled: true
     workspace_size: 4294967296
+    plugin_libraries: []
+  # deploy.stages.<stage_name>.onnx.{dynamic_axes|dynamic_shapes}
+  # deploy.stages.<stage_name>.tensorrt.input_shapes.<input>.{min_shape,opt_shape,max_shape}
+  stages: {}
+  # Cross-backend numerical parity on the final raw graph outputs (opt-in per experiment).
+  verification:
+    enabled: false
+    # Default absolute tolerance for FP32-graph comparisons. Lossy backends
+    # (fp16 engines, int8) must set an explicit per-scenario `tolerance` instead
+    # of loosening this default.
+    tolerance: 0.01
+    num_verify_batches: 1
+    scenarios: []
+  # Per-backend ground-truth metrics + latency on the test split (opt-in per experiment).
+  # PyTorch is a backend like the others; keys land under {split}/{backend}/{metric}.
+  evaluation:
+    enabled: false
+    # Split the backends are scored on: test (default) or val — for when the test
+    # split is unavailable or held back. Metric keys carry the split (val/{backend}/...).
+    split: test
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }

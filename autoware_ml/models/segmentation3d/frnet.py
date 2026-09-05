@@ -266,6 +266,7 @@ class FRNet(BaseModel):
         """Return the number of samples represented by the FRNet batch."""
         return int(batch_inputs_dict["sample_count"])
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_spec(self, batch_inputs_dict: Mapping[str, torch.Tensor]) -> ExportSpec:
         """Build the FRNet deployment export specification.
 
