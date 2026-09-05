@@ -40,6 +40,7 @@ from autoware_ml.datamodule.multi_task.multi_task_data_module import MultiTaskDa
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.utils.mlflow_helpers import resolve_lineage_context
 from autoware_ml.utils.runtime import (
+    EXPERIMENT_CONFIG_NAME_PREFIX,
     configure_torch_runtime,
     get_config_path,
     instantiate_callbacks,
@@ -51,7 +52,6 @@ from autoware_ml.utils.runtime import (
 
 logger = logging.getLogger(__name__)
 _CONFIG_PATH = get_config_path()
-CONFIG_NAME_PREFIX = "experiments/"
 
 
 def test(
@@ -100,7 +100,7 @@ def main(cfg: DictConfig):
         raise ValueError("Hydra config name is not available.")
 
     logger_enabled = cfg.get("logger") is not None
-    config_name = config_name.removeprefix(CONFIG_NAME_PREFIX)
+    config_name = config_name.removeprefix(EXPERIMENT_CONFIG_NAME_PREFIX)
     experiment_name = f"{cfg.experiment_group_name}/{cfg.experiment_name}"
 
     # Configure weights and checkpoint paths

@@ -67,41 +67,50 @@ autoware-ml train --config-name <task>/<model>/<config> \
 
 ## deploy
 
-Export a trained model to ONNX and TensorRT.
+Export a trained model to ONNX / TensorRT, verify the exported graphs against
+PyTorch, and evaluate every backend against ground truth. Operates on
+`experiments/` configs; see [Deployment](deployment.md).
 
 ```bash
-autoware-ml deploy --config-name <config_path> --weights <path> [--weights <path> ...] [options...]
+autoware-ml deploy --config-name experiments/<task>/<model>/<config> --weights <path> [--weights <path> ...] [options...]
 ```
 
 **Arguments:**
 
-- `--config-name`: Path to config (same as used for training)
+- `--config-name`: Experiment config (same as used for training)
 - `--weights`: One or more `.ckpt` paths whose parameters are merged into the
-  export model. Pass once per checkpoint. Later checkpoints overwrite earlier
-  ones on overlapping keys. Every parameter in the export model must be
-  covered by at least one `--weights`; missing keys raise a runtime error
-  listing what is uncovered.
+  deployed model. Pass once per checkpoint. Later checkpoints overwrite earlier
+  ones on overlapping keys; every parameter must be covered. A quantized
+  checkpoint (from `quantize`) is detected from its embedded description.
 
-**Options:**
+**Options:** any Hydra override, e.g. `deploy.tensorrt.enabled=false`,
+`deploy.evaluation.num_samples=1000`.
 
-- `output_name=<name>`: Base name for output files
-- `output_dir=<path>`: Output directory
-
-**Single-task example:**
+**Example:**
 
 ```bash
 autoware-ml deploy \
-    --config-name <task>/<model>/<config> \
-    --weights mlruns/<task>/<model>/<config>/<run_id>/artifacts/checkpoints/best.ckpt
+    --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base \
+    --weights mlruns/<...>/artifacts/checkpoints/best.ckpt
 ```
 
-**Multi-head example:**
+## quantize
+
+Produce a self-describing quantized checkpoint (PTQ or QAT) from an FP checkpoint.
+The config's `quantization` section selects the mode; see
+[Quantization](../framework/quantization.md).
 
 ```bash
-autoware-ml deploy \
-    --config-name detection3d/ptv3/voxel012_122m_t4dataset_j6gen2 \
-    --weights mlruns/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt \
-    --weights mlruns/detection3d/ptv3/voxel012_122m_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt
+autoware-ml quantize --config-name experiments/<task>/<model>/<config>_int8 --weights <FP .ckpt> [options...]
+```
+
+The produced checkpoint (`ptq.ckpt`, or `best.ckpt`/`last.ckpt` for QAT) lands in
+the quantize run's MLflow `artifacts/checkpoints/` and deploys / tests like any
+other checkpoint:
+
+```bash
+autoware-ml deploy --config-name experiments/<...>_int8 --weights <quantize run>/artifacts/checkpoints/ptq.ckpt
+autoware-ml test   --config-name experiments/<...>_int8 --weights <quantize run>/artifacts/checkpoints/ptq.ckpt
 ```
 
 ## test
