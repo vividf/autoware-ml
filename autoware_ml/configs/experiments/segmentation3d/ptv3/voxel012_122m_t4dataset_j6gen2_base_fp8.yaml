@@ -1,0 +1,39 @@
+# @package _global_
+# FP8 (E4M3 Q/DQ explicit quantization) variant of the j6gen2 PTv3 segmentation
+# experiment. Positioning is accuracy, not latency: INT8 PTQ costs this model ~6 mIoU
+# (0.7793 -> 0.7155) for no latency win over FP16, so FP8 asks whether the E4M3
+# dynamic range holds the accuracy INT8 loses. Same recipe shape as the INT8 config;
+# only the precision differs. FP8 quantizers are per-tensor with max-calibrated amax
+# (modelopt's E4M3 ONNX export requires scalar amax), and the graph carries
+# TRT_FP8QuantizeLinear/TRT_FP8DequantizeLinear custom ops instead of standard Q/DQ.
+#
+#   autoware-ml quantize \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_fp8 \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_fp8 \
+#     --weights <ptq.ckpt produced by the quantize run>
+defaults:
+  - voxel012_122m_t4dataset_j6gen2_base
+  - _self_
+
+experiment_name: voxel012_122m_t4dataset_fp8
+
+deploy:
+  tensorrt:
+    enabled: true
+  evaluation:
+    enabled: true
+
+quantization:
+  enabled: true
+  mode: ptq
+  fuse_bn: true
+  default_precision: fp8
+  # Same calibration set as the INT8 reference recipe; amax comes from the max
+  # calibrator (E4M3 convention), not histogram+MSE.
+  ptq:
+    calibrate_samples: 400
+    batch_size: 1
+    calib_seed: 0
+    calib_shuffle: false
