@@ -2,6 +2,8 @@
 data/
 mlruns/
 outputs/
+work_dirs/
+*.code-workspace
 
 # Model files and artifacts
 *.bin
