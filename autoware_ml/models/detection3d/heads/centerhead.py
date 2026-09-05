@@ -77,6 +77,7 @@ class CenterHead(nn.Module):
         loss_bbox_weight: float = 0.25,
         heatmap_init_bias: float = -2.19,
         use_velocity: bool = True,
+        head_conv_kernel: int = 3,
     ) -> None:
         """Initialize the CenterPoint head.
 
@@ -96,6 +97,9 @@ class CenterHead(nn.Module):
             loss_bbox_weight: Weight applied to the box regression loss.
             heatmap_init_bias: Initial bias used by the heatmap prediction branch.
             use_velocity: Whether to predict velocity components.
+            head_conv_kernel: Kernel size of each prediction branch's hidden
+                convolution (3 for the native models; 1 matches the mmdet3d/AWML
+                CenterPoint checkpoints).
         """
         super().__init__()
         self.class_names = class_names
@@ -111,6 +115,7 @@ class CenterHead(nn.Module):
         self.loss_bbox_weight = loss_bbox_weight
         self.heatmap_init_bias = heatmap_init_bias
         self.use_velocity = use_velocity
+        self.head_conv_kernel = head_conv_kernel
         self.box_code_size = 10 if use_velocity else 8
 
         self.shared_conv = ConvModule(in_channels, shared_channels)
@@ -131,7 +136,7 @@ class CenterHead(nn.Module):
     ) -> nn.Sequential:
         """Build one CenterPoint prediction branch."""
         head = nn.Sequential(
-            ConvModule(in_channels, in_channels),
+            ConvModule(in_channels, in_channels, kernel_size=self.head_conv_kernel),
             nn.Conv2d(in_channels, out_channels, kernel_size=1),
         )
         if init_bias is not None:

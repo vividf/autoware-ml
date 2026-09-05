@@ -155,6 +155,7 @@ class CenterPointDetectionModel(BaseModel):
         """Log the sample count instead of voxel count for lidar detection."""
         return len(batch_inputs_dict["gt_boxes"])
 
+    # TODO(vividf): legacy CenterPoint (ExportSpec path) — superseded by main_modules/centerpoint (build_stages); migrate remaining users and delete.
     def build_export_spec(self, batch_inputs_dict: Mapping[str, Any]) -> ExportSpec:
         """Reject single-module CenterPoint deployment export."""
         del batch_inputs_dict

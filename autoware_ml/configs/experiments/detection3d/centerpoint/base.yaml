@@ -19,6 +19,8 @@ data_preprocessor:
       point_cloud_range: ${point_cloud_range}
       max_num_points: ${max_num_points}
       max_voxels: ${max_voxels}
+      # CenterPoint keeps the training budget at evaluation (AWML-aligned behavior).
+      eval_max_voxels: ${max_voxels}
       voxelization_z_order_first: false
 
 trainer:
@@ -32,16 +34,25 @@ deploy:
     dynamo: false
     opset_version: 17
     do_constant_folding: false
-    modules:
-      pts_voxel_encoder_centerpoint:
-        input_names: [input_features]
-        output_names: [pillar_features]
+    # Deployed CenterPoint runs FP16 outside the quantized (Q/DQ) regions; AutoCast
+    # bakes that into the exported graphs (engines build strongly typed).
+    precision: fp16
+  # Stage names come from CenterPointDetectionModel.build_stages(); the exported
+  # artifacts are <stage_name>.onnx / .engine.
+  stages:
+    pts_voxel_encoder:
+      onnx:
         dynamic_axes:
           input_features: { 0: num_voxels, 1: num_max_points }
           pillar_features: { 0: num_voxels }
-      pts_backbone_neck_head_centerpoint:
-        input_names: [spatial_features]
-        output_names: [heatmap, reg, height, dim, rot, vel]
+      tensorrt:
+        input_shapes:
+          input_features:
+            min_shape: [1000, 32, 11]
+            opt_shape: [20000, 32, 11]
+            max_shape: [96000, 32, 11]
+    pts_backbone_neck_head:
+      onnx:
         dynamic_axes:
           spatial_features: { 0: batch_size, 2: H, 3: W }
           heatmap: { 0: batch_size, 2: H, 3: W }
@@ -50,8 +61,32 @@ deploy:
           dim: { 0: batch_size, 2: H, 3: W }
           rot: { 0: batch_size, 2: H, 3: W }
           vel: { 0: batch_size, 2: H, 3: W }
+      # spatial_features' TensorRT profile depends on the middle encoder's output_shape
+      # and is therefore configured per experiment variant.
+  # TensorRT build, verification, and evaluation are heavyweight and stay opt-in here;
+  # the release/ab experiment variants enable them explicitly.
   tensorrt:
     enabled: false
+  verification:
+    enabled: false
+    num_verify_batches: 1
+    # Raw-logit diffs under the mixed-FP16 export (deploy.onnx.precision: fp16) are
+    # large by design while mAP stays equal (measured 2026-09-01 on the FP checkpoint:
+    # pytorch-vs-tensorrt max_diff 8.0, pytorch-vs-onnx 9.3, mAP identical 0.5041) —
+    # gates are empirically calibrated, not strict. The pytorch reference runs the
+    # un-folded model; export folds BN (inference identity), which adds ~1e-5 to the
+    # diffs at most.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 12.0 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
 
 model:
   _target_: autoware_ml.models.detection3d.main_modules.centerpoint.CenterPointDetectionModel
