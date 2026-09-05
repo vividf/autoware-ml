@@ -371,6 +371,8 @@ class TransFusionHead(nn.Module):
         head_hidden_channels: int | None = None,
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
+        shared_conv_norm_act: bool = True,
+        fuse_export_attention: bool = False,
         use_bf16_cross_attention: bool = False,
     ) -> None:
         """Initialize the TransFusion detection head.
@@ -425,6 +427,18 @@ class TransFusionHead(nn.Module):
                 (shared conv, heatmap head, prediction branches).
             norm_momentum: Momentum used by the head's batch-normalization layers
                 (shared conv, heatmap head, prediction branches).
+            shared_conv_norm_act: Whether the shared conv is conv(no bias)+BN+ReLU
+                (this implementation's default). ``False`` uses the reference
+                (mmdet3d) form — a single biased Conv2d with signed output —
+                required to load reference-trained checkpoints.
+                TODO(vividf): remove this option (and the ``False`` branch below)
+                once BEVFusion is retrained natively and the AWML reference
+                checkpoint is no longer needed for chain validation.
+            fuse_export_attention: Whether export emits fusion-ready attention (no
+                max-subtraction before softmax) in the trace dtype. The max-sub pattern
+                blocks TensorRT's Myelin MHA fusion (measured: fused 0.25 ms vs unfused
+                0.68 ms on the j6gen2 dense graph); the fused kernel handles softmax
+                numerics internally. Training is untouched (export copy only).
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
         """
@@ -453,6 +467,7 @@ class TransFusionHead(nn.Module):
         self.loss_heatmap_weight = loss_heatmap_weight
         self.heatmap_init_bias = heatmap_init_bias
         self.use_velocity = use_velocity
+        self.fuse_export_attention = fuse_export_attention
         self.use_bf16_cross_attention = use_bf16_cross_attention
         self.required_onnx_precision = "fp16" if use_bf16_cross_attention else None
         if nms_type not in {None, "circle"}:
@@ -461,13 +476,39 @@ class TransFusionHead(nn.Module):
         self.dense_heatmap_pooling_class_ids = self._resolve_class_ids(
             dense_heatmap_pooling_classes
         )
+        # Scatter-free channel bookkeeping for _suppress_dense_heatmap: the suppressed
+        # map is rebuilt as concat([pooled classes, excluded classes]) gathered back into
+        # class order — constant indices instead of a ScatterND (whose ONNX form drags a
+        # whole index-construction subgraph into every export).
+        if self.dense_heatmap_pooling_class_ids:
+            pooling_ids = list(self.dense_heatmap_pooling_class_ids)
+            excluded_ids = [c for c in range(num_classes) if c not in pooling_ids]
+            concat_order = pooling_ids + excluded_ids
+            self._dense_heatmap_excluded_class_ids = excluded_ids
+            self._local_max_class_remap = [concat_order.index(c) for c in range(num_classes)]
+        else:
+            self._dense_heatmap_excluded_class_ids = None
+            self._local_max_class_remap = None
         self.nms_groups = self._resolve_nms_groups(nms_groups)
 
-        self.shared_conv = nn.Conv2d(
-            in_channels, hidden_channel, kernel_size=3, padding=1, bias=False
-        )
-        self.shared_norm = nn.BatchNorm2d(hidden_channel, eps=norm_eps, momentum=norm_momentum)
-        self.shared_act = nn.ReLU(inplace=True)
+        if shared_conv_norm_act:
+            self.shared_conv = nn.Conv2d(
+                in_channels, hidden_channel, kernel_size=3, padding=1, bias=False
+            )
+            self.shared_norm = nn.BatchNorm2d(hidden_channel, eps=norm_eps, momentum=norm_momentum)
+            self.shared_act = nn.ReLU(inplace=True)
+        else:
+            # TODO(vividf): temporary branch for the AWML reference checkpoint only —
+            # remove together with the shared_conv_norm_act option once BEVFusion is
+            # retrained natively. The reference (mmdet3d BEVFusion) shared conv is a
+            # single biased Conv2d whose signed output feeds the heatmap head and
+            # decoder directly — required to load reference-trained checkpoints
+            # without clipping ~half of the shared-feature energy through BN+ReLU.
+            self.shared_conv = nn.Conv2d(
+                in_channels, hidden_channel, kernel_size=3, padding=1, bias=True
+            )
+            self.shared_norm = nn.Identity()
+            self.shared_act = nn.Identity()
 
         self.heatmap_head = nn.Sequential(
             ConvModule(
@@ -568,10 +609,16 @@ class TransFusionHead(nn.Module):
             )
             return heatmap * (pooled == heatmap)
 
-        local_max = heatmap.clone()
         if not self.dense_heatmap_pooling_class_ids:
             return heatmap
 
+        # Semantics (unchanged): pooling classes take the 3x3 max over fully-interior
+        # windows, their border ring keeps the raw value (border peaks survive), and
+        # excluded classes stay unsuppressed. Built scatter-free — pad + mask + maximum
+        # for the border ring, concat + constant-index gather for the channel merge —
+        # because the slice-assignment form exports as ScatterND plus a Shape/Expand/
+        # Concat index-construction subgraph (~40 nodes) that TensorRT tolerates but
+        # ONNX Runtime and any later graph surgery pay for.
         padding = self.nms_kernel_size // 2
         selected_heatmap = heatmap[:, self.dense_heatmap_pooling_class_ids, :, :]
         pooled = F.max_pool2d(
@@ -580,15 +627,29 @@ class TransFusionHead(nn.Module):
             stride=1,
             padding=0,
         )
-        if padding == 0:
-            local_max[:, self.dense_heatmap_pooling_class_ids, :, :] = pooled
-        else:
-            local_max[
-                :,
-                self.dense_heatmap_pooling_class_ids,
-                padding:-padding,
-                padding:-padding,
-            ] = pooled
+        if padding > 0:
+            height, width = selected_heatmap.shape[2], selected_heatmap.shape[3]
+            interior = F.pad(
+                torch.ones(
+                    1,
+                    1,
+                    height - 2 * padding,
+                    width - 2 * padding,
+                    device=heatmap.device,
+                    dtype=heatmap.dtype,
+                ),
+                [padding] * 4,
+                value=0.0,
+            )
+            # Interior: max(pooled, 0) = pooled (sigmoid scores are positive).
+            # Border:   max(0, raw)    = raw — identical to the old slice assignment.
+            pooled = torch.maximum(
+                F.pad(pooled, [padding] * 4, value=0.0),
+                selected_heatmap * (1.0 - interior),
+            )
+        local_max = torch.cat(
+            [pooled, heatmap[:, self._dense_heatmap_excluded_class_ids, :, :]], dim=1
+        )[:, self._local_max_class_remap, :, :]
         return heatmap * (local_max == heatmap)
 
     def _circle_nms_groups(self) -> list[dict[str, Any]]:
@@ -741,14 +802,44 @@ class TransFusionHead(nn.Module):
         if batch_vel is not None:
             batch_vel = batch_vel[..., -self.num_proposals :]
 
+        return self.decode_detections(
+            batch_score, batch_rot, batch_dim, batch_center, batch_height, batch_vel
+        )
+
+    def decode_detections(
+        self,
+        score: torch.Tensor,
+        rot: torch.Tensor,
+        dim: torch.Tensor,
+        center: torch.Tensor,
+        height: torch.Tensor,
+        vel: torch.Tensor | None,
+    ) -> list[dict[str, torch.Tensor]]:
+        """Turn per-proposal predictions into final detections.
+
+        The post-processing every consumer must agree on: metric-space decoding with the
+        configured bbox coder (which also applies the per-class score thresholds and the
+        post-center range filter), then NMS. Split out of :meth:`predict` because a
+        deployment whose graph performs the proposal selection itself arrives with the
+        same per-proposal tensors and must run exactly this tail — sharing it is what
+        keeps the deployed behavior tied to the model's.
+
+        Args:
+            score: Per-class proposal scores, shape ``(B, num_classes, P)``.
+            rot: Rotation channels, shape ``(B, 2, P)``.
+            dim: Dimension channels, shape ``(B, 3, P)``.
+            center: BEV center channels, shape ``(B, 2, P)``.
+            height: Height channel, shape ``(B, 1, P)``.
+            vel: Velocity channels, shape ``(B, 2, P)``, or ``None``.
+
+        Returns:
+            One ``{bboxes_3d, scores_3d, labels_3d}`` dict per batch element.
+
+        Raises:
+            RuntimeError: If the configured NMS type has no runtime implementation.
+        """
         decoded = self.bbox_coder.decode(
-            batch_score,
-            batch_rot,
-            batch_dim,
-            batch_center,
-            batch_height,
-            batch_vel,
-            filter_predictions=True,
+            score, rot, dim, center, height, vel, filter_predictions=True
         )
 
         results = []
@@ -902,8 +993,22 @@ class TransFusionHead(nn.Module):
                 if pos_mask.any():
                     pos_gt_inds = assign_result.gt_inds[pos_mask] - 1
                     labels[pos_mask] = gt_labels_tensor[pos_gt_inds]
-                    bbox_targets[pos_mask] = self.bbox_coder.encode(gt_boxes_tensor[pos_gt_inds])
-                    bbox_weights[pos_mask] = 1.0
+                    encoded = self.bbox_coder.encode(gt_boxes_tensor[pos_gt_inds])
+                    weights = encoded.new_ones(encoded.shape)
+                    # Only the velocity channels of a valid box are allowed to be non-finite: they
+                    # are unknown for objects the annotation pipeline could not track, so they are
+                    # dropped from the loss and zeroed out, because nan/inf * 0 stays nan. Same
+                    # convention as CenterHead.loss(). A non-finite target on any other channel is
+                    # corrupt ground truth and is left to surface as a non-finite loss.
+                    if self.bbox_coder.code_size == 10:
+                        num_geometry_channels = self.bbox_coder.code_size - 2
+                        velocity_finite = torch.isfinite(encoded[:, num_geometry_channels:])
+                        encoded[:, num_geometry_channels:] = torch.where(
+                            velocity_finite, encoded[:, num_geometry_channels:], 0.0
+                        )
+                        weights[:, num_geometry_channels:] = velocity_finite.to(weights.dtype)
+                    bbox_targets[pos_mask] = encoded
+                    bbox_weights[pos_mask] = weights
                     num_pos += int(pos_mask.sum().item())
                     if assign_result.max_overlaps is not None:
                         matched_ious += float(assign_result.max_overlaps[pos_mask].sum().item())
@@ -1011,16 +1116,17 @@ class TransFusionHead(nn.Module):
         head = deepcopy(self).eval()
         if not hasattr(head, "decoder"):
             return head
+        fuse = head.fuse_export_attention or head.use_bf16_cross_attention
         for decoder_layer in head.decoder:
             if isinstance(decoder_layer.self_attn, nn.MultiheadAttention):
                 decoder_layer.self_attn = ExportableMultiheadAttention(
                     decoder_layer.self_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                 )
             if isinstance(decoder_layer.cross_attn, nn.MultiheadAttention):
                 decoder_layer.cross_attn = ExportableMultiheadAttention(
                     decoder_layer.cross_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                     use_bf16=head.use_bf16_cross_attention,
                 )
         return head

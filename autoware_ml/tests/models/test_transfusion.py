@@ -8,6 +8,7 @@ from pathlib import Path
 import onnx
 import pytest
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 from onnx import TensorProto
 
@@ -488,6 +489,51 @@ def test_transfusion_bbox_loss_normalizes_by_positive_count() -> None:
     assert torch.allclose(losses["layer_-1_loss_bbox"], expected)
 
 
+def test_transfusion_bbox_loss_masks_unknown_velocity_targets() -> None:
+    """Untracked objects carry non-finite GT velocity; those channels must leave the loss.
+
+    Same convention as CenterHead.loss(): masking alone is not enough because
+    ``nan * 0`` stays ``nan``, so the targets are zeroed as well.
+    """
+
+    class OnePositiveAssigner:
+        def assign(self, bboxes, gt_bboxes, gt_labels, cls_pred, point_cloud_range):
+            del bboxes, gt_bboxes, gt_labels, cls_pred, point_cloud_range
+            return AssignResult(
+                num_gts=1,
+                gt_inds=torch.tensor([1, 0], dtype=torch.long),
+                max_overlaps=torch.tensor([1.0, 0.0], dtype=torch.float32),
+                labels=torch.tensor([0, -1], dtype=torch.long),
+            )
+
+    head = _build_head(assigner=OnePositiveAssigner())
+    outputs = {
+        "heatmap": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "dense_heatmap": torch.zeros((1, 2, 4, 4), dtype=torch.float32),
+        "center": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "height": torch.zeros((1, 1, 2), dtype=torch.float32),
+        "dim": torch.zeros((1, 3, 2), dtype=torch.float32),
+        "rot": torch.zeros((1, 2, 2), dtype=torch.float32),
+        "vel": torch.zeros((1, 2, 2), dtype=torch.float32),
+    }
+    unknown_velocity_box = torch.tensor(
+        [[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, float("nan"), float("nan")]], dtype=torch.float32
+    )
+    gt_labels = [torch.tensor([0], dtype=torch.long)]
+
+    losses = head.loss(outputs, [unknown_velocity_box], gt_labels)
+
+    # Only the eight geometry channels contribute; predictions are zeros, so the loss
+    # is the weighted absolute encoded target over those channels.
+    encoded_target = head.bbox_coder.encode(unknown_velocity_box)[0]
+    expected = (
+        encoded_target[:8].abs() * torch.tensor(head.code_weights[:8])
+    ).sum() * head.loss_bbox_weight
+    assert torch.isfinite(losses["layer_-1_loss_bbox"])
+    assert torch.isfinite(losses["loss"])
+    assert torch.allclose(losses["layer_-1_loss_bbox"], expected)
+
+
 def _heatmap_for_box(
     head: TransFusionHead, length: float, width: float, yaw: float
 ) -> torch.Tensor:
@@ -614,3 +660,55 @@ def test_transfusion_coder_rejects_mismatched_threshold_length() -> None:
             torch.rand(1, 2, 3),
             filter_predictions=True,
         )
+
+
+def test_fuse_export_attention_emits_fusion_pattern_without_bf16(tmp_path: Path) -> None:
+    """fuse_export_attention drops the max-subtraction (the Myelin MHA-fusion blocker)
+    while keeping the trace dtype; bf16 stays opt-in via use_bf16_cross_attention."""
+    head = _build_head(fuse_export_attention=True).prepare_for_export()
+    cross = head.decoder[0].cross_attn
+    assert isinstance(cross, ExportableMultiheadAttention)
+    assert cross.fuse_attention and not cross.use_bf16
+    assert head.decoder[0].self_attn.fuse_attention
+    # No fp16-unfriendly stabilization in the exported attention graph.
+    model = _export_attention(cross, tmp_path / "fused_attention.onnx")
+    ops = {node.op_type for node in model.graph.node}
+    assert "ReduceMax" not in ops and "Sub" not in ops
+    # Unlike the bf16 variant, the trace stays in the input dtype (no bf16 casts).
+    assert not any(
+        attr.i == onnx.TensorProto.BFLOAT16
+        for node in model.graph.node
+        if node.op_type == "Cast"
+        for attr in node.attribute
+        if attr.name == "to"
+    )
+    # Defaults unchanged: explicit attention keeps the stabilized pattern.
+    default_head = _build_head().prepare_for_export()
+    assert not default_head.decoder[0].cross_attn.fuse_attention
+
+
+def test_scatter_free_heatmap_suppression_matches_slice_assignment() -> None:
+    """The scatter-free local_max (pad+mask+maximum+concat+gather) must be bit-equal to
+    the old slice-assignment form: interior=pooled, border ring=raw (peaks survive),
+    excluded classes untouched."""
+    head = _build_head(dense_heatmap_pooling_classes=[0])
+    assert head.dense_heatmap_pooling_class_ids == [0]
+
+    torch.manual_seed(7)
+    heatmap = torch.rand(2, 2, 9, 9)  # sigmoid-like positive scores
+
+    def reference(hm: torch.Tensor) -> torch.Tensor:
+        local_max = hm.clone()
+        padding = head.nms_kernel_size // 2
+        pooled = F.max_pool2d(
+            hm[:, head.dense_heatmap_pooling_class_ids],
+            kernel_size=head.nms_kernel_size,
+            stride=1,
+            padding=0,
+        )
+        local_max[:, head.dense_heatmap_pooling_class_ids, padding:-padding, padding:-padding] = (
+            pooled
+        )
+        return hm * (local_max == hm)
+
+    assert torch.equal(head._suppress_dense_heatmap(heatmap), reference(heatmap))

@@ -710,6 +710,7 @@ class BEVFusionDetectionModel(BaseModel):
             model.bbox_head = model.bbox_head.prepare_for_export()
         return model
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_specs(self, batch_inputs_dict: dict[str, Any]) -> dict[str, ExportSpec]:
         """Build the ONNX export specifications for the runtime-compatible ABI.
 
