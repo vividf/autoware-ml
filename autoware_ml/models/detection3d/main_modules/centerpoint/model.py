@@ -27,22 +27,25 @@ from collections.abc import Callable, Sequence
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from jaxtyping import Float32
 import torch
+from jaxtyping import Float32
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
-from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
-from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
-from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
 from autoware_ml.dataclasses.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
+from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
+from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
 from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import multi_task_eval_output
-from autoware_ml.models.multi_task_base_model import LogDictConfigs, MultiTaskBaseModel
 from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import PillarFeatureNet
 from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import PointPillarsScatter
 from autoware_ml.models.detection3d.heads.centerhead import CenterHead
+from autoware_ml.models.detection3d.main_modules.centerpoint.pruning import (
+    build_centerpoint_pruning_spec,
+    centerpoint_distillation_loss,
+)
 from autoware_ml.models.detection3d.main_modules.centerpoint.quantization import (
     build_centerpoint_quantization_plan,
 )
@@ -50,7 +53,9 @@ from autoware_ml.models.detection3d.main_modules.centerpoint.stages import (
     assemble_centerpoint_outputs,
     build_centerpoint_stages,
 )
+from autoware_ml.models.multi_task_base_model import LogDictConfigs, MultiTaskBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.pruning.spec import PruningSpec
 from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.plan import QuantizationPlan
 
@@ -200,3 +205,15 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
     def build_quantization_plan(self, quantization_config: QuantizationConfig) -> QuantizationPlan:
         """Bind CenterPoint's quantization rules to a parsed config (see :mod:`.quantization`)."""
         return build_centerpoint_quantization_plan(quantization_config)
+
+    # ------------------------------------------------------------------ pruning hooks
+
+    def build_pruning_spec(self) -> PruningSpec:
+        """Declare the prunable dense subtree (see :mod:`.pruning`)."""
+        return build_centerpoint_pruning_spec(self)
+
+    def distillation_loss(
+        self, student: MultiTaskOutputs, teacher: MultiTaskOutputs
+    ) -> torch.Tensor:
+        """Knowledge-distillation loss between two output sets (see :mod:`.pruning`)."""
+        return centerpoint_distillation_loss(student, teacher)

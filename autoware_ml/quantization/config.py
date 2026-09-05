@@ -293,6 +293,22 @@ class QATScheduleConfig:
             )
         return config
 
+    def to_dict(self) -> dict[str, Any]:
+        """Raw mapping equivalent (only the knobs of this schedule type; round-trips)."""
+        knobs = {"type": self.type}
+        if self.type == "cosine":
+            knobs["final_lr_ratio"] = self.final_lr_ratio
+        elif self.type == "one_cycle":
+            knobs.update(
+                div_factor=self.div_factor,
+                pct_start=self.pct_start,
+                final_div_factor=self.final_div_factor,
+                cycle_momentum=self.cycle_momentum,
+                base_momentum=self.base_momentum,
+                max_momentum=self.max_momentum,
+            )
+        return knobs
+
     def build_lightning_scheduler(self, peak_lr: float) -> tuple[dict | None, dict | None]:
         """Return ``(model.scheduler, model.scheduler_config)`` Hydra nodes for this schedule.
 
@@ -419,26 +435,7 @@ class QATConfig:
         return {
             "epochs": self.epochs,
             "lr": self.lr,
-            "schedule": {
-                "type": self.schedule.type,
-                **(
-                    {"final_lr_ratio": self.schedule.final_lr_ratio}
-                    if self.schedule.type == "cosine"
-                    else {}
-                ),
-                **(
-                    {
-                        "div_factor": self.schedule.div_factor,
-                        "pct_start": self.schedule.pct_start,
-                        "final_div_factor": self.schedule.final_div_factor,
-                        "cycle_momentum": self.schedule.cycle_momentum,
-                        "base_momentum": self.schedule.base_momentum,
-                        "max_momentum": self.schedule.max_momentum,
-                    }
-                    if self.schedule.type == "one_cycle"
-                    else {}
-                ),
-            },
+            "schedule": self.schedule.to_dict(),
             "freeze_unquantized": self.freeze_unquantized,
             "val_check_interval": self.val_check_interval,
             "calibrate_samples": self.calibrate_samples,

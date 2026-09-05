@@ -97,6 +97,10 @@ def save_quantized_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint: dict[str, Any] = {"state_dict": model.state_dict()}
     attach_quantization(checkpoint, description)
+    # A pruned model keeps describing its architecture through the quantize stage.
+    from autoware_ml.pruning.checkpoint import attach_pruning_from_model
+
+    attach_pruning_from_model(model, checkpoint)
     torch.save(checkpoint, path)
     logger.info(
         "Saved quantized checkpoint: %s (%d decisions in the embedded placement record)",

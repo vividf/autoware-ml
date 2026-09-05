@@ -215,6 +215,10 @@ class QATCallback(L.Callback):
             checkpoint,
             QuantizationDescription(config=self.config, placement_record=self.placement_record),
         )
+        # A pruned model keeps describing its architecture through QAT.
+        from autoware_ml.pruning.checkpoint import attach_pruning_from_model
+
+        attach_pruning_from_model(pl_module, checkpoint)
 
     def on_fit_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Log quantizer status after training."""

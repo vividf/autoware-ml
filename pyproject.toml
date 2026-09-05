@@ -31,6 +31,9 @@ dependencies = [
     # huggingface_hub/safetensors are transitive imports of modelopt 0.46.0 that its
     # wheel does not declare.
     "nvidia-modelopt==0.46.0",
+    # modelopt.torch.nas FLOPs counting (pruning search) uses torchprofile's
+    # ``profile.handlers``, removed in torchprofile 0.1.0 — pin the last API it targets.
+    "torchprofile==0.0.4",
     "huggingface_hub>=0.30,<2.0",
     "safetensors>=0.4,<1.0",
     "optuna==4.8.0",

@@ -83,6 +83,7 @@ TEST_ENTRYPOINT_MODULE = "autoware_ml.scripts.test"
 EXPERIMENT_TEST_ENTRYPOINT_MODULE = "autoware_ml.scripts.experiment_test"
 DEPLOY_ENTRYPOINT_MODULE = "autoware_ml.scripts.deploy"
 QUANTIZE_ENTRYPOINT_MODULE = "autoware_ml.scripts.quantize"
+PRUNE_ENTRYPOINT_MODULE = "autoware_ml.scripts.prune"
 ENTRYPOINT_MODULES = {
     ("train", TASK_CONFIG_PREFIX): TRAIN_ENTRYPOINT_MODULE,
     ("train", EXPERIMENT_CONFIG_PREFIX): EXPERIMENT_TRAIN_ENTRYPOINT_MODULE,
@@ -90,6 +91,7 @@ ENTRYPOINT_MODULES = {
     ("test", EXPERIMENT_CONFIG_PREFIX): EXPERIMENT_TEST_ENTRYPOINT_MODULE,
     ("deploy", EXPERIMENT_CONFIG_PREFIX): DEPLOY_ENTRYPOINT_MODULE,
     ("quantize", EXPERIMENT_CONFIG_PREFIX): QUANTIZE_ENTRYPOINT_MODULE,
+    ("prune", EXPERIMENT_CONFIG_PREFIX): PRUNE_ENTRYPOINT_MODULE,
 }
 CLI_RUNTIME_MODULE = "autoware_ml.cli.runtime"
 
@@ -419,6 +421,63 @@ def quantize(
         entrypoint_module=entrypoint_module,
         config_name=config_name,
         stage="quantize",
+        extra_args=ctx.args,
+        hydra_overrides=[_weights_override(weights)],
+        checkpoints=weights,
+        config_prefix=config_prefix,
+    )
+
+
+@app.command(
+    name="prune",
+    cls=OptionFirstTyperCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def prune(
+    ctx: typer.Context,
+    config_name: Annotated[
+        str,
+        typer.Option(
+            "--config-name",
+            help="Experiment config name or YAML config path (experiments/...)",
+            autocompletion=complete_experiment_config,
+        ),
+    ],
+    weights: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--weights",
+            help="FP checkpoint to prune (or, with pruning.mode=finetune, an already "
+            "pruned checkpoint plus pruning.finetune.teacher_weights)",
+            autocompletion=complete_checkpoint_path,
+        ),
+    ] = None,
+) -> None:
+    """Produce a self-describing pruned checkpoint (channel search, optional KD fine-tune).
+
+    The config's ``pruning`` section selects the mode: ``search`` runs the FastNAS width
+    search on the model's declared subtree and saves ``pruned.ckpt``; ``finetune`` also
+    runs the knowledge-distillation fine-tune and saves ``best.ckpt``/``last.ckpt``. The
+    produced checkpoint embeds its channel table, so ``quantize``, ``deploy`` and ``test``
+    rebuild the narrowed architecture without any pruning config.
+
+    Args:
+        ctx: Typer context containing additional Hydra overrides.
+        config_name: Experiment config name or config file path to prune with.
+        weights: Checkpoint path(s) providing the model weights.
+    """
+    if not weights:
+        raise typer.BadParameter("--weights <path> (repeatable) must be specified.")
+
+    entrypoint_module, config_prefix = resolve_entrypoint(
+        "prune", config_name, EXPERIMENT_CONFIG_PREFIX
+    )
+    run_lazy_script(
+        CLI_RUNTIME_MODULE,
+        "run_hydra_entrypoint",
+        entrypoint_module=entrypoint_module,
+        config_name=config_name,
+        stage="prune",
         extra_args=ctx.args,
         hydra_overrides=[_weights_override(weights)],
         checkpoints=weights,

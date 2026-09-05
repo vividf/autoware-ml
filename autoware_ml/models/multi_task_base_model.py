@@ -21,18 +21,18 @@ used by task-specific model wrappers throughout the framework.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, NamedTuple, final
 from types import MappingProxyType
+from typing import Any, NamedTuple, final
 
-from jaxtyping import Float32
 import lightning as L
 import torch
+from jaxtyping import Float32
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
-from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
 from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
+from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
 from autoware_ml.datamodule.multi_task.dataclasses.multi_task_samples import MultiTaskGTBatch
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
@@ -116,6 +116,10 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
         )
         self.scheduler_config = dict(scheduler_config) if scheduler_config else {}
         self.log_dict_configs = log_dict_configs
+        # Training-only extra loss terms registered by callbacks (e.g. knowledge
+        # distillation): ``fn(inputs, outputs) -> {metric_name: loss}``; each term is
+        # logged and added to ``loss`` in ``_core_step``.
+        self._auxiliary_losses: dict[str, Callable[[Any, Any], Mapping[str, torch.Tensor]]] = {}
 
     def on_after_batch_transfer(
         self, batch: MultiTaskGTBatch, dataloader_idx: int
@@ -228,6 +232,8 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
         metrics = self.compute_metrics(multi_task_batch_inputs, outputs)
         if "loss" not in metrics:
             raise ValueError("compute_metrics() must return a dict containing a 'loss' key.")
+        if self._auxiliary_losses and step_prefix == SplitType.TRAIN:
+            metrics = self._with_auxiliary_losses(multi_task_batch_inputs, outputs, metrics)
         batch_size = self.get_log_batch_size(multi_task_batch_inputs)
         # Step-level logging is training-only. Enabling it for val/test would make Lightning
         # suffix the keys (``val/loss_step``/``val/loss_epoch``) and break callbacks that
@@ -246,6 +252,33 @@ class MultiTaskBaseModel(MetricEvalMixin, L.LightningModule):
             rank_zero_only=self.log_dict_configs.rank_zero_only,
         )
         return metrics, outputs
+
+    def register_auxiliary_loss(
+        self, name: str, term: Callable[[Any, Any], Mapping[str, torch.Tensor]]
+    ) -> None:
+        """Add a training-only loss term ``term(inputs, outputs) -> {metric_name: loss}``."""
+        if name in self._auxiliary_losses:
+            raise ValueError(f"Auxiliary loss {name!r} is already registered.")
+        self._auxiliary_losses[name] = term
+
+    def unregister_auxiliary_loss(self, name: str) -> None:
+        """Remove a term added by :meth:`register_auxiliary_loss` (no-op when absent)."""
+        self._auxiliary_losses.pop(name, None)
+
+    def _with_auxiliary_losses(
+        self, inputs: MultiTaskBatchInputs, outputs: MultiTaskOutputs, metrics: Mapping[str, Any]
+    ) -> MappingProxyType[str, Float32[torch.Tensor, " 1"]]:
+        """Return ``metrics`` extended with every auxiliary term, ``loss`` including them."""
+        extended = dict(metrics)
+        total = metrics["loss"]
+        for term in self._auxiliary_losses.values():
+            for key, value in term(inputs, outputs).items():
+                if key in extended:
+                    raise ValueError(f"Auxiliary loss key {key!r} collides with a model metric.")
+                extended[key] = value
+                total = total + value
+        extended["loss"] = total
+        return MappingProxyType(extended)
 
     @final
     def training_step(

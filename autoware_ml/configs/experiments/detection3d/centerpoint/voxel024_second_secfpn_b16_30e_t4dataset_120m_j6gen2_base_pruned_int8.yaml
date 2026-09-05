@@ -1,0 +1,16 @@
+# @package _global_
+# INT8 on top of the pruned checkpoint: identical to the _int8 experiment (the pruned
+# checkpoint carries its own channel table, so quantize / deploy need no pruning section);
+# a separate name so the MLflow lineage and artifacts stay apart from the un-pruned INT8.
+#
+#   autoware-ml quantize --config-name .../..._j6gen2_base_pruned_int8 --weights <best.ckpt from prune>
+#   autoware-ml deploy   --config-name .../..._j6gen2_base_pruned_int8 --weights <ptq.ckpt>
+#
+# The stage-0 skip is inherited as-is. Re-measure it on the pruned+fine-tuned tree
+# (work_dirs/quant_refactor/sensitivity.py): its dynamic range is not the original's, and
+# lifting the skip is worth ~1 ms on the pruned chain (M1 §6).
+defaults:
+  - voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8
+  - _self_
+
+experiment_name: voxel024_second_secfpn_b16_30e_t4dataset_120m_pruned_int8

@@ -16,12 +16,13 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
-import torch
 
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.pruning.checkpoint import PRUNING_DESCRIPTION_ATTR, find_pruning
 from autoware_ml.quantization.checkpoint import find_quantization
 from autoware_ml.utils.checkpoints import apply_matching_weights
 
@@ -85,6 +86,25 @@ def build_model(
             if isinstance(weights_path, (str, Path))
             else [Path(path) for path in weights_path]
         )
+        pruned = find_pruning(weight_paths)
+        if pruned is not None:
+            # Architecture first: the narrowed tree is what the weights (and, below, the
+            # quantization plan) expect. Rebuilt modules load like any other.
+            from autoware_ml.pruning.channels import ChannelTable, apply_channel_table
+
+            path, pruning_description = pruned
+            logger.info(
+                "Pruned checkpoint detected (%s): rebuilding %d layer(s) from its embedded "
+                "channel table.",
+                path,
+                len(pruning_description.channel_table),
+            )
+            apply_channel_table(model, pruning_description.channel_table)
+            pruning_description.channel_table.verify_matches(
+                ChannelTable.record(model).restricted_to(pruning_description.channel_table),
+                source="the checkpoint's embedded channel table",
+            )
+            setattr(model, PRUNING_DESCRIPTION_ATTR, pruning_description)
         quantized = find_quantization(weight_paths)
         if quantized is not None:
             from autoware_ml.quantization.loader import load_quantized_model
