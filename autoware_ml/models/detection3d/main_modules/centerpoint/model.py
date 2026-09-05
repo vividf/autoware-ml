@@ -13,21 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native CenterPoint lidar detector wrapper.
+"""Native CenterPoint lidar detector.
 
-This module provides the task-level training, inference, and export wrapper
-around the reusable PointPillars and CenterPoint detection components.
+The task-level training / inference wrapper around the reusable PointPillars and
+CenterPoint detection components. Deployment (stage graph, export wrappers) lives in
+:mod:`.stages`, the quantization declaration in :mod:`.quantization`; this module
+only wires the three hooks the framework calls.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Mapping
 
 from jaxtyping import Float32
 import torch
-from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -35,84 +36,23 @@ from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
 from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
 from autoware_ml.dataclasses.multi_task_outputs import MultiTaskOutputs
 from autoware_ml.dataclasses.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import multi_task_eval_output
 from autoware_ml.models.multi_task_base_model import LogDictConfigs, MultiTaskBaseModel
 from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import PillarFeatureNet
 from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import PointPillarsScatter
 from autoware_ml.models.detection3d.heads.centerhead import CenterHead
+from autoware_ml.models.detection3d.main_modules.centerpoint.quantization import (
+    build_centerpoint_quantization_plan,
+)
+from autoware_ml.models.detection3d.main_modules.centerpoint.stages import (
+    assemble_centerpoint_outputs,
+    build_centerpoint_stages,
+)
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.utils.deploy import ExportSpec
-
-
-class _CenterPointVoxelEncoderExportWrapper(nn.Module):
-    """Export the PointPillars PFN stack from decorated input features."""
-
-    def __init__(self, voxel_encoder: PillarFeatureNet) -> None:
-        """Initialize the voxel encoder export wrapper.
-
-        Args:
-            voxel_encoder: Pillar feature network whose PFN layers are exported.
-        """
-        super().__init__()
-        self.voxel_encoder = voxel_encoder
-
-    def forward(
-        self,
-        input_features: Float32[torch.Tensor, "num_pillars max_num_points feature_channels"],
-    ) -> Float32[torch.Tensor, "num_pillars 1 num_output_channels"]:
-        """Encode already-decorated pillar features."""
-        return self.voxel_encoder.encode_decorated(input_features)
-
-
-class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
-    """Export CenterPoint backbone, neck, and dense head from BEV features."""
-
-    # ONNX tensor name -> CenterHeadOutputs field, in the order the deployed runtime
-    # expects. Deriving `output_names` and the returned tuple from one table keeps
-    # them from drifting apart. Do not reorder.
-    _OUTPUT_FIELDS: tuple[tuple[str, str], ...] = (
-        ("heatmap", "heatmaps"),
-        ("reg", "centers"),
-        ("height", "heights"),
-        ("dim", "dims"),
-        ("rot", "rots"),
-    )
-    _VELOCITY_FIELD: tuple[str, str] = ("vel", "vels")
-
-    def __init__(self, backbone: nn.Module, neck: nn.Module, bbox_head: CenterHead) -> None:
-        """Initialize the backbone-neck-head export wrapper.
-
-        Args:
-            backbone: BEV backbone.
-            neck: BEV neck.
-            bbox_head: CenterPoint dense head; an export-ready copy is taken.
-        """
-        super().__init__()
-        self.backbone = backbone
-        self.neck = neck
-        self.bbox_head = bbox_head.prepare_for_export()
-        self._output_fields = self._OUTPUT_FIELDS
-        if self.bbox_head.use_velocity:
-            self._output_fields += (self._VELOCITY_FIELD,)
-        self.output_names = [onnx_name for onnx_name, _ in self._output_fields]
-
-    def forward(
-        self,
-        spatial_features: Float32[torch.Tensor, "batch_size num_channels height width"],
-    ) -> tuple[torch.Tensor, ...]:
-        """Run BEV feature extraction and flatten the head outputs for export."""
-        bev_features = self.backbone(spatial_features)
-        bev_features = self.neck(bev_features)
-        center_head_outputs = self.bbox_head(bev_features)
-
-        export_outputs: list[torch.Tensor] = []
-        for onnx_name, field_name in self._output_fields:
-            output = getattr(center_head_outputs, field_name)
-            if output is None:
-                raise ValueError(f"CenterHead produced no tensor for export output '{onnx_name}'.")
-            export_outputs.append(output)
-        return tuple(export_outputs)
+from autoware_ml.quantization.config import QuantizationConfig
+from autoware_ml.quantization.plan import QuantizationPlan
 
 
 class CenterPointDetectionModel(MultiTaskBaseModel):
@@ -135,6 +75,7 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
         log_dict_configs: LogDictConfigs,
         optimizer: Callable[..., Optimizer] | None = None,
         scheduler: Callable[[Optimizer], LRScheduler] | None = None,
+        scheduler_config: Mapping[str, Any] | None = None,
         metrics: Sequence[MetricSuite] | None = None,
     ) -> None:
         """
@@ -150,12 +91,15 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
             log_dict_configs: Logging configuration for training and validation.
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
+            scheduler_config: Lightning scheduler metadata (``interval`` / ``frequency`` /
+                ``monitor``); per-step schedulers such as OneCycleLR need ``interval: step``.
             metrics: Detection metrics accumulated during validation and test.
         """
         super().__init__(
             data_preprocessor=data_preprocessor,
             optimizer=optimizer,
             scheduler=scheduler,
+            scheduler_config=scheduler_config,
             metrics=metrics,
             log_dict_configs=log_dict_configs,
         )
@@ -165,21 +109,12 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
         self.pts_neck = pts_neck
         self.bbox_head = bbox_head
 
-    # TODO(KokSeang): This signature is temporary different from the base class,
-    # and will be refactored to match the base class signature once the detection metric is refactored
-    # to accept MultiTaskPredictions and MultiTaskFeatures directly.
-    def build_eval_output(  # type: ignore[override]
-        self, batch: MultiTaskBatchInputs, outputs: MultiTaskOutputs
+    def build_eval_output_from_predictions(
+        self, batch: MultiTaskBatchInputs, predictions: MultiTaskPredictions
     ) -> dict[str, Any]:
-        """Decode detections and pair them with ground truth for metrics."""
-        if outputs.detection3d_head_outputs is None:
-            raise ValueError(
-                "MultiTaskOutputs must contain detection3d_head_outputs for CenterPoint build_eval_output pass."
-            )
-
+        """Pair decoded detections with ground truth for the metric suites."""
         return multi_task_eval_output(
-            multi_task_predictions=self.bbox_head.decode_outputs(outputs.detection3d_head_outputs),
-            multi_task_batch_inputs=batch,
+            multi_task_predictions=predictions, multi_task_batch_inputs=batch
         )
 
     def forward(self, multi_task_batch_inputs: MultiTaskBatchInputs) -> MultiTaskOutputs:
@@ -252,74 +187,16 @@ class CenterPointDetectionModel(MultiTaskBaseModel):
         )
         return multi_task_predictions
 
-    def build_export_spec(self, multi_task_batch_inputs: MultiTaskBatchInputs) -> ExportSpec:
-        """Reject single-module CenterPoint deployment export."""
-        del multi_task_batch_inputs
-        raise RuntimeError("CenterPoint deployment uses split modules; call build_export_specs().")
+    # ------------------------------------------------------------------ deployment hooks
 
-    def build_export_specs(
-        self, multi_task_batch_inputs: MultiTaskBatchInputs
-    ) -> dict[str, ExportSpec]:
-        """Build split CenterPoint deployment export specifications.
+    def build_stages(self) -> tuple[Stage, ...]:
+        """Declare the CenterPoint inference stage graph (see :mod:`.stages`)."""
+        return build_centerpoint_stages(self)
 
-        The exported ABI follows the original CenterPoint deployment split:
-        decorated pillar features feed the PFN ONNX module, and dense BEV
-        spatial features feed the backbone/neck/head ONNX module. Scatter is a
-        runtime preprocessing step between the two exported modules.
+    def assemble_outputs(self, outputs: Mapping[str, torch.Tensor]) -> MultiTaskOutputs:
+        """Wrap the head's named output tensors into :class:`MultiTaskOutputs`."""
+        return assemble_centerpoint_outputs(outputs)
 
-        Args:
-            multi_task_batch_inputs: Example preprocessed batch used to trace both modules.
-
-        Returns:
-            Ordered mapping of module name to export specification.
-        """
-        voxels_data = multi_task_batch_inputs.voxels_data
-        if voxels_data is None:
-            raise ValueError(
-                "MultiTaskBatchInputs must contain voxels_data to build CenterPoint export specs."
-            )
-
-        # The scatter canvas is indexed with the pillar batch indices, so the batch size
-        # is derived from the voxels rather than from the ground truth: a batch prepared
-        # for deployment may carry no ground truth at all.
-        batch_size = (
-            int(voxels_data.batch_indices.max().item()) + 1
-            if voxels_data.batch_indices.numel()
-            else 1
-        )
-
-        # Tracing must not update the pillar encoder's BatchNorm running statistics.
-        was_training = self.training
-        self.eval()
-        try:
-            with torch.no_grad():
-                input_features = self.pts_voxel_encoder.encode(voxels_data)
-                pillar_features = self.pts_voxel_encoder.encode_decorated(input_features).squeeze(1)
-                spatial_features = self.pts_middle_encoder(
-                    pillar_features=pillar_features,
-                    coords=voxels_data.coords,
-                    batch_indices=voxels_data.batch_indices,
-                    batch_size=batch_size,
-                )
-        finally:
-            self.train(was_training)
-
-        head_wrapper = _CenterPointBackboneNeckHeadExportWrapper(
-            self.pts_backbone,
-            self.pts_neck,
-            self.bbox_head,
-        )
-        return {
-            "pts_voxel_encoder_centerpoint": ExportSpec(
-                module=_CenterPointVoxelEncoderExportWrapper(self.pts_voxel_encoder),
-                args=(input_features,),
-                input_param_names=["input_features"],
-                output_names=["pillar_features"],
-            ),
-            "pts_backbone_neck_head_centerpoint": ExportSpec(
-                module=head_wrapper,
-                args=(spatial_features,),
-                input_param_names=["spatial_features"],
-                output_names=head_wrapper.output_names,
-            ),
-        }
+    def build_quantization_plan(self, quantization_config: QuantizationConfig) -> QuantizationPlan:
+        """Bind CenterPoint's quantization rules to a parsed config (see :mod:`.quantization`)."""
+        return build_centerpoint_quantization_plan(quantization_config)

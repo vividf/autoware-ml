@@ -29,6 +29,7 @@ class ConvModule(nn.Module):
         out_channels: int,
         stride: int = 1,
         transpose: bool = False,
+        kernel_size: int = 3,
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
     ) -> None:
@@ -38,7 +39,8 @@ class ConvModule(nn.Module):
             in_channels: Input channel count.
             out_channels: Output channel count.
             stride: Convolution stride.
-            transpose: Whether to use transposed convolution.
+            transpose: Whether to use transposed convolution (kernel follows ``stride``).
+            kernel_size: Convolution kernel size for the non-transposed path.
             norm_eps: Epsilon used by the batch normalization layer.
             norm_momentum: Momentum used by the batch normalization layer.
         """
@@ -55,9 +57,9 @@ class ConvModule(nn.Module):
             self.conv = nn.Conv2d(
                 in_channels,
                 out_channels,
-                kernel_size=3,
+                kernel_size=kernel_size,
                 stride=stride,
-                padding=1,
+                padding=kernel_size // 2,
                 bias=False,
             )
         self.norm = nn.BatchNorm2d(out_channels, eps=norm_eps, momentum=norm_momentum)

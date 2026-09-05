@@ -39,7 +39,10 @@ class PointPillarPreprocessor(DataPreprocessorModule):
         point_cloud_range: Spatial range ``[x_min, y_min, z_min, x_max, y_max, z_max]``
             in meters.
         max_num_points: Maximum number of points kept per pillar.
-        max_voxels: Maximum number of pillars retained per sample.
+        max_voxels: Maximum number of pillars retained per sample during training.
+        eval_max_voxels: Maximum number of pillars retained per sample during
+            evaluation and inference. Required before the preprocessor runs in
+            evaluation mode.
         voxelization_z_order_first: If ``True``, this preprocessor will transpose [x, y, z]
             coordinates to [z, y, x] in coords from voxelization.
             This is used for backward-compatible, and will be removed very soon.
@@ -53,6 +56,7 @@ class PointPillarPreprocessor(DataPreprocessorModule):
         point_cloud_range: Sequence[float],
         max_num_points: int,
         max_voxels: int,
+        eval_max_voxels: int | None = None,
         voxelization_z_order_first: bool = False,
         default_point_channels: int = 4,
     ) -> None:
@@ -61,6 +65,7 @@ class PointPillarPreprocessor(DataPreprocessorModule):
         self.point_cloud_range = point_cloud_range
         self.max_num_points = max_num_points
         self.max_voxels = max_voxels
+        self.eval_max_voxels = eval_max_voxels
         self.voxelization_z_order_first = voxelization_z_order_first
         self._default_point_channels = default_point_channels
 
@@ -81,6 +86,13 @@ class PointPillarPreprocessor(DataPreprocessorModule):
             MultiTaskBatchInputs: The processed input features for downstream tasks
             generating voxelization with VoxelData.
         """
+        if not is_training and self.eval_max_voxels is None:
+            raise ValueError(
+                "PointPillarPreprocessor is running in evaluation mode but 'eval_max_voxels' "
+                "is not set. Set 'eval_max_voxels' in the data_preprocessor config (use the "
+                "same value as 'max_voxels' to keep the training-time budget)."
+            )
+        max_voxels = self.max_voxels if is_training else self.eval_max_voxels
 
         multi_task_gt_batch = multi_task_batch_inputs.multi_task_gt_batch
         if multi_task_gt_batch.point_cloud_gt_batch is None:
@@ -110,7 +122,7 @@ class PointPillarPreprocessor(DataPreprocessorModule):
             voxel_size=voxel_size,
             point_cloud_range=point_cloud_range,
             max_num_points=self.max_num_points,
-            max_voxels=self.max_voxels,
+            max_voxels=max_voxels,
         )
 
         # Handle the case where no voxels are generated
