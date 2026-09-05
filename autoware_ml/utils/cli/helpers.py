@@ -32,6 +32,13 @@ from autoware_ml.utils.session import AUTOWARE_ML_SESSION_OPTION, TMUX_BASE_COMM
 
 register_config_resolvers()
 
+#: Config family prefixes ("tasks/..." vs "experiments/...") shared by the CLI's
+#: dispatch table, the completion callbacks, and the runtime resolvers. Defined here
+#: (not in cli/runtime.py) so importing them never drags in the heavy runtime module —
+#: CLI startup must not import mlflow/hydra transitively.
+TASK_CONFIG_PREFIX = "tasks"
+EXPERIMENT_CONFIG_PREFIX = "experiments"
+
 _NUMERIC_VALUE_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 

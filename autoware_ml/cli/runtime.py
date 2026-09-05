@@ -49,11 +49,14 @@ from autoware_ml.utils.mlflow_helpers import (
     resolve_lineage_context,
     should_enable_logger,
 )
+from autoware_ml.utils.cli.helpers import (  # noqa: F401  (shared family prefixes)
+    EXPERIMENT_CONFIG_PREFIX,
+    TASK_CONFIG_PREFIX,
+)
 
 HYDRA_CONFIG_NAME_OPTION = "--config-name"
 HYDRA_CONFIG_PATH_OPTION = "--config-path"
 HYDRA_SEARCHPATH_PREFIX = "hydra.searchpath="
-TASK_CONFIG_PREFIX = "tasks"
 
 
 def resolve_module_spec(module_name: str) -> ModuleSpec:

@@ -29,11 +29,18 @@ from click.shell_completion import CompletionItem
 from typer.core import TyperCommand
 from typing_extensions import Annotated
 
+from autoware_ml.cli.completion import (
+    complete_any_path,
+    complete_checkpoint_path,
+    complete_directory_path,
+    complete_experiment_config,
+    complete_session_command,
+    complete_session_name,
+    complete_task_config,
+)
 from autoware_ml.utils.cli.helpers import (
-    complete_config_value,
-    complete_path_value,
-    complete_session_command_value,
-    complete_session_name_value,
+    EXPERIMENT_CONFIG_PREFIX,
+    TASK_CONFIG_PREFIX,
     parse_extra_args,
     resolve_config_reference,
     run_lazy_script,
@@ -56,8 +63,6 @@ session_app = typer.Typer(
     no_args_is_help=True,
 )
 
-TASK_CONFIG_PREFIX = "tasks"
-EXPERIMENT_CONFIG_PREFIX = "experiments"
 CONFIG_PREFIXES = (TASK_CONFIG_PREFIX, EXPERIMENT_CONFIG_PREFIX)
 # TODO(vividf): drop this comment block together with the tasks/ family (design doc Q5).
 # One command name, one implementation per config family, dispatched by config prefix:
@@ -153,92 +158,6 @@ def main_callback(
     if version_flag:
         typer.echo(f"autoware-ml {version('autoware-ml')}")
         raise typer.Exit()
-
-
-def complete_task_config(incomplete: str) -> list[str]:
-    """Complete task config names and config file paths.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates for bundled task configs and YAML config paths.
-    """
-    return complete_config_value(incomplete, TASK_CONFIG_PREFIX)
-
-
-def complete_experiment_config(incomplete: str) -> list[str]:
-    """Complete experiment config names and config file paths.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates for bundled experiment configs and YAML config paths.
-    """
-    return complete_config_value(incomplete, EXPERIMENT_CONFIG_PREFIX)
-
-
-def complete_checkpoint_path(incomplete: str) -> list[str]:
-    """Complete checkpoint file paths.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates limited to checkpoint files.
-    """
-    return complete_path_value(incomplete, file_suffixes=(".ckpt",))
-
-
-def complete_directory_path(incomplete: str) -> list[str]:
-    """Complete directory paths.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates limited to directories.
-    """
-    return complete_path_value(incomplete, directories_only=True)
-
-
-def complete_any_path(incomplete: str) -> list[str]:
-    """Complete generic filesystem paths.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates for files and directories.
-    """
-    return complete_path_value(incomplete)
-
-
-def complete_session_command(ctx: click.Context, incomplete: str) -> list[str]:
-    """Complete commands forwarded through ``session start``.
-
-    Args:
-        ctx: Typer shell-completion context with parsed parameters.
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates for the forwarded command line.
-    """
-    command_args = list(ctx.params.get("command_args", ()))
-    return complete_session_command_value(command_args, incomplete)
-
-
-def complete_session_name(incomplete: str) -> list[str]:
-    """Complete managed session names.
-
-    Args:
-        incomplete: Current completion prefix entered by the user.
-
-    Returns:
-        Completion candidates for managed session names.
-    """
-    return complete_session_name_value(incomplete)
 
 
 def resolve_config_prefix(config_name: str, default_prefix: str) -> str:
