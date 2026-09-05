@@ -1,0 +1,99 @@
+# @package segmentation3d
+#
+# The T4 lidarseg label space the deployed PTv3 checkpoints were trained with
+# (mlruns/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2, 2026-08-10): 20 classes.
+#
+# Masks on disk store per-dataset *category indices*, which only mean something through
+# that dataset's own category table; `class_mapping` bridges raw category name to
+# training label, and a category missing from it is ignored rather than silently folded
+# into class 0.
+#
+# Note this is NOT the label space of `configs/datasets/t4dataset/segmentation3d.yaml`
+# (15 classes, used by the legacy `tasks/` family) — a label space belongs to the
+# checkpoint that learned it, so the two coexist.
+
+ignore_index: -1
+
+num_classes: 20
+
+# Index order IS the training label; also the metric suite's class names.
+class_names:
+  - car
+  - truck
+  - bus
+  - train
+  - motorcycle
+  - bicycle
+  - pedestrian
+  - animal
+  - barrier
+  - traffic_cone
+  - debris
+  - bicycle_rack
+  - vehicle_extension
+  - drivable_flat
+  - non_drivable_flat
+  - vegetation
+  - building
+  - vertical_thin
+  - static_clutter
+  - noise
+
+class_mapping:
+  car: 0 # car
+  forklift: 0 # car
+  kart: 0 # car
+  other_vehicle: 0 # car
+  police_car: 0 # car
+  ambulance: 0 # car
+  emergency_vehicle: 0 # car
+  truck: 1 # truck
+  trailer: 1 # truck
+  semi_trailer: 1 # truck
+  tractor_unit: 1 # truck
+  construction_vehicle: 1 # truck
+  fire_truck: 1 # truck
+  bus: 2 # bus
+  train: 3 # train
+  motorcycle: 4 # motorcycle
+  bicycle: 5 # bicycle
+  pedestrian: 6 # pedestrian
+  personal_mobility: 6 # pedestrian
+  stroller: 6 # pedestrian
+  animal: 7 # animal
+  barrier: 8 # barrier
+  construction_sign: 8 # barrier
+  traffic_cone: 9 # traffic_cone
+  debris: 10 # debris
+  pushable_pullable: 10 # debris
+  bicycle_rack: 11 # bicycle_rack
+  vehicle_protruding_object: 12 # vehicle_extension
+  open_door: 12 # vehicle_extension
+  vehicle_extension: 12 # vehicle_extension
+  solid_stuff: 18 # static_clutter
+  other_stuff: 18 # static_clutter
+  static_clutter: 18 # static_clutter
+  drivable_surface: 13 # drivable_flat
+  drainage: 13 # drivable_flat
+  driveable_flat: 13 # drivable_flat
+  sidewalk: 14 # non_drivable_flat
+  other_flat_surface: 14 # non_drivable_flat
+  high_curb: 14 # non_drivable_flat
+  low_curb: 14 # non_drivable_flat
+  non_driveable_flat: 14 # non_drivable_flat
+  vegetation: 15 # vegetation
+  building: 16 # building
+  manmade: 16 # building
+  pole: 17 # vertical_thin
+  bollard: 17 # vertical_thin
+  traffic_light: 17 # vertical_thin
+  traffic_sign: 17 # vertical_thin
+  flag: 17 # vertical_thin
+  vertical_thin: 17 # vertical_thin
+  noise: 19 # noise
+  ghost_point: 19 # noise
+  background: ${segmentation3d.ignore_index}
+  ego_vehicle: ${segmentation3d.ignore_index}
+  out_of_sync: ${segmentation3d.ignore_index}
+  unpainted: ${segmentation3d.ignore_index}
+  ignored: ${segmentation3d.ignore_index}

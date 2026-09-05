@@ -1,0 +1,7 @@
+defaults:
+  - default_segmentation3d_test_dataset
+
+split_type:
+  _target_: autoware_ml.types.dataset.SplitType
+  _convert_: all
+  _args_: [predict]

@@ -9,7 +9,10 @@ from torch import Tensor
 from autoware_ml.datamodule.multi_task.dataclasses.detection3d import (
     Detection3DGTBatch,
 )
-from autoware_ml.datamodule.multi_task.dataclasses.segmentation3d import Segmentation3DGTSample
+from autoware_ml.datamodule.multi_task.dataclasses.segmentation3d import (
+    Segmentation3DGTBatch,
+    Segmentation3DGTSample,
+)
 from autoware_ml.datamodule.multi_task.dataclasses.transformation import LiDARTransformationSample
 from autoware_ml.geometry.bbox_3d.base_bbox3d import BaseBBoxes3D
 from autoware_ml.geometry.points.base_points import BasePoints
@@ -129,7 +132,7 @@ class MultiTaskGTBatch(NamedTuple):
     # 3D branch
     point_cloud_gt_batch: PointCloudGTBatch | None
     detection3d_gt_batch: Detection3DGTBatch | None
-    # TODO (Kok Seang): 3D segmentation
+    segmentation3d_gt_batch: Segmentation3DGTBatch | None = None
 
     # Summed io_processing_time of every sample collated into this batch.
     io_processing_time: float = 0.0
@@ -148,6 +151,11 @@ class MultiTaskGTBatch(NamedTuple):
             point_cloud_gt_batch=self.point_cloud_gt_batch.to_device(device)
             if self.point_cloud_gt_batch is not None
             else None,
+            segmentation3d_gt_batch=(
+                self.segmentation3d_gt_batch.to_device(device)
+                if self.segmentation3d_gt_batch is not None
+                else None
+            ),
             detection3d_gt_batch=self.detection3d_gt_batch.to_device(device)
             if self.detection3d_gt_batch is not None
             else None,
@@ -234,6 +242,31 @@ class MultiTaskGTBatch(NamedTuple):
         return detection3d_gt_batch
 
     @staticmethod
+    def collate_segmentation3d_gt_samples(
+        gt_samples: Sequence[MultiTaskGTSample],
+    ) -> Segmentation3DGTBatch | None:
+        """
+        Collate a sequence of segmentation3d GT samples into a Segmentation3DGTBatch.
+
+        Args:
+          gt_samples: Sequence of MultiTaskGTSample to be collated.
+
+        Returns:
+          Segmentation3DGTBatch: Collated segmentation3d GT batch, or None when the
+            samples carry no segmentation GT.
+        """
+        if len(gt_samples) == 0 or gt_samples[0].segmentation3d_gt_sample is None:
+            return None
+
+        segmentation3d_gt_samples = []
+        for sample in gt_samples:
+            if sample.segmentation3d_gt_sample is None:
+                raise ValueError("All samples must have segmentation3d_gt_sample for collating.")
+            segmentation3d_gt_samples.append(sample.segmentation3d_gt_sample)
+
+        return Segmentation3DGTBatch.collate_gt_samples(segmentation3d_gt_samples)
+
+    @staticmethod
     def collate_gt_samples(
         gt_samples: Sequence[MultiTaskGTSample], max_num_3d_gt_bboxes: int
     ) -> MultiTaskGTBatch:
@@ -254,8 +287,12 @@ class MultiTaskGTBatch(NamedTuple):
             gt_samples=gt_samples, max_num_3d_gt_bboxes=max_num_3d_gt_bboxes
         )
 
+        # Collate segmentation3d GT batch
+        segmentation3d_gt_batch = MultiTaskGTBatch.collate_segmentation3d_gt_samples(gt_samples)
+
         return MultiTaskGTBatch(
             point_cloud_gt_batch=point_cloud_gt_batch,
             detection3d_gt_batch=detection3d_gt_batch,
+            segmentation3d_gt_batch=segmentation3d_gt_batch,
             io_processing_time=sum(sample.io_processing_time for sample in gt_samples),
         )
