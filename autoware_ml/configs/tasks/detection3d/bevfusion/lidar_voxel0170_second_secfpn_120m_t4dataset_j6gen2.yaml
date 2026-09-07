@@ -116,6 +116,9 @@ model:
     head_hidden_channels: 64
     norm_eps: 1.0e-5
     norm_momentum: 0.1
+    # TODO(vividf): remove once BEVFusion is retrained natively (AWML reference
+    # checkpoint no longer needed).
+    shared_conv_norm_act: false
     nms_type: circle
     nms_min_radius: 0.5
     nms_groups:
