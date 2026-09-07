@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, InstanceOf
 
 from autoware_ml.datamodule.multi_task.dataclasses.multi_task_samples import MultiTaskGTBatch
+from autoware_ml.dataclasses.points_data import PointsData
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
 
 
@@ -18,6 +19,7 @@ class MultiTaskBatchInputs(BaseModel):
 
     voxels_data: VoxelsData | None
 
-    # TODO(Kok Seang): Add input features for 3D segmentation model.
+    # Serialization-based models (PTv3) consume grid-quantized points rather than voxels.
+    points_data: PointsData | None = None
 
     # TODO(Kok Seang): Add input features for 2D detection/segmentation model.

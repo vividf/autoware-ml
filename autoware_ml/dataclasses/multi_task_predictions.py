@@ -9,20 +9,25 @@ from pydantic import BaseModel, ConfigDict
 import torch
 
 from autoware_ml.dataclasses.detection3d.predictions import Detection3DSamplePredictions
+from autoware_ml.dataclasses.segmentation3d.predictions import Segmentation3DPredictions
 
 
 class MultiTaskPredictions(BaseModel):
     """
     Dataclass to save decoded predictions from multi-task models.
 
+    One slot per task, mirroring :class:`MultiTaskOutputs`.
+
     Attributes:
-      detection_3d_predictions: Decoded predictions from a 3D detection task.
+      detection3d_predictions: Decoded predictions from a 3D detection task.
+      segmentation3d_predictions: Decoded predictions from a 3D segmentation task.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, arbitrary_types_allowed=True)
 
     # Decoded predictions across samples.
     detection3d_predictions: Sequence[Detection3DSamplePredictions] | None
+    segmentation3d_predictions: Segmentation3DPredictions | None = None
 
     # TODO (Kok Seang): Add predictions for other tasks in the future.
 
