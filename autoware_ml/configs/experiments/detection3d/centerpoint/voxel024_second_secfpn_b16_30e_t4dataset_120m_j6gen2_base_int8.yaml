@@ -1,0 +1,64 @@
+# @package _global_
+# INT8 (Q/DQ explicit quantization) variant of the j6gen2_base CenterPoint experiment.
+#
+# Produce the quantized checkpoint, then deploy it (export + verify + evaluate). The
+# checkpoint describes its own quantization, so deploy/test read no quantization config:
+#
+#   autoware-ml quantize \
+#     --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8 \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy \
+#     --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8 \
+#     --weights <ptq.ckpt produced by the quantize run>
+#
+# Engines build strongly typed: INT8 comes from the Q/DQ nodes baked into the
+# exported ONNX (explicit quantization); the non-quantized stages inherit
+# deploy.onnx.precision: fp16 from base.yaml (AutoCast).
+defaults:
+  - voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base
+  - _self_
+
+experiment_name: voxel024_second_secfpn_b16_30e_t4dataset_120m_int8
+
+# The INT8 release variants exist to produce deployment artifacts and numbers:
+# build the engine and run verification + evaluation by default (these stay
+# opt-in in base.yaml).
+deploy:
+  tensorrt:
+    enabled: true
+  verification:
+    enabled: true
+    # INT8 raw-logit diffs between backends are expected while metrics stay equal, so the
+    # tolerances are empirically calibrated per scenario (whole-list override: Hydra lists replace).
+    # Both gates measured on the blocks.0-skipped tree with the island-aware FP16 cast
+    # (un-quantized regions run FP16, islands stay FP32): pytorch fp32 fake-quant vs
+    # fp16+QDQ ONNX — observed 2.38 on vel logits, gate 3; onnx vs tensorrt — observed
+    # 13.09 on vel logits, gate 16. mAP equal across backends at both observations.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 3.0 }
+      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 16.0 }
+  evaluation:
+    enabled: true
+
+quantization:
+  enabled: true
+  mode: ptq
+  fuse_bn: true
+  default_precision: int8
+  # The PFN stays FP16: pillar features are latency-cheap and quantizing them buys nothing.
+  # The first SECOND stage also stays FP16 — the AWML 2.6 quant release recipe
+  # (deploy_config_int8_second_2_6_quant_release.py: keep_fp16=["pts_backbone.blocks.0"],
+  # "was skip_backbone_stages=[0]") skips stage 0 because quantizing it costs accuracy.
+  # The migration had dropped this entry; measured on 100 samples (TRT mAP): 0.4450 with
+  # blocks.0 quantized vs 0.4576 skipped (FP16 baseline band 0.4491-0.4516).
+  skip_quantize:
+    - pts_voxel_encoder
+    - pts_backbone.blocks.0
+  # Reference recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+  # `calibration: {method: mse|entropy|percentile|max|smoothquant}` picks the amax
+  # algorithm (default mse); see CalibrationConfig.
+  ptq:
+    calibrate_samples: 400
+    batch_size: 1
+    calib_seed: 0
+    calib_shuffle: false
