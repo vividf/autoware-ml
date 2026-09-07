@@ -1,0 +1,255 @@
+# @package _global_
+defaults:
+  - base
+  - /database@database: t4dataset/t4dataset_j6gen2_semaseg_base
+  - /datamodule@datamodule: t4dataset/default_segmentation3d_datamodule
+  - /metrics/t4dataset@metric_ranges: default_120m_metric_ranges
+  - _self_
+
+batch_size: 16
+num_workers: 8
+
+experiment_group_name: ptv3/${database.version}/j6gen2_base
+experiment_name: voxel012_122m_t4dataset
+point_cloud_range: [-122.88, -122.88, -3.0, 122.88, 122.88, 5.0]
+grid_size: 0.12
+
+trainer:
+  max_epochs: 50
+  check_val_every_n_epoch: 1
+
+optimizer:
+  lr: 0.002
+  weight_decay: 0.005
+
+model:
+  optimizer_group_overrides:
+    block:
+      lr: 0.0002
+  scheduler:
+    # One entry per optimizer group, in build_optimizer_groups() order (default, block).
+    max_lr: [0.002, 0.0002]
+
+deploy:
+  # TensorRT optimization profiles. Every PTv3 graph input is indexed by a point count
+  # that varies per frame, so these are a measured property of the data at this grid
+  # size, not a number anyone can write down: min/opt/max come from running the torch
+  # stage pipeline over 30 test frames (`# measured` records the observed range) with
+  # 0.5x / 1.5x headroom, because an engine must accept a frame denser than any seen.
+  stages:
+    encoder:
+      tensorrt:
+        input_shapes:
+          grid_coord:
+            min_shape: [63026, 3]
+            opt_shape: [130565, 3]
+            max_shape: [202619, 3]
+            # measured [126052, 3] .. [135079, 3]
+          feat:
+            min_shape: [63026, 4]
+            opt_shape: [130565, 4]
+            max_shape: [202619, 4]
+            # measured [126052, 4] .. [135079, 4]
+          serialized_code:
+            min_shape: [2, 63026]
+            opt_shape: [2, 130565]
+            max_shape: [2, 202619]
+            # measured [2, 126052] .. [2, 135079]
+          serialized_pooling_0_indices:
+            min_shape: [63026]
+            opt_shape: [130565]
+            max_shape: [202619]
+            # measured [126052] .. [135079]
+          serialized_pooling_0_indptr:
+            min_shape: [30005]
+            opt_shape: [63296]
+            max_shape: [99874]
+            # measured [60011] .. [66582]
+          serialized_pooling_0_head_indices:
+            min_shape: [30005]
+            opt_shape: [63295]
+            max_shape: [99872]
+            # measured [60010] .. [66581]
+          serialized_pooling_0_grid_coord:
+            min_shape: [30005, 3]
+            opt_shape: [63295, 3]
+            max_shape: [99872, 3]
+            # measured [60010, 3] .. [66581, 3]
+          serialized_pooling_0_serialized_order:
+            min_shape: [2, 30005]
+            opt_shape: [2, 63295]
+            max_shape: [2, 99872]
+            # measured [2, 60010] .. [2, 66581]
+          serialized_pooling_0_serialized_inverse:
+            min_shape: [2, 30005]
+            opt_shape: [2, 63295]
+            max_shape: [2, 99872]
+            # measured [2, 60010] .. [2, 66581]
+          serialized_pooling_1_indices:
+            min_shape: [30005]
+            opt_shape: [63295]
+            max_shape: [99872]
+            # measured [60010] .. [66581]
+          serialized_pooling_1_indptr:
+            min_shape: [12195]
+            opt_shape: [26219]
+            max_shape: [42073]
+            # measured [24390] .. [28048]
+          serialized_pooling_1_head_indices:
+            min_shape: [12194]
+            opt_shape: [26218]
+            max_shape: [42071]
+            # measured [24389] .. [28047]
+          serialized_pooling_1_grid_coord:
+            min_shape: [12194, 3]
+            opt_shape: [26218, 3]
+            max_shape: [42071, 3]
+            # measured [24389, 3] .. [28047, 3]
+          serialized_pooling_1_serialized_order:
+            min_shape: [2, 12194]
+            opt_shape: [2, 26218]
+            max_shape: [2, 42071]
+            # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_1_serialized_inverse:
+            min_shape: [2, 12194]
+            opt_shape: [2, 26218]
+            max_shape: [2, 42071]
+            # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_2_indices:
+            min_shape: [12194]
+            opt_shape: [26218]
+            max_shape: [42071]
+            # measured [24389] .. [28047]
+          serialized_pooling_2_indptr:
+            min_shape: [4669]
+            opt_shape: [10190]
+            max_shape: [16564]
+            # measured [9338] .. [11042]
+          serialized_pooling_2_head_indices:
+            min_shape: [4668]
+            opt_shape: [10189]
+            max_shape: [16562]
+            # measured [9337] .. [11041]
+          serialized_pooling_2_grid_coord:
+            min_shape: [4668, 3]
+            opt_shape: [10189, 3]
+            max_shape: [16562, 3]
+            # measured [9337, 3] .. [11041, 3]
+          serialized_pooling_2_serialized_order:
+            min_shape: [2, 4668]
+            opt_shape: [2, 10189]
+            max_shape: [2, 16562]
+            # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_2_serialized_inverse:
+            min_shape: [2, 4668]
+            opt_shape: [2, 10189]
+            max_shape: [2, 16562]
+            # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_3_indices:
+            min_shape: [4668]
+            opt_shape: [10189]
+            max_shape: [16562]
+            # measured [9337] .. [11041]
+          serialized_pooling_3_indptr:
+            min_shape: [1734]
+            opt_shape: [3847]
+            max_shape: [6341]
+            # measured [3468] .. [4227]
+          serialized_pooling_3_head_indices:
+            min_shape: [1733]
+            opt_shape: [3846]
+            max_shape: [6340]
+            # measured [3467] .. [4226]
+          serialized_pooling_3_grid_coord:
+            min_shape: [1733, 3]
+            opt_shape: [3846, 3]
+            max_shape: [6340, 3]
+            # measured [3467, 3] .. [4226, 3]
+          serialized_pooling_3_serialized_order:
+            min_shape: [2, 1733]
+            opt_shape: [2, 3846]
+            max_shape: [2, 6340]
+            # measured [2, 3467] .. [2, 4226]
+          serialized_pooling_3_serialized_inverse:
+            min_shape: [2, 1733]
+            opt_shape: [2, 3846]
+            max_shape: [2, 6340]
+            # measured [2, 3467] .. [2, 4226]
+    seg3d_head:
+      tensorrt:
+        input_shapes:
+          point_feat_0:
+            min_shape: [63026, 32]
+            opt_shape: [130565, 32]
+            max_shape: [202619, 32]
+            # measured [126052, 32] .. [135079, 32]
+          point_feat_1:
+            min_shape: [30005, 64]
+            opt_shape: [63295, 64]
+            max_shape: [99872, 64]
+            # measured [60010, 64] .. [66581, 64]
+          point_feat_2:
+            min_shape: [12194, 128]
+            opt_shape: [26218, 128]
+            max_shape: [42071, 128]
+            # measured [24389, 128] .. [28047, 128]
+          point_feat_3:
+            min_shape: [4668, 256]
+            opt_shape: [10189, 256]
+            max_shape: [16562, 256]
+            # measured [9337, 256] .. [11041, 256]
+          point_feat_4:
+            min_shape: [1733, 512]
+            opt_shape: [3846, 512]
+            max_shape: [6340, 512]
+            # measured [3467, 512] .. [4226, 512]
+          pooling_cluster_0:
+            min_shape: [63026]
+            opt_shape: [130565]
+            max_shape: [202619]
+            # measured [126052] .. [135079]
+          pooling_cluster_1:
+            min_shape: [30005]
+            opt_shape: [63295]
+            max_shape: [99872]
+            # measured [60010] .. [66581]
+          pooling_cluster_2:
+            min_shape: [12194]
+            opt_shape: [26218]
+            max_shape: [42071]
+            # measured [24389] .. [28047]
+          pooling_cluster_3:
+            min_shape: [4668]
+            opt_shape: [10189]
+            max_shape: [16562]
+            # measured [9337] .. [11041]
+          serialized_pooling_1_serialized_order:
+            min_shape: [2, 12194]
+            opt_shape: [2, 26218]
+            max_shape: [2, 42071]
+            # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_1_serialized_inverse:
+            min_shape: [2, 12194]
+            opt_shape: [2, 26218]
+            max_shape: [2, 42071]
+            # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_1_grid_coord:
+            min_shape: [12194, 3]
+            opt_shape: [26218, 3]
+            max_shape: [42071, 3]
+            # measured [24389, 3] .. [28047, 3]
+          serialized_pooling_2_serialized_order:
+            min_shape: [2, 4668]
+            opt_shape: [2, 10189]
+            max_shape: [2, 16562]
+            # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_2_serialized_inverse:
+            min_shape: [2, 4668]
+            opt_shape: [2, 10189]
+            max_shape: [2, 16562]
+            # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_2_grid_coord:
+            min_shape: [4668, 3]
+            opt_shape: [10189, 3]
+            max_shape: [16562, 3]
+            # measured [9337, 3] .. [11041, 3]
