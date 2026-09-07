@@ -1,0 +1,15 @@
+_target_: autoware_ml.databases.t4dataset.t4scenarios.T4Scenarios
+_convert_: all
+
+# Root path where the scenario yaml files are stored. Point-wise semantic labels live in
+# their own T4 datasets (db_j6gen2_semaseg_*), whose scenario lists are not part of
+# perception-devops' detection3d annotation set.
+scenario_root_path: ${working_dir}/dataset_annotation/t4dataset/segmentation3d/
+
+dataset_params:
+  - _target_: autoware_ml.databases.scenarios.DatasetParams
+    _convert_: all
+    dataset_name: db_j6gen2_semaseg_v1
+    # Point-wise labels annotate the keyframe only, so no sweeps are accumulated.
+    max_sweeps: 0
+    sample_steps: 1
