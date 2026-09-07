@@ -187,6 +187,7 @@ class PTv3BaseModel(BaseModel):
         return self.encoder.prepare_for_export(self.EXPORT_ORDER)
 
 
+@dataclass(frozen=True)
 class PTv3ExportContext:
     """Shared front half of every split PTv3 export.
 
