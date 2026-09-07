@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
+import logging
 
 import spconv.pytorch as spconv
 import torch
@@ -43,6 +44,8 @@ from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3
 # would be swapped in at ONNX-export time.
 SubMConv3d = spconv.SubMConv3d
 SparseConv3d = spconv.SparseConv3d
+
+logger = logging.getLogger(__name__)
 
 
 def _copy_sparse_convolution_weights(
@@ -119,10 +122,16 @@ def _fuse_sparse_convolution_bn(module: nn.Module) -> int:
     Returns:
         Number of fused pairs.
     """
+    # Local import: spconv.pytorch.quantization pulls in spconv's quantization stack,
+    # which nothing else in this module needs and training never touches.
     from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
 
     fused = 0
     for parent in list(module.modules()):
+        # `children` is a snapshot, so replacing a pair's members while scanning is safe:
+        # the folded convolution takes the left slot and an Identity the right one, and a
+        # folded convolution is never followed by another BatchNorm, so the overlapping
+        # pairs this walk produces cannot fold anything twice.
         children = list(parent.named_children())
         for (left_name, left), (right_name, right) in zip(children, children[1:]):
             if isinstance(left, SparseConvolutionBase) and isinstance(right, nn.BatchNorm1d):
@@ -346,7 +355,21 @@ class SparseEncoder(nn.Module):
         encoder = deepcopy(self).eval()
         # Fold first: the fold gives each convolution a bias, which the wrapper
         # below has to be constructed with.
-        _fuse_sparse_convolution_bn(encoder)
+        fused = _fuse_sparse_convolution_bn(encoder)
+        # The fold pairs a convolution with the BatchNorm declared *next to* it. Insert
+        # anything between the two — or hang the norm one container deeper — and the pair
+        # stops matching, the fold silently skips it, and the exported graph keeps a
+        # BatchNormalization node no plugin will absorb. The invariant is cheap to state
+        # here, so state it here rather than only in the test.
+        remaining = [name for name, m in encoder.named_modules() if isinstance(m, nn.BatchNorm1d)]
+        if remaining:
+            raise RuntimeError(
+                f"{len(remaining)} BatchNorm1d layer(s) survived the export fold "
+                f"({fused} pair(s) folded): {remaining[:5]}. The deployed sparse graph must "
+                "carry no BatchNormalization node — a convolution and its norm must be "
+                "adjacent children of the same module for the fold to pair them."
+            )
+        logger.info("Folded %d sparse Conv-BN pair(s) into the export copy.", fused)
         _replace_sparse_convolutions(encoder, self.export_do_sort)
         # eval() again: the freshly constructed export wrappers start in train
         # mode and are inference-only.

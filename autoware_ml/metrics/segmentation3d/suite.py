@@ -25,7 +25,7 @@ class Segmentation3DMetricSuite(MetricSuite[ConfusionState]):
 
     prefix = "seg3d"
     headline_metrics = ("mIoU", "fwIoU")
-    _required_keys = ("seg_pred_labels", "seg_target_labels", "seg_coord")
+    required_keys = ("seg_pred_labels", "seg_target_labels", "seg_coord")
 
     def __init__(
         self,

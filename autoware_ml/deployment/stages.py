@@ -84,10 +84,6 @@ class TorchStage:
     name: str
     run: Callable[[StageContext], Mapping[str, Any]]
 
-    @property
-    def exportable(self) -> bool:
-        return False
-
 
 @dataclass(frozen=True)
 class GraphStage:
@@ -127,10 +123,6 @@ class GraphStage:
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
     onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
-    @property
-    def exportable(self) -> bool:
-        return True
-
     def __post_init__(self) -> None:
         if not self.inputs or not self.outputs:
             raise ValueError(f"GraphStage {self.name!r} must declare inputs and outputs.")
@@ -149,9 +141,14 @@ Stage = TorchStage | GraphStage
 def validate_stages(stages: Sequence[Stage]) -> tuple[Stage, ...]:
     """Check a stage declaration and return it as a tuple.
 
+    The dataflow check is only as strong as the declaration allows: a ``TorchStage``
+    declares no outputs, so once one appears the context may hold anything and the check
+    stops. Names read after that point are caught at run time instead, by
+    :meth:`StageContext.__getitem__`, whose error names what *is* available.
+
     Raises:
         ValueError: On duplicate names, no exportable stage, a graph stage reading a
-            name no earlier graph stage wrote and no glue stage precedes it, or a final
+            name no earlier graph stage wrote while no glue stage precedes it, or a final
             graph stage without ``output_fields``.
     """
     stages = tuple(stages)
@@ -159,6 +156,21 @@ def validate_stages(stages: Sequence[Stage]) -> tuple[Stage, ...]:
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"Duplicate stage names: {duplicates}.")
+    written: set[str] = set()
+    glue_seen = False
+    for stage in stages:
+        if isinstance(stage, TorchStage):
+            glue_seen = True
+            continue
+        if not glue_seen:
+            missing = [name for name in stage.inputs if name not in written]
+            if missing:
+                raise ValueError(
+                    f"GraphStage {stage.name!r} reads {missing}, which no earlier stage "
+                    f"produces (available: {sorted(written) or 'nothing'}). Graph inputs come "
+                    "from an earlier graph stage's outputs or from a glue TorchStage."
+                )
+        written.update(stage.outputs)
     graph = graph_stages(stages)
     if not graph:
         raise ValueError("A stage graph needs at least one exportable GraphStage.")

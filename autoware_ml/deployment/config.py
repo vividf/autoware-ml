@@ -147,8 +147,13 @@ class StageOnnxConfig:
     #: stages need different precisions (one numerically fragile head kept FP32, say).
     #: ``None`` inherits the global setting.
     precision: OnnxPrecision | None = None
+    #: Inference parameters stamped into this stage's ONNX ``metadata_props`` (class
+    #: lists, point-cloud range, voxel size — whatever the runtime consuming the artifact
+    #: needs). Each value is stamped as a JSON document, so the consumer needs no side
+    #: channel; keys reserved by the stamper (``release``, ``module``, ...) are rejected.
+    metainfo: Mapping[str, Any] | None = None
 
-    KNOWN_KEYS = frozenset({"dynamic_axes", "dynamic_shapes", "precision"})
+    KNOWN_KEYS = frozenset({"dynamic_axes", "dynamic_shapes", "precision", "metainfo"})
 
     @classmethod
     def from_dict(cls, raw: Any, stage: str) -> StageOnnxConfig:
@@ -162,10 +167,14 @@ class StageOnnxConfig:
                 f"deploy.stages.{stage}.onnx.precision={raw_precision!r} — valid values: "
                 f"{[p.value for p in OnnxPrecision]}."
             ) from None
+        raw_metainfo = raw.get("metainfo")
         return cls(
             dynamic_axes=raw.get("dynamic_axes"),
             dynamic_shapes=raw.get("dynamic_shapes"),
             precision=precision,
+            metainfo=_mapping(raw_metainfo, f"deploy.stages.{stage}.onnx.metainfo")
+            if raw_metainfo is not None
+            else None,
         )
 
 
@@ -302,9 +311,7 @@ class EvaluationConfig:
         backends = _mapping(raw.get("backends"), "deploy.evaluation.backends")
         split = str(raw.get("split", "test"))
         if split not in ("test", "val"):
-            raise ValueError(
-                f"deploy.evaluation.split={split!r} — valid values: 'test', 'val'."
-            )
+            raise ValueError(f"deploy.evaluation.split={split!r} — valid values: 'test', 'val'.")
         return cls(
             enabled=bool(raw.get("enabled", False)),
             split=split,

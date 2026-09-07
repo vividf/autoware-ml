@@ -31,7 +31,7 @@ class Detection3DMetricSuite(MetricSuite[DetectionState]):
 
     prefix = "det3d"
     headline_metrics = ("mAP", "NDS")
-    _required_keys = ("predictions", "gt_boxes", "gt_labels")
+    required_keys = ("predictions", "gt_boxes", "gt_labels")
 
     def __init__(
         self,

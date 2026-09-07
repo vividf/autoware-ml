@@ -49,7 +49,7 @@ from autoware_ml.builders.model_builder import (
 )
 from autoware_ml.datamodule.multi_task.multi_task_data_module import MultiTaskDataModule
 from autoware_ml.deployment.config import DeployConfig
-from autoware_ml.deployment.export import available_backends, export_stages
+from autoware_ml.deployment.export import ExportProvenance, available_backends, export_stages
 from autoware_ml.deployment.pipeline import PipelineCache
 from autoware_ml.deployment.stages import Stage
 from autoware_ml.deployment.verification import BackendVerifier
@@ -69,7 +69,8 @@ from autoware_ml.utils.deploy import (
     resolve_export_specs,
     should_modify_graph,
 )
-from autoware_ml.utils.mlflow_helpers import resolve_deploy_lineage
+from autoware_ml.utils.mlflow_helpers import get_git_sha, resolve_deploy_lineage
+from autoware_ml.utils.onnx_meta import release_to_model_version
 from autoware_ml.utils.runtime import (
     EXPERIMENT_CONFIG_NAME_PREFIX,
     configure_torch_runtime,
@@ -91,6 +92,7 @@ def export(
     datamodule: MultiTaskDataModule,
     model: MultiTaskBaseModel,
     device: torch.device,
+    provenance: ExportProvenance,
 ) -> None:
     """Stage 1: export every exportable stage (skipped when both exporters are disabled)."""
     if not (deploy_cfg.onnx.enabled or deploy_cfg.tensorrt.enabled):
@@ -101,7 +103,9 @@ def export(
         return
     batch = next(iter(datamodule.predict_dataloader()))
     batch_inputs = model.preprocess_batch(batch, device)
-    artifacts = export_stages(stages, batch_inputs, deploy_cfg, output_dir, device)
+    artifacts = export_stages(
+        stages, batch_inputs, deploy_cfg, output_dir, device, provenance=provenance
+    )
     for stage, path in artifacts.onnx.items():
         logger.info("ONNX  [%s]: %s", stage, path)
     for stage, path in artifacts.engines.items():
@@ -220,6 +224,16 @@ def main(cfg: DictConfig):
     if not is_legacy_deploy_config(cfg.deploy):
         deploy_cfg = DeployConfig.from_dict(OmegaConf.to_container(cfg.deploy, resolve=True))
 
+    release = cfg.get("release", None)
+    # A malformed release must fail here, not after an hour of export.
+    release_to_model_version(release)
+    if release is None:
+        logger.warning(
+            "Deploying without --release — artifacts are stamped 'unversioned' "
+            "(model_version 0). If this model may reach production, re-run deploy with "
+            "an explicit --release vMAJOR.MINOR.PATCH."
+        )
+
     log_configuration(cfg)
     config_name = HydraConfig.get().job.config_name
     if config_name is None:
@@ -255,6 +269,7 @@ def main(cfg: DictConfig):
             cfg,
             deploy_cfg,
             config_name=config_name,
+            release=release,
             weights_path=weights_path,
             checkpoint_path=checkpoint_path,
             parent_run_id=parent_run_id,
@@ -337,6 +352,7 @@ def _run_deployment(
     deploy_cfg: DeployConfig | None,
     *,
     config_name: str,
+    release: str | None,
     weights_path,
     checkpoint_path,
     parent_run_id,
@@ -355,6 +371,14 @@ def _run_deployment(
 
     output_dir = cfg.get("experiment_run_dir", None)
     if run_context is not None:
+        if output_dir is not None and Path(output_dir) != run_context.exports_dir:
+            # Artifacts belong inside the run's directory; say so rather than silently
+            # writing somewhere the run does not record.
+            logger.warning(
+                "experiment_run_dir=%s is overridden by the MLflow run's exports dir %s.",
+                output_dir,
+                run_context.exports_dir,
+            )
         output_dir = str(run_context.exports_dir)
     if output_dir is None:
         raise ValueError(
@@ -399,7 +423,21 @@ def _run_deployment(
         )
         log_hyperparameters(cfg, trainer_logger)
 
-    export(deploy_cfg, stages, output_dir, datamodule, model, device)
+    export(
+        deploy_cfg,
+        stages,
+        output_dir,
+        datamodule,
+        model,
+        device,
+        ExportProvenance(
+            config_name=config_name,
+            release=release,
+            git_sha=get_git_sha(),
+            tracker="mlflow" if mlflow_client is not None else None,
+            run_id=run_context.run_id if run_context is not None else None,
+        ),
+    )
 
     available = available_backends(stages, output_dir)
     logger.info("Available backends: %s", sorted(b.value for b in available))

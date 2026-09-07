@@ -163,7 +163,7 @@ quantization:                             # read by `quantize` only
   enabled: true
   mode: ptq                               # ptq | qat  (a stage block under the wrong mode raises)
   fuse_bn: true
-  default_precision: int8                 # int8 is the only supported value today
+  default_precision: int8                 # int8 | fp8 (per-kind overrides: see `precision:`)
   skip_quantize: [pts_voxel_encoder]      # glob patterns, subtree match, zero-match warns
   calibration: mse                        # mse (default) | entropy | percentile | max | smoothquant;
                                           # or {method: percentile, percentile: 99.99} / {method: smoothquant, smoothquant_alpha: 0.5}

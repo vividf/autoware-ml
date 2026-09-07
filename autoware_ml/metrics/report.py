@@ -66,7 +66,7 @@ def check_required_keys(
         producer: Name of the model class, for the error message.
     """
     for suite in suites:
-        missing = [key for key in suite._required_keys if key not in eval_out]
+        missing = [key for key in suite.required_keys if key not in eval_out]
         if missing:
             raise ValueError(
                 f"Metric {type(suite).__name__!r} needs {missing}, not produced by "

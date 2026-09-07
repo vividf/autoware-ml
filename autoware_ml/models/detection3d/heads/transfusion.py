@@ -372,7 +372,7 @@ class TransFusionHead(nn.Module):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         shared_conv_norm_act: bool = True,
-        fuse_export_attention: bool = False,
+        fuse_export_attention: bool = True,
         use_bf16_cross_attention: bool = False,
     ) -> None:
         """Initialize the TransFusion detection head.
@@ -439,6 +439,12 @@ class TransFusionHead(nn.Module):
                 blocks TensorRT's Myelin MHA fusion (measured: fused 0.25 ms vs unfused
                 0.68 ms on the j6gen2 dense graph); the fused kernel handles softmax
                 numerics internally. Training is untouched (export copy only).
+                Defaults to ``True`` so a new experiment gets the fused kernel without
+                having to know about it. Set it ``False`` to keep the max-subtraction: it
+                is the numerical safety net for the case where Myelin does *not* match the
+                pattern (a TensorRT upgrade, a changed graph shape), where unfused FP16
+                attention without the max-sub can overflow. The deploy verification stage
+                is what would catch that.
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
         """

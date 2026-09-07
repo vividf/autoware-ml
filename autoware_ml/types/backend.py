@@ -44,5 +44,13 @@ class Backend(str, Enum):
 
     @property
     def artifact_suffix(self) -> str:
-        """File suffix of the exported artifact this backend runs (``''`` for PyTorch)."""
-        return {Backend.PYTORCH: "", Backend.ONNX: ".onnx", Backend.TENSORRT: ".engine"}[self]
+        """File suffix of the exported artifact this backend runs.
+
+        Raises:
+            ValueError: For ``PYTORCH``, which runs the model itself and has no artifact —
+                the same answer :func:`~autoware_ml.deployment.stages.artifact_path` gives
+                to the same question.
+        """
+        if self is Backend.PYTORCH:
+            raise ValueError("The pytorch backend has no exported artifact, so no suffix.")
+        return {Backend.ONNX: ".onnx", Backend.TENSORRT: ".engine"}[self]

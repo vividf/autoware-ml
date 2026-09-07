@@ -360,6 +360,14 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     )
                 )
 
+    # New casts are appended with an anchor to splice after (None = graph front).
+    inserted: list[tuple] = []
+
+    def make_cast(source: str, target: str, to, anchor_name) -> None:
+        inserted.append(
+            (anchor_name, helper.make_node("Cast", [source], [target], to=to, name=target))
+        )
+
     # --- 3. Pre-existing sea casts to FLOAT (int64 -> float glue) now target FLOAT16;
     # ones feeding an island float slot keep producing FP32 for it.
     island_float_inputs = set()
@@ -370,22 +378,35 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         for index, name in enumerate(node.input):
             if slots is None or index in slots:
                 island_float_inputs.add(name)
-    for node in graph.node:
+    for node in list(graph.node):
         if in_island(node) or node.op_type != "Cast":
             continue
-        if node.output[0] in island_float_inputs:
+        to_float = [a for a in node.attribute if a.name == "to" and a.i == TensorProto.FLOAT]
+        if not to_float:
             continue
-        for attribute in node.attribute:
-            if attribute.name == "to" and attribute.i == TensorProto.FLOAT:
+        produced = node.output[0]
+        if produced not in island_float_inputs:
+            for attribute in to_float:
                 attribute.i = TensorProto.FLOAT16
-
-    # New casts are appended with an anchor to splice after (None = graph front).
-    inserted: list[tuple] = []
-
-    def make_cast(source: str, target: str, to, anchor_name) -> None:
-        inserted.append(
-            (anchor_name, helper.make_node("Cast", [source], [target], to=to, name=target))
-        )
+            continue
+        sea_users = [n for n in consumers_of.get(produced, []) if not in_island(n)]
+        if not sea_users:
+            continue  # island-only consumer: the cast keeps producing FP32
+        # Amphibious glue cast: the island slot needs its FP32 and the sea needs FP16, so
+        # the cast splits the way an amphibious initializer does in step 1. Casting the
+        # int64 source twice (rather than chaining int64 -> FP32 -> FP16) keeps the sea
+        # copy exact for the same reason the FP32 copy is exact.
+        twin_name = produced + "__fp16"
+        if twin_name in node_by_name:
+            raise ValueError(
+                f"Cannot split amphibious cast {node.name!r}: {twin_name!r} already exists."
+            )
+        make_cast(node.input[0], twin_name, TensorProto.FLOAT16, node.name)
+        node_by_name[twin_name] = True
+        for user in sea_users:
+            for index, name in enumerate(user.input):
+                if name == produced:
+                    user.input[index] = twin_name
 
     # --- 4. FP32 graph inputs feed sea consumers through one FP16 cast (island
     # consumers keep reading the FP32 input directly).
@@ -403,6 +424,22 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     node.input[index] = cast_name
 
     graph_input_names = {i.name for i in graph.input}
+    # Declared element types, for edges whose dtype the slot table does not settle.
+    declared_type = {
+        info.name: info.type.tensor_type.elem_type
+        for info in list(graph.value_info) + list(graph.input) + list(graph.output)
+    }
+    # Names step 6 re-homes: an FP32 graph output produced by a sea node. Its public name
+    # will belong to a boundary cast spliced *after* the casts made here, so an island
+    # reading it must read the producer's internal FP16 tensor instead — otherwise the
+    # node order stops being topological and the ONNX loader rejects the graph.
+    resited_sea_outputs = {
+        output.name
+        for output in graph.output
+        if output.type.tensor_type.elem_type == TensorProto.FLOAT
+        and producer_of.get(output.name) is not None
+        and not in_island(producer_of[output.name])
+    }
 
     # --- 5. Island boundaries: a float edge entering an island from the sea gets one
     # FP32 cast; a float island output consumed by the sea gets one FP16 cast.
@@ -410,9 +447,25 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         if not in_island(node):
             continue
         slots = _ISLAND_FLOAT_INPUT_SLOTS.get(node.op_type)
+        if slots is None and node.op_type not in _QUANTIZE_OPS:
+            # Rule 3 admits any consumer of a DQ, including ops that take shape/index
+            # inputs (Expand, ScatterND, Pad, ...). Without a slot table every input is
+            # assumed float, and the dtype check below is what keeps an integer edge from
+            # being cast. Say so, so the table gets an entry rather than silent luck.
+            logger.debug(
+                "Island node %r (%s) has no float-input slot table; falling back to the "
+                "declared element types of its inputs.",
+                node.name,
+                node.op_type,
+            )
         for index, name in enumerate(node.input):
             if slots is not None and index not in slots:
                 continue
+            if slots is None and declared_type.get(name, TensorProto.FLOAT) not in (
+                TensorProto.FLOAT,
+                TensorProto.FLOAT16,
+            ):
+                continue  # integer / bool edge: casting it to FLOAT would break the graph
             source = producer_of.get(name)
             if source is not None and in_island(source):
                 continue  # island-internal edge: castless by construction
@@ -420,9 +473,10 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                 continue  # initializer: island copies stayed FP32
             if source is None and name in graph_input_names:
                 continue  # FP32 graph input read directly
+            cast_source = name + "__fp16" if name in resited_sea_outputs else name
             cast_name = name + "__fp32"
             if cast_name not in node_by_name:
-                make_cast(name, cast_name, TensorProto.FLOAT, source.name)
+                make_cast(cast_source, cast_name, TensorProto.FLOAT, source.name)
                 node_by_name[cast_name] = True
             node.input[index] = cast_name
         if node.op_type in _QUANTIZE_OPS:

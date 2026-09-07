@@ -48,8 +48,9 @@ deploy:
     # bakes that into the exported dense graph (engines build strongly typed).
     precision: fp16
   # Stage names come from BEVFusionLidarDetectionModel.build_stages() — the AWML
-  # split-deployment ABI: bevfusion_sparse (external libspconv ONNX; torch fallback
-  # on onnx/tensorrt backends until its exporter lands) and bevfusion_dense.
+  # split-deployment ABI: bevfusion_sparse (its ONNX carries autoware::ImplicitGemm
+  # plugin ops, so TensorRT runs it through the plugin library and only ONNX Runtime
+  # falls back to torch) and bevfusion_dense.
   stages:
     bevfusion_sparse:
       onnx:

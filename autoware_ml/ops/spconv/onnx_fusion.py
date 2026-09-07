@@ -128,7 +128,10 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
         del last
 
     if removed:
-        kept = [node for node in graph.node if node not in removed]
+        # Identity, not equality: `in` on a protobuf message compares by *value*, so two
+        # structurally identical nodes would remove each other.
+        removed_ids = {id(node) for node in removed}
+        kept = [node for node in graph.node if id(node) not in removed_ids]
         del graph.node[:]
         graph.node.extend(kept)
 
@@ -157,5 +160,23 @@ def fuse_sparse_graph(onnx_path: str | Path) -> Path:
             onnx_path.name,
             fused_biases,
             fused_activations,
+        )
+    # A plugin node still carrying five inputs was not folded. That is not an error — the
+    # bias Add and the ReLU stay standard ONNX ops, TensorRT builds them and the numbers
+    # are right — but it costs two extra kernels and an output round-trip per block, and
+    # the failure is otherwise invisible. Exporter or graph-shape changes show up here.
+    unfused = sum(
+        1
+        for node in model.graph.node
+        if _is_implicit_gemm(node) and len(node.input) == _INPUTS_WITHOUT_BIAS
+    )
+    if unfused:
+        logger.warning(
+            "Sparse fusion in %s: %d ImplicitGemm node(s) kept their bias Add outside the "
+            "plugin (%d folded). The graph is correct but slower than the fused form — the "
+            "exported bias/activation shape no longer matches what this pass expects.",
+            onnx_path.name,
+            unfused,
+            fused_biases,
         )
     return onnx_path

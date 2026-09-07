@@ -665,7 +665,7 @@ def test_transfusion_coder_rejects_mismatched_threshold_length() -> None:
 def test_fuse_export_attention_emits_fusion_pattern_without_bf16(tmp_path: Path) -> None:
     """fuse_export_attention drops the max-subtraction (the Myelin MHA-fusion blocker)
     while keeping the trace dtype; bf16 stays opt-in via use_bf16_cross_attention."""
-    head = _build_head(fuse_export_attention=True).prepare_for_export()
+    head = _build_head().prepare_for_export()  # fused is the default
     cross = head.decoder[0].cross_attn
     assert isinstance(cross, ExportableMultiheadAttention)
     assert cross.fuse_attention and not cross.use_bf16
@@ -682,9 +682,14 @@ def test_fuse_export_attention_emits_fusion_pattern_without_bf16(tmp_path: Path)
         for attr in node.attribute
         if attr.name == "to"
     )
-    # Defaults unchanged: explicit attention keeps the stabilized pattern.
-    default_head = _build_head().prepare_for_export()
-    assert not default_head.decoder[0].cross_attn.fuse_attention
+    # Opting out restores the stabilized (max-subtracting) pattern — the safety net for
+    # a TensorRT that does not match the fusion.
+    unfused_head = _build_head(fuse_export_attention=False).prepare_for_export()
+    assert not unfused_head.decoder[0].cross_attn.fuse_attention
+    unfused = _export_attention(
+        unfused_head.decoder[0].cross_attn, tmp_path / "unfused_attention.onnx"
+    )
+    assert "ReduceMax" in {node.op_type for node in unfused.graph.node}
 
 
 def test_scatter_free_heatmap_suppression_matches_slice_assignment() -> None:

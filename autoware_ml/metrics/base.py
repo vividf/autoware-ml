@@ -106,7 +106,11 @@ class MetricSuite(torchmetrics.Metric, ABC, Generic[StateT]):
     #: cross-backend comparison shows and a report leads with. Declared by the suite
     #: because only the task knows which of its numbers is the headline one.
     headline_metrics: tuple[str, ...] = ()
-    _required_keys: tuple[str, ...] = ()
+    #: Keys a model's ``build_eval_output`` must provide for this suite to score. Public
+    #: for the same reason as ``headline_metrics``: the framework reads it from outside
+    #: the suite (:func:`autoware_ml.metrics.report.check_required_keys`) to fail with a
+    #: named key instead of a KeyError deep in ``update``.
+    required_keys: tuple[str, ...] = ()
 
     full_state_update: bool = False
 

@@ -36,7 +36,7 @@ class _Suite(SimpleNamespace):
 
 
 def _suite(prefix, results, required=()):
-    return _Suite(prefix=prefix, results=results, _required_keys=tuple(required))
+    return _Suite(prefix=prefix, results=results, required_keys=tuple(required))
 
 
 class TestKeys:

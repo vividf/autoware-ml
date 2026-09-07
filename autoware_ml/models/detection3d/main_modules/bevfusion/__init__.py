@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BEVFusion (lidar-only): model (:mod:`.model`) and deployment stages (:mod:`.stages`).
-Everything BEVFusion-specific lives in this directory; quantization rules land with
-the PTQ milestone as :mod:`.quantization`.
+"""BEVFusion (lidar-only): model (:mod:`.model`), deployment stages (:mod:`.stages`)
+and quantization rules (:mod:`.quantization`). Everything BEVFusion-specific lives in
+this directory.
 """
 
 from autoware_ml.models.detection3d.main_modules.bevfusion.model import (

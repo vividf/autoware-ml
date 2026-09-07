@@ -106,6 +106,8 @@ def keep_topk_in_fp16(onnx_path: Path) -> Path:
     def cast_target(node) -> int | None:
         return next((a.i for a in node.attribute if a.name == "to"), None)
 
+    graph_outputs = {output.name for output in graph.output}
+
     bypassed = 0
     for node in graph.node:
         if node.op_type != "TopK":
@@ -116,6 +118,17 @@ def keep_topk_in_fp16(onnx_path: Path) -> Path:
             or upstream.op_type != "Cast"
             or cast_target(upstream) != TensorProto.FLOAT
         ):
+            continue
+        if node.output[0] in graph_outputs:
+            # The values output is part of the graph's ABI, declared FLOAT by
+            # ``keep_io_types``. Making it FP16 in place would leave the declaration
+            # lying to every consumer of the artifact, so the round-trip stays.
+            logger.info(
+                "keep_topk_in_fp16: %s keeps its FP32 input — its values output %r is a "
+                "graph output whose declared type is part of the artifact's interface.",
+                node.name or node.op_type,
+                node.output[0],
+            )
             continue
         node.input[0] = upstream.input[0]
         bypassed += 1

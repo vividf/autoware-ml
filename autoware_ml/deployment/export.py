@@ -46,6 +46,7 @@ from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, Stage, artifact_path, graph_stages
 from autoware_ml.quantization.core.fusion import find_conv_bn_pairs, fuse_model_bn
 from autoware_ml.types.backend import Backend
+from autoware_ml.utils.onnx_meta import stamp_onnx_meta
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,43 @@ class ExportedArtifacts:
 
     onnx: dict[str, Path] = field(default_factory=dict)
     engines: dict[str, Path] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExportProvenance:
+    """Identity stamped into every exported ONNX (``onnx.metadata_props``).
+
+    A deployed artifact must say where it came from without a side channel: which
+    config and repository revision produced it, which release it is, and which
+    experiment-tracker run wrote it. Deploy fills this in; the export tests leave it
+    ``None`` and get unstamped files.
+    """
+
+    config_name: str
+    release: str | None
+    git_sha: str
+    tracker: str | None = None
+    run_id: str | None = None
+
+
+def _require_canonical(returned: Path, canonical: Path, stage: str, what: str) -> Path:
+    """Enforce the in-place contract for graph rewrites.
+
+    Rewrites take and return a path so a pass may write through a temporary file, but the
+    result has to land back on the stage's canonical artifact path: everything downstream
+    (``PipelineCache``, ``available_backends``, the engine build) re-derives that path from
+    the stage name, so a rewrite that returns a *renamed* file would leave verification and
+    evaluation silently reading the un-rewritten original while the engine was built from
+    the rewritten one.
+    """
+    returned = Path(returned)
+    if returned.resolve() != canonical.resolve():
+        raise ValueError(
+            f"{what} for stage {stage!r} returned {returned}, but the stage's ONNX artifact is "
+            f"{canonical}. Graph rewrites must write back to the path they were given — "
+            "everything downstream re-derives it from the stage name."
+        )
+    return returned
 
 
 def _bn_folded_for_export(stage: GraphStage) -> nn.Module:
@@ -80,6 +118,7 @@ def export_stages(
     deploy_cfg: DeployConfig,
     output_dir: str | Path,
     device: torch.device,
+    provenance: ExportProvenance | None = None,
 ) -> ExportedArtifacts:
     """Export every ``GraphStage`` of ``stages`` according to ``deploy_cfg``.
 
@@ -89,6 +128,8 @@ def export_stages(
         deploy_cfg: Parsed ``deploy`` section.
         output_dir: Directory receiving ``<stage>.onnx`` / ``<stage>.engine``.
         device: Device the tracing run executes on.
+        provenance: Identity stamped into each exported ONNX. ``None`` (the default, used
+            by tests) writes unstamped files.
 
     Returns:
         The written artifact paths.
@@ -96,6 +137,7 @@ def export_stages(
     Raises:
         FileNotFoundError: When TensorRT is enabled but a stage's ONNX is missing (ONNX
             export disabled and no earlier export in ``output_dir``).
+        ValueError: When a graph rewrite returns a path other than the stage's artifact.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +171,20 @@ def export_stages(
                 # intrinsic axes apply (a point graph has no static point count).
                 dynamic_axes=stage_cfg.onnx.dynamic_axes or (stage.onnx_dynamic_axes or None),
             )
+            # User-configurable surgery runs *before* the precision pass: a modifier is
+            # written against the fp32 export it was authored on, and running it first also
+            # means the precision routing below sees any node it injected (a plugin op it
+            # substitutes in, say) rather than routing on the pre-surgery graph.
+            if should_modify_graph(deploy_cfg.onnx.modify_graph):
+                onnx_path = _require_canonical(
+                    modify_onnx_graph(onnx_path, deploy_cfg.onnx.modify_graph),
+                    onnx_path,
+                    stage.name,
+                    "deploy.onnx.modify_graph",
+                )
+
             stage_precision = stage_cfg.onnx.precision or deploy_cfg.onnx.precision
+            custom_domains: tuple[str, ...] = ()
             if stage_precision is OnnxPrecision.FP16:
                 custom_domains = onnx_custom_op_domains(onnx_path)
                 has_qdq = onnx_has_qdq(onnx_path)
@@ -165,10 +220,51 @@ def export_stages(
                     cast_graph_to_fp16(onnx_path)
                 else:
                     autocast_to_fp16(onnx_path, {name: context[name] for name in stage.inputs})
+            # Stage-declared transforms run *after* the precision pass, unlike the
+            # user-configurable modifier above: they describe the deployed form of this
+            # particular graph and may be written against the converted one —
+            # ``keep_topk_in_fp16`` exists precisely to rewire a cast the precision pass
+            # inserted, and folding a bias into a plugin node wants that bias already in
+            # the graph's runtime dtype.
             for transform in stage.onnx_transforms:
-                onnx_path = Path(transform(onnx_path))
-            if should_modify_graph(deploy_cfg.onnx.modify_graph):
-                onnx_path = modify_onnx_graph(onnx_path, deploy_cfg.onnx.modify_graph)
+                onnx_path = _require_canonical(
+                    Path(transform(onnx_path)),
+                    onnx_path,
+                    stage.name,
+                    f"onnx_transform {getattr(transform, '__name__', transform)!r}",
+                )
+            if stage.onnx_transforms and stage_precision is OnnxPrecision.FP16:
+                # Routing (plugin graph -> whole-graph cast, plain graph -> AutoCast) was
+                # decided above. A transform that *introduces* a plugin op after that
+                # decision got the wrong pass, and the failure is a silent precision
+                # mismatch rather than an error.
+                late_domains = set(onnx_custom_op_domains(onnx_path)) - set(custom_domains)
+                if late_domains:
+                    logger.warning(
+                        "Stage %r gained custom-op domain(s) %s from its onnx_transforms, "
+                        "after FP16 routing had already run on the pre-transform graph. "
+                        "Declare such ops in the exported graph instead, or the stage takes "
+                        "the wrong precision pass.",
+                        stage.name,
+                        ", ".join(sorted(late_domains)),
+                    )
+            if provenance is not None:
+                stamp_onnx_meta(
+                    onnx_path,
+                    config_name=provenance.config_name,
+                    module=stage.name,
+                    release=provenance.release,
+                    export_git_sha=provenance.git_sha,
+                    metainfo=stage_cfg.onnx.metainfo,
+                    tracker=provenance.tracker,
+                    run_id=provenance.run_id,
+                )
+                logger.info(
+                    "Stamped stage %r: release=%s, commit=%s",
+                    stage.name,
+                    provenance.release or "unversioned",
+                    provenance.git_sha,
+                )
             artifacts.onnx[stage.name] = onnx_path
 
         if deploy_cfg.tensorrt.enabled:

@@ -11,8 +11,7 @@ re-imports until it is deleted (Q5).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
-from typing import Any
+from dataclasses import fields
 
 import torch
 import torch.nn as nn
@@ -74,7 +73,6 @@ def split_block_parameters(
     return default_params, block_params
 
 
-
 def build_serialized_pooling_metadata(
     grid_coord: torch.Tensor,
     serialized_code: torch.Tensor,
@@ -112,7 +110,6 @@ def flatten_serialized_pooling_inputs(
             inputs.append(getattr(meta, field))
             names.append(f"serialized_pooling_{stage_index}_{field}")
     return tuple(inputs), names
-
 
 
 def _serialized_pooling_dynamic_axis(input_name: str) -> dict[int, str]:
@@ -207,7 +204,6 @@ def make_serialized_pooling_from_flat_inputs(
             values.setdefault(field, placeholder)
         metadata.append(SerializedPoolingMeta(**values))
     return metadata
-
 
 
 class PTv3EncoderExportBase(nn.Module):
@@ -314,8 +310,6 @@ def _run_ptv3_encoder_export(
             "sparse_shape": sparse_shape,
         }
     )
-
-
 
 
 class _PTv3EncoderExportModule(PTv3EncoderExportBase):
@@ -444,7 +438,6 @@ def build_seg_head_input_dynamic_axes(
     return dynamic_axes
 
 
-
 class _PTv3SegHeadExportModule(nn.Module):
     """Export-only segmentation head decoding per-stage encoder features."""
 
@@ -502,14 +495,31 @@ class _PTv3SegHeadExportModule(nn.Module):
                 serialized_order = torch.stack([argsort(code) for code in serialized_code], dim=0)
                 serialized_inverse = invert_permutation(serialized_order)
             else:
-                serialized_order = extras.pop(0)
-                serialized_inverse = extras.pop(0)
-                grid_coord = extras.pop(0)
+                # Unpack through the same field tuple the input names and the export args
+                # are built from. `serialized_order` and `serialized_inverse` have identical
+                # shapes, so a hand-written order that disagreed with the name list would
+                # not raise — it would quietly decode with the permutation reversed, and
+                # only mIoU would notice.
+                by_field = dict(
+                    zip(
+                        _BLOCK_STAGE_META_FIELDS,
+                        [extras.pop(0) for _ in _BLOCK_STAGE_META_FIELDS],
+                    )
+                )
+                serialized_order = by_field["serialized_order"]
+                serialized_inverse = by_field["serialized_inverse"]
+                grid_coord = by_field["grid_coord"]
             block_stage_metadata[stage] = (
                 serialized_order,
                 serialized_inverse,
                 grid_coord,
                 getattr(self, f"_sparse_shape_{stage}"),
+            )
+
+        if extras:
+            raise ValueError(
+                f"{len(extras)} unconsumed export input(s) for the seg head — the call does "
+                "not match seg_head_export_input_names() for this decoder configuration."
             )
 
         logits = self.seg3d_head(link_stage_points(stage_feats, clusters, block_stage_metadata))

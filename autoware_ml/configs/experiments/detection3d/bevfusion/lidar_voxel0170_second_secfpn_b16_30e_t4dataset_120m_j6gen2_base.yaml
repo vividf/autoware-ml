@@ -69,6 +69,8 @@ model:
     # TensorRT's Myelin fuses the decoder attention into one MHA kernel — the max-sub
     # pattern blocks the fusion (measured 0.68 vs 0.25 ms). Same graph shape as the AWML
     # 2.8 deployment (plain matmul-softmax-matmul); training is untouched (export copy).
+    # This is the head's default; spelled out here because it is a deployment property
+    # this experiment is measured on.
     fuse_export_attention: true
     dense_heatmap_pooling_classes: [car, truck, bus, barrier]
     # Reference-trained head geometry (mmdet3d SeparateHead head_conv=64, PyTorch

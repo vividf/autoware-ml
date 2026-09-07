@@ -98,7 +98,9 @@ def mlflow_run_scope(run_context: MlflowRunContext | None) -> Iterator[MlflowCli
     The one spelling of the run-termination boilerplate shared by the deploy and
     quantize entrypoints: yields an ``MlflowClient`` bound to ``run_context``
     (``None`` when logging is disabled), marks the run FAILED when the body raises,
-    FINISHED otherwise.
+    FINISHED otherwise. Interrupts (Ctrl+C, SIGTERM) terminate the run KILLED — deploy
+    and quantize are long jobs and are interrupted routinely, and a run left RUNNING
+    forever is indistinguishable on the tracking server from one still working.
     """
     if run_context is None:
         yield None
@@ -108,5 +110,8 @@ def mlflow_run_scope(run_context: MlflowRunContext | None) -> Iterator[MlflowCli
         yield client
     except Exception:
         client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.FAILED))
+        raise
+    except BaseException:
+        client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.KILLED))
         raise
     client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.FINISHED))

@@ -583,6 +583,11 @@ class CenterHead(nn.Module):
     def prepare_for_export(self) -> CenterHead:
         """Return an export-ready copy of the head.
 
+        The copy is independent from this point on: weights changed on the original head
+        afterwards do not reach the exported graph, nor the PyTorch backend's run of the
+        stage graph (which executes this copy). Deploy loads, builds the stages, and
+        exports in one pass, so that ordering holds today.
+
         Returns:
             Deep copy of the head in evaluation mode.
         """

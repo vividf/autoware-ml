@@ -184,8 +184,46 @@ class QATCallback(L.Callback):
                 frozen,
                 len(skip_names),
             )
+            self._warn_unmasked_trainables(pl_module)
         self._calibrated = True
         logger.info("QATCallback: calibration complete")
+
+    @staticmethod
+    def _warn_unmasked_trainables(pl_module: L.LightningModule) -> None:
+        """Name the parameters that are neither quantized nor frozen.
+
+        ``freeze_unquantized`` freezes the ``skip_quantize`` subtrees, which is where
+        un-quantized weights normally live. A module that appears in neither
+        ``quantize_submodules`` nor ``skip_quantize`` is un-quantized too, and just as
+        exposed to the drift the freeze exists to prevent — it simply has nothing telling
+        the callback about it. The current models leave that set empty; a new model
+        wiring up QAT should see it rather than discover it as a collapse.
+        """
+        quantized_parents = {
+            name.rsplit(".", 1)[0]
+            for name, module in pl_module.named_modules()
+            if isinstance(module, TensorQuantizer) and "." in name
+        }
+        unmasked = sorted(
+            {
+                name.rsplit(".", 1)[0]
+                for name, param in pl_module.named_parameters()
+                if param.requires_grad
+                and not any(
+                    name.startswith(parent + ".") or name.rsplit(".", 1)[0] == parent
+                    for parent in quantized_parents
+                )
+            }
+        )
+        if unmasked:
+            logger.warning(
+                "QATCallback: %d trainable module(s) are neither quantized nor frozen "
+                "(no STE gradient mask, no freeze): %s%s. Add them to "
+                "quantization.skip_quantize if they should be frozen.",
+                len(unmasked),
+                ", ".join(unmasked[:10]),
+                ", ..." if len(unmasked) > 10 else "",
+            )
 
     def _calibration_dataloader(self, trainer: L.Trainer):
         """Return the clean val dataloader for calibration (train loader as a warned fallback)."""

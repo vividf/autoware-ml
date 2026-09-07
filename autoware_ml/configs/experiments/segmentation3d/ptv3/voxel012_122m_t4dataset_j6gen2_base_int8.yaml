@@ -37,9 +37,13 @@ quantization:
   # 2026-09-04 on 300 val frames (TRT): mse 0.7150 / entropy 0.7228 / smoothquant 0.7787
   # (alpha 0.5) / 0.7793 (alpha 0.8) vs FP16 0.7792 — INT8 PTQ in the FP16 band, no QAT
   # needed, latency unchanged (6.93 vs 6.91 ms). The QAT variant inherits this calibration.
+  # alpha 0.8 is the measured winner and the one configured: it migrates more of the
+  # activation outliers into the weights, which is the direction PTv3 needs (74 Linears,
+  # activation-dominated). The 0.0006 mIoU it wins over 0.5 is inside run-to-run noise —
+  # the number is not the argument, the direction is; both sit in the FP16 band.
   calibration:
     method: smoothquant
-    smoothquant_alpha: 0.5
+    smoothquant_alpha: 0.8
   # 400 samples @ batch_size=1, seed 0 (same calibration set as the other INT8 recipes).
   ptq:
     calibrate_samples: 400

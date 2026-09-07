@@ -106,13 +106,26 @@ class PlacementDecision:
     reason: str
     detail: str = ""
 
+    @property
+    def structure(self) -> tuple[str, str]:
+        """The part of the decision that shapes the module tree: ``(module, transform)``.
+
+        ``reason`` and ``detail`` are prose written for humans reading the record. They
+        explain a decision; they cannot change it. Equality checks that gate *loading* use
+        this instead, so rewording a reason — or modelopt renaming a quantized class, which
+        lands verbatim in ``detail`` — does not condemn every checkpoint calibrated before
+        the rewording.
+        """
+        return (self.module, self.transform)
+
 
 class PlacementRecord:
     """The recorded outcome of one plan ``prepare``: an ordered list of decisions.
 
     Two records are considered equal when they contain the same decision
     *multiset* — apply order does not affect the resulting module tree, so
-    :meth:`diff` is order-insensitive on purpose.
+    :meth:`diff` is order-insensitive on purpose. Equality that gates loading is
+    narrower still: only ``(module, transform)`` (see :attr:`PlacementDecision.structure`).
     """
 
     def __init__(self, decisions: Sequence[PlacementDecision] = ()) -> None:
@@ -141,25 +154,44 @@ class PlacementRecord:
         return cls([PlacementDecision(**entry) for entry in data.get("decisions", [])])
 
     def diff(
-        self, other: PlacementRecord
+        self, other: PlacementRecord, *, structural_only: bool = False
     ) -> tuple[list[PlacementDecision], list[PlacementDecision]]:
         """Compare decision multisets (order-insensitive).
+
+        Args:
+            other: The record to compare against.
+            structural_only: Match on ``(module, transform)`` alone, ignoring the prose
+                ``reason``/``detail``. This is the comparison that gates loading
+                (:meth:`verify_matches`); the full comparison is for reporting, where the
+                prose is the useful part.
 
         Returns:
             ``(only_in_self, only_in_other)`` — both empty when the records
             describe the same tree construction.
         """
-        mine = Counter(self.decisions)
-        theirs = Counter(other.decisions)
-        only_in_self = sorted((mine - theirs).elements(), key=lambda d: (d.module, d.transform))
-        only_in_other = sorted((theirs - mine).elements(), key=lambda d: (d.module, d.transform))
-        return only_in_self, only_in_other
+        key = (lambda d: d.structure) if structural_only else (lambda d: d)
+        mine = Counter(key(decision) for decision in self.decisions)
+        theirs = Counter(key(decision) for decision in other.decisions)
+        by_key: dict[Any, list[PlacementDecision]] = {}
+        for decision in [*self.decisions, *other.decisions]:
+            by_key.setdefault(key(decision), []).append(decision)
+
+        def expand(counter: Counter) -> list[PlacementDecision]:
+            return sorted(
+                (by_key[k][0] for k in counter.elements()),
+                key=lambda d: (d.module, d.transform),
+            )
+
+        return expand(mine - theirs), expand(theirs - mine)
 
     def verify_matches(self, produced: PlacementRecord, source: str) -> None:
         """Raise unless ``self`` (a rebuilt tree) describes the same construction as ``produced``.
 
         Any drift means the ``load_state_dict`` that follows would silently mis-map
-        calibrated weights, so this raises instead.
+        calibrated weights, so this raises instead. The comparison is structural —
+        ``(module, transform)`` — because that is what decides the tree; the recorded
+        prose is compared by nobody, so improving an explanation (or upgrading modelopt,
+        whose class names land in ``detail``) never invalidates an existing checkpoint.
 
         Args:
             produced: The record the quantize stage produced (embedded in the checkpoint).
@@ -168,7 +200,7 @@ class PlacementRecord:
         Raises:
             RuntimeError: When the decision multisets differ.
         """
-        only_rebuilt, only_produced = self.diff(produced)
+        only_rebuilt, only_produced = self.diff(produced, structural_only=True)
         if only_rebuilt or only_produced:
             preview = "\n  ".join(
                 [f"rebuilt only: {d}" for d in only_rebuilt[:5]]

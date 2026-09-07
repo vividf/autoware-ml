@@ -174,7 +174,16 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
         voxels_data = context.batch_inputs.voxels_data
         if voxels_data is None:
             raise ValueError("MultiTaskBatchInputs must contain voxels_data for BEVFusion.")
-        # Single-sample export graph: keep the first sample's voxels only.
+        # Single-sample export graph: keep the first sample's voxels only. Deployment
+        # runs batch_size=1 (predict_dataloader), and taking the first sample of a larger
+        # batch would drop the rest from every metric without a word — so say it here
+        # rather than relying on a setting in another file.
+        batch_size = int(voxels_data.batch_indices.max().item()) + 1
+        if batch_size != 1:
+            raise ValueError(
+                f"BEVFusion's export stage graph is single-sample, but the batch holds "
+                f"{batch_size} samples. Set predict_dataloader.batch_size=1 for deploy."
+            )
         first_sample = voxels_data.batch_indices == 0
         return {
             VOXELS: voxels_data.voxels[first_sample],

@@ -56,6 +56,19 @@ class VerificationScenario:
     test_device: str
     tolerance: float | None = None
 
+    def __post_init__(self) -> None:
+        if (self.ref_backend, self.ref_device) == (self.test_backend, self.test_device):
+            # The pipeline cache is keyed by (backend, device), so both sides would be the
+            # *same* pipeline — and the TensorRT runner reuses its output buffers between
+            # calls, so the test run would overwrite the tensors the reference run
+            # returned. The comparison then reads one buffer twice and passes
+            # unconditionally: a silent green light, which is worse than no verification.
+            raise ValueError(
+                f"Verification scenario compares {self.ref_backend}({self.ref_device}) with "
+                "itself. A scenario must name two different (backend, device) pairs — "
+                "comparing a pipeline against itself always passes and verifies nothing."
+            )
+
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> VerificationScenario:
         """Build a scenario from a ``{ref: {backend, device}, test: {backend, device}}`` mapping.
@@ -117,11 +130,15 @@ class BackendVerifier:
             True when every executed scenario passed on every batch.
 
         Raises:
-            ValueError: If no scenario was executable (misconfiguration).
+            ValueError: If no scenario was configured, or none was executable.
         """
         if not scenarios:
-            logger.warning("Verification enabled but no scenarios configured; nothing to verify.")
-            return True
+            # Silence here would mean "verification enabled" reports green while nothing
+            # was compared — the same false confidence the executed==0 raise below guards.
+            raise ValueError(
+                "deploy.verification.enabled=true but deploy.verification.scenarios is empty; "
+                "list the reference-vs-test comparisons to run, or disable verification."
+            )
 
         executed = 0
         all_passed = True
