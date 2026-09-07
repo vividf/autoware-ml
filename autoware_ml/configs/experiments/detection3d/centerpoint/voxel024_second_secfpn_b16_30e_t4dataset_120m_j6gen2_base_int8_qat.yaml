@@ -1,0 +1,37 @@
+# @package _global_
+# QAT variant: frozen-amax STE fine-tuning on top of the INT8 experiment.
+#
+#   autoware-ml quantize \
+#     --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8_qat \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy \
+#     --config-name experiments/detection3d/centerpoint/voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8_qat \
+#     --weights <best.ckpt produced by the quantize run>
+#
+# A QAT checkpoint deploys exactly like a PTQ one — the loader never branches on mode.
+# Recipe (Wu et al. 2020 / modelopt): epochs ≈ 10% of original training, cosine schedule
+# with peak lr = 1% of the original peak (1e-5), frozen skip_quantize layers, validation
+# 4x per epoch, 400 calibration samples (calibrated at epoch 0 on the val split).
+defaults:
+  - voxel024_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8
+  - _self_
+
+experiment_name: voxel024_second_secfpn_b16_30e_t4dataset_120m_int8_qat
+
+quantization:
+  mode: qat
+  # Drop the inherited producer block for the other mode (a ptq block under
+  # mode=qat is a config lie and is rejected).
+  ptq: null
+  qat:
+    epochs: 3
+    # Schedule PEAK ≈ 1% of the original training peak lr (1e-3 -> 1e-5, Wu et al. 2020);
+    # higher peaks degrade a converged model within the epoch.
+    lr: 1.0e-5
+    # cosine from the peak down to 1% (no warmup). See QATScheduleConfig for one_cycle.
+    schedule: cosine
+    # skip_quantize layers take no STE gradient masking and would drift past the frozen
+    # downstream amax; QAT quality also peaks mid-epoch, so validate often for best.ckpt.
+    freeze_unquantized: true
+    val_check_interval: 0.25
+    calibrate_samples: 400
