@@ -13,8 +13,9 @@ deploy:
     # Precision of the exported graphs. TensorRT builds strongly typed (weak typing
     # was removed in TensorRT 11), so precision lives in the ONNX:
     #   fp32 — export as traced.
-    #   fp16 — run ModelOpt AutoCast on every exported stage WITHOUT Q/DQ nodes
-    #          (quantized stages keep the precision their checkpoint bakes in).
+    #   fp16 — convert every exported stage: a plain graph through ModelOpt AutoCast,
+    #          a plugin or Q/DQ graph through the island-aware whole-graph cast (the
+    #          quantization islands stay FP32 as calibrated, the rest runs FP16).
     precision: fp32
     modify_graph: null
   tensorrt:

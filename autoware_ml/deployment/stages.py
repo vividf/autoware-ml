@@ -61,6 +61,13 @@ class StageContext:
     tensors: dict[str, Any] = field(default_factory=dict)
 
     def __getitem__(self, name: str) -> Any:
+        """Read a produced tensor by name.
+
+        This is where the graph's dataflow is actually checked. It cannot be done
+        statically in :func:`validate_stages`, because a ``TorchStage`` declares no
+        outputs — so the error here names what the context does hold, which is the
+        information a wrong name needs.
+        """
         try:
             return self.tensors[name]
         except KeyError as error:
@@ -141,36 +148,28 @@ Stage = TorchStage | GraphStage
 def validate_stages(stages: Sequence[Stage]) -> tuple[Stage, ...]:
     """Check a stage declaration and return it as a tuple.
 
-    The dataflow check is only as strong as the declaration allows: a ``TorchStage``
-    declares no outputs, so once one appears the context may hold anything and the check
-    stops. Names read after that point are caught at run time instead, by
-    :meth:`StageContext.__getitem__`, whose error names what *is* available.
+    Names are *not* checked against each other here, and cannot be: a ``TorchStage``
+    declares no outputs, so from the first one onwards what the context holds is only
+    knowable at run time. :meth:`StageContext.__getitem__` is where a name that no stage
+    produced is caught, and its error lists what *is* available. The one static case is
+    the opening stage, whose context is empty by construction.
 
     Raises:
-        ValueError: On duplicate names, no exportable stage, a graph stage reading a
-            name no earlier graph stage wrote while no glue stage precedes it, or a final
-            graph stage without ``output_fields``.
+        ValueError: On duplicate names, no exportable stage, an opening ``GraphStage``
+            (nothing has produced its inputs yet), or a final graph stage without
+            ``output_fields``.
     """
     stages = tuple(stages)
     names = [stage.name for stage in stages]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"Duplicate stage names: {duplicates}.")
-    written: set[str] = set()
-    glue_seen = False
-    for stage in stages:
-        if isinstance(stage, TorchStage):
-            glue_seen = True
-            continue
-        if not glue_seen:
-            missing = [name for name in stage.inputs if name not in written]
-            if missing:
-                raise ValueError(
-                    f"GraphStage {stage.name!r} reads {missing}, which no earlier stage "
-                    f"produces (available: {sorted(written) or 'nothing'}). Graph inputs come "
-                    "from an earlier graph stage's outputs or from a glue TorchStage."
-                )
-        written.update(stage.outputs)
+    if stages and isinstance(stages[0], GraphStage):
+        raise ValueError(
+            f"The first stage {stages[0].name!r} is a GraphStage reading "
+            f"{list(stages[0].inputs)}, but the stage context starts empty. A glue "
+            "TorchStage has to put a graph stage's inputs there first."
+        )
     graph = graph_stages(stages)
     if not graph:
         raise ValueError("A stage graph needs at least one exportable GraphStage.")

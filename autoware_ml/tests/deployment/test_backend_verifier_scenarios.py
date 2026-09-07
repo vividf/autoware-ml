@@ -93,3 +93,32 @@ class TestVerificationScenarioFromDict:
             }
         )
         assert scenario.describe() == "pytorch(cpu) vs onnx(cuda)"
+
+
+class TestDegenerateScenariosAreRejected:
+    """A scenario that verifies nothing must fail loudly, not report green."""
+
+    def test_same_backend_and_device_is_refused(self):
+        with pytest.raises(ValueError, match="with itself"):
+            VerificationScenario.from_dict(
+                {
+                    "ref": {"backend": "tensorrt", "device": "cuda"},
+                    "test": {"backend": "tensorrt", "device": "cuda"},
+                }
+            )
+
+    def test_same_backend_on_different_devices_is_allowed(self):
+        scenario = VerificationScenario.from_dict(
+            {
+                "ref": {"backend": "pytorch", "device": "cpu"},
+                "test": {"backend": "pytorch", "device": "cuda"},
+            }
+        )
+        assert scenario.ref_device == "cpu" and scenario.test_device == "cuda"
+
+    def test_verification_enabled_without_scenarios_raises(self):
+        from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
+
+        verifier = BackendVerifier(pipelines=None, tolerance=0.01)
+        with pytest.raises(ValueError, match="scenarios is empty"):
+            verifier.run(batches=[], scenarios=(), available_backends=set())

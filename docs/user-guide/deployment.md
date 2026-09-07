@@ -31,6 +31,21 @@ every model parameter must be covered. A **quantized** checkpoint produced by
 no `quantization` config is needed to deploy it (see
 [Quantization](../framework/quantization.md)).
 
+Every exported `.onnx` is stamped in place with its provenance — producer, release,
+config name, export date, the repository revision that produced it, and the MLflow run
+that wrote it — inside the file's own `metadata_props`, so a consumer needs no side
+channel to know where an artifact came from:
+
+```bash
+autoware-ml deploy --config-name experiments/<...> --weights <ckpt> --release v0.1.0
+```
+
+Without `--release` the artifacts are stamped `unversioned` (`model_version` 0) and the
+run logs a warning: fine while iterating, never for anything that may reach production.
+A malformed release (anything but `vMAJOR.MINOR.PATCH`) fails before the export starts.
+A stage can add its own inference parameters to the stamp with
+`deploy.stages.<name>.onnx.metainfo` — each value is stored as a JSON document.
+
 Artifacts land in the deploy run's MLflow artifact directory under `exports/`, one
 `<stage_name>.onnx` / `<stage_name>.engine` per exportable stage. Disable either
 exporter during iteration; verification and evaluation then reuse the artifacts
@@ -74,8 +89,9 @@ deploy:
     dynamo: false            # legacy exporter for models relying on symbolic functions
     opset_version: 17
     do_constant_folding: false
-    # fp16 converts every exported stage WITHOUT Q/DQ nodes to mixed FP16 (ModelOpt
-    # AutoCast); quantized stages keep the precision their checkpoint bakes in.
+    # fp16 converts every exported stage: a plain graph through ModelOpt AutoCast, a
+    # plugin or Q/DQ graph through the island-aware whole-graph cast (quantization
+    # islands stay FP32 as calibrated, everything around them runs FP16).
     # Engines always build strongly typed, so this is where FP16 is decided.
     precision: fp16
   tensorrt:

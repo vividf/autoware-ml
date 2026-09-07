@@ -378,6 +378,9 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         for index, name in enumerate(node.input):
             if slots is None or index in slots:
                 island_float_inputs.add(name)
+    # Sea tensors that are already FP32 *for the island's sake*: step 5 must not cast them
+    # again (it would insert an FP32 -> FP32 no-op on the island's own input edge).
+    island_fp32_sources: set[str] = set()
     for node in list(graph.node):
         if in_island(node) or node.op_type != "Cast":
             continue
@@ -389,6 +392,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             for attribute in to_float:
                 attribute.i = TensorProto.FLOAT16
             continue
+        island_fp32_sources.add(produced)
         sea_users = [n for n in consumers_of.get(produced, []) if not in_island(n)]
         if not sea_users:
             continue  # island-only consumer: the cast keeps producing FP32
@@ -466,6 +470,8 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                 TensorProto.FLOAT16,
             ):
                 continue  # integer / bool edge: casting it to FLOAT would break the graph
+            if name in island_fp32_sources:
+                continue  # a sea cast kept FP32 precisely to feed this slot
             source = producer_of.get(name)
             if source is not None and in_island(source):
                 continue  # island-internal edge: castless by construction

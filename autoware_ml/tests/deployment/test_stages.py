@@ -309,3 +309,233 @@ def test_export_honors_the_per_stage_precision_override(tmp_path, monkeypatch) -
         device=torch.device("cpu"),
     )
     assert converted == ["goes_fp16"]
+
+
+def test_export_routes_plugin_and_qdq_graphs_to_the_island_cast(tmp_path, monkeypatch) -> None:
+    """All three FP16 routing legs, at the orchestration layer.
+
+    The unit tests cover each pass; this covers the *choice* — a plugin graph and a Q/DQ
+    graph must take the whole-graph island cast, and a plain graph AutoCast.
+    """
+    from omegaconf import OmegaConf
+    import pytest
+    import torch
+    from torch import nn
+
+    from autoware_ml.deployment import export as export_module
+    from autoware_ml.deployment.config import DeployConfig
+    from autoware_ml.deployment.stages import GraphStage, TorchStage
+
+    monkeypatch.setattr(
+        export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
+    )
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    stages = (
+        TorchStage("seed", run=seed),
+        GraphStage(
+            "s",
+            module=nn.Identity(),
+            inputs=("x",),
+            outputs=("y",),
+            output_fields=(("y", "y"),),
+        ),
+    )
+    deploy_cfg = DeployConfig.from_dict(
+        OmegaConf.create(
+            {
+                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17, "precision": "fp16"},
+                "tensorrt": {"enabled": False},
+            }
+        )
+    )
+
+    for domains, has_qdq, expected in (
+        (("autoware",), False, "island"),
+        ((), True, "island"),
+        ((), False, "autocast"),
+    ):
+        took: list[str] = []
+        monkeypatch.setattr(export_module, "onnx_custom_op_domains", lambda path: domains)
+        monkeypatch.setattr(export_module, "onnx_has_qdq", lambda path: has_qdq)
+        monkeypatch.setattr(export_module, "cast_graph_to_fp16", lambda p: took.append("island"))
+        monkeypatch.setattr(
+            export_module, "autocast_to_fp16", lambda p, inputs: took.append("autocast")
+        )
+        export_module.export_stages(
+            stages,
+            batch_inputs=None,
+            deploy_cfg=deploy_cfg,
+            output_dir=tmp_path,
+            device=torch.device("cpu"),
+        )
+        assert took == [expected], f"domains={domains} qdq={has_qdq}"
+
+
+def test_graph_rewrites_must_write_back_to_the_stage_artifact(tmp_path, monkeypatch) -> None:
+    """A transform that renames the file would leave verification reading the old one."""
+    from omegaconf import OmegaConf
+    import pytest
+    import torch
+    from torch import nn
+
+    from autoware_ml.deployment import export as export_module
+    from autoware_ml.deployment.config import DeployConfig
+    from autoware_ml.deployment.stages import GraphStage, TorchStage
+
+    monkeypatch.setattr(
+        export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
+    )
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    def renaming_transform(path):
+        renamed = path.with_name("somewhere_else.onnx")
+        renamed.write_bytes(b"")
+        return renamed
+
+    stages = (
+        TorchStage("seed", run=seed),
+        GraphStage(
+            "s",
+            module=nn.Identity(),
+            inputs=("x",),
+            outputs=("y",),
+            output_fields=(("y", "y"),),
+            onnx_transforms=(renaming_transform,),
+        ),
+    )
+    deploy_cfg = DeployConfig.from_dict(
+        OmegaConf.create(
+            {"onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
+             "tensorrt": {"enabled": False}}
+        )
+    )
+    with pytest.raises(ValueError, match="must write back to the path"):
+        export_module.export_stages(
+            stages,
+            batch_inputs=None,
+            deploy_cfg=deploy_cfg,
+            output_dir=tmp_path,
+            device=torch.device("cpu"),
+        )
+
+
+def test_export_stamps_provenance_into_every_stage_artifact(tmp_path, monkeypatch) -> None:
+    """`--release` and the export's identity land in the ONNX metadata, not a side file."""
+    import json
+
+    import onnx
+    from omegaconf import OmegaConf
+    import torch
+    from torch import nn
+
+    from autoware_ml.deployment import export as export_module
+    from autoware_ml.deployment.config import DeployConfig
+    from autoware_ml.deployment.stages import GraphStage, TorchStage
+
+    def fake_export(module, args, path, **kwargs):
+        graph = onnx.helper.make_graph(
+            [onnx.helper.make_node("Identity", ["x"], ["y"], name="id")],
+            "g",
+            [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 2])],
+            [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 2])],
+        )
+        onnx.save(onnx.helper.make_model(graph), str(path))
+
+    monkeypatch.setattr(export_module, "export_to_onnx", fake_export)
+
+    def seed(context):
+        return {"x": torch.ones(1, 2)}
+
+    stages = (
+        TorchStage("seed", run=seed),
+        GraphStage(
+            "s",
+            module=nn.Identity(),
+            inputs=("x",),
+            outputs=("y",),
+            output_fields=(("y", "y"),),
+        ),
+    )
+    deploy_cfg = DeployConfig.from_dict(
+        OmegaConf.create(
+            {
+                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
+                "tensorrt": {"enabled": False},
+                "stages": {"s": {"onnx": {"metainfo": {"class_names": ["car", "truck"]}}}},
+            }
+        )
+    )
+    export_module.export_stages(
+        stages,
+        batch_inputs=None,
+        deploy_cfg=deploy_cfg,
+        output_dir=tmp_path,
+        device=torch.device("cpu"),
+        provenance=export_module.ExportProvenance(
+            config_name="experiments/x", release="v1.2.3", git_sha="abc1234", run_id="r1"
+        ),
+    )
+
+    stamped = onnx.load(str(tmp_path / "s.onnx"))
+    props = {entry.key: entry.value for entry in stamped.metadata_props}
+    assert props["release"] == "v1.2.3"
+    assert props["module"] == "s"
+    assert props["config_name"] == "experiments/x"
+    assert props["run_id"] == "r1"
+    assert json.loads(props["class_names"]) == ["car", "truck"]
+    assert stamped.producer_version == "abc1234"
+    assert stamped.model_version == 10203
+
+
+def test_validate_stages_rejects_a_declaration_that_opens_with_a_graph_stage() -> None:
+    """The context starts empty, so the first stage cannot be one that reads from it.
+
+    Everything past the opening stage is a run-time question — a ``TorchStage`` declares
+    no outputs — and ``StageContext.__getitem__`` is what answers it.
+    """
+    import pytest
+    from torch import nn
+
+    from autoware_ml.deployment.stages import (
+        GraphStage,
+        StageContext,
+        TorchStage,
+        validate_stages,
+    )
+
+    first = GraphStage(
+        "first",
+        module=nn.Identity(),
+        inputs=("x",),
+        outputs=("y",),
+        output_fields=(("y", "y"),),
+    )
+    with pytest.raises(ValueError, match="context starts empty"):
+        validate_stages((first,))
+
+    assert len(validate_stages((TorchStage("glue", run=lambda ctx: {}), first))) == 2
+
+    # The run-time half of the same contract.
+    context = StageContext(batch_inputs=None, device=torch.device("cpu"))
+    context.tensors["mid"] = torch.ones(1)
+    with pytest.raises(KeyError, match="available: \\['mid'\\]"):
+        context["typo"]
+
+
+def test_pytorch_backend_answers_the_artifact_question_the_same_way_twice() -> None:
+    """`artifact_suffix` and `artifact_path` must agree that PyTorch has no artifact."""
+    import pytest
+
+    from autoware_ml.deployment.stages import artifact_path
+    from autoware_ml.types.backend import Backend
+
+    with pytest.raises(ValueError, match="no exported artifact"):
+        _ = Backend.PYTORCH.artifact_suffix
+    with pytest.raises(ValueError, match="no exported artifact"):
+        artifact_path("/tmp", "s", Backend.PYTORCH)
+    assert Backend.ONNX.artifact_suffix == ".onnx"

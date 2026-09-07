@@ -26,8 +26,8 @@ autoware-ml deploy --config-name experiments/.../<model>_int8 --weights <.../ptq
 
 ### 1.1 `QuantRules`:模型的量化宣告(`plan.py`)
 
-每個支援量化的模型有一個 `main_modules/<model>/quantization.py`(現例:PTv3 57 行、
-BEVFusion 67 行),核心是:
+每個支援量化的模型有一個 `main_modules/<model>/quantization.py`(現例:PTv3 56 行、
+BEVFusion 66 行),核心是:
 
 ```python
 MODEL_QUANT_RULES = QuantRules(
@@ -52,8 +52,9 @@ quantize 完它內嵌進 checkpoint——這就是「自描述」:deploy/test �
 
 ### 1.3 執行端:modelopt registry(`core/`)
 
-模組替換走 modelopt 的 quantized-module registry(`core/modelopt.py`),不自己維護
-替換表;校準(`core/calibration.py`)由 config 的 `quantization.calibration` 區塊驅動
+模組替換走 modelopt 的 quantized-module registry,查表與 walker 在 `core/replace.py`
+(`core/modelopt.py` 裝的是 import 時打上的 modelopt bug workarounds,不是 registry 本體);
+校準(`core/calibration.py`)由 config 的 `quantization.calibration` 區塊驅動
 (方法/樣本數)。state_dict 的 quantizer key 是 modelopt 慣例(`*input_quantizer.*`)。
 
 ### 1.4 Recipes:matcher + action(`recipes/`)
@@ -82,7 +83,8 @@ quantization:
 付過學費的三件事:
 
 1. **`freeze_unquantized: true` 是預設且必要**:未量化層吸收梯度漂移 → 輸出越過
-   凍結的 amax → clip 歸零梯度 → 正回饋崩潰(CenterPoint 實測 mAP 0.81 → 0.007)。
+   凍結的 amax → clip 歸零梯度 → 正回饋崩潰(CenterPoint 實測 mAP 0.81 → 0.0007,
+   出處 `work_dirs/reviews/ptq-qat-verification-README.md` 實驗 6.1)。
 2. **lr 要小**:freeze + peak 1e-5 整個 epoch 穩定;1e-4 會在 epoch 後段非線性惡化
    (300 步探針看不出來,recipe 驗證必須整 epoch)。
 3. **QAT 不保證贏 PTQ**:CenterPoint 上兩者持平(0.8128 vs 0.8132),正式路徑是
@@ -115,13 +117,15 @@ FP8 走 modelopt 的 trt-domain 自訂 op、per-tensor scale、max 校準;ONNX R
    Parameter,export 態 `q/k/v/out_proj` Linear 在校準之後才誕生;`out_proj` 是
    forward 被 fast path 繞過的特殊 Linear(walker 已在框架層拒換)。要量它們 =
    校準前先換成 export 態 attention(未實作)。→ 詳:
-   `models/detection3d/main_modules/bevfusion/quantization.py` docstring。
+   `autoware_ml/models/detection3d/main_modules/bevfusion/quantization.py` docstring。
 2. **輸入端層對 INT8 敏感**:吃 raw / scatter 特徵的第一段(CenterPoint stage 0)
    量了掉 ~1.2 mAP,release recipe 一直 skip。新模型對輸入段做 leave-one-out。
    → 實例:centerpoint `_int8.yaml` 的 `skip_quantize` 註解。
 3. **linear 用 FP8 不用 INT8**(§4)。
-4. **ORT 跑不了 plugin stage 與 FP8 op**:前者 `torch_fallback_backends`,後者關
-   onnx backend。→ 實例:ptv3/base.yaml、bevfusion `_fp8` config。
+4. **ORT 跑不了 plugin stage 與 FP8 op**:前者 `torch_fallback_backends`(宣告在
+   `autoware_ml/models/segmentation3d/main_modules/ptv3/stages.py` 的 encoder stage 上),
+   後者關 onnx backend(ptv3 `base.yaml` 的 `deploy.evaluation.backends`、
+   bevfusion `_fp8` config)。
 5. **verification tolerance 實測校準**:量化 stage 的 raw-logit 跨 backend 差是預期,
    metric 相等才是 gate;fail 訊息會給建議值。→ 實例:centerpoint `_int8.yaml`。
 
@@ -140,10 +144,10 @@ quantization/
   loader.py          按 record 重建量化模型(deploy/test 入口)
   qat_callback.py    QAT:epoch-0 校準、freeze_unquantized、schedule
   core/
-    modelopt.py      modelopt registry 對接(模組替換)
+    modelopt.py      modelopt bug workarounds(import 時打補丁)
     calibration.py   校準執行
     fusion.py        量化前 BN fusion
-    replace.py       walker(含 out_proj 等拒換保護)
+    replace.py       QuantModuleRegistry 模組替換 + walker(含 out_proj 等拒換保護)
     descriptors.py / quantizer_state.py   模組描述與 quantizer 狀態
   recipes/
     attach.py        RECIPE_ATTACHERS registry

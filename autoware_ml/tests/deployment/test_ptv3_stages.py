@@ -98,3 +98,60 @@ def test_encoder_inputs_follow_the_legacy_name_rule() -> None:
     assert all(name.startswith("serialized_pooling_") for name in names[3:])
     # cluster is head-side only and must NOT be an encoder input.
     assert not any(name.endswith("_cluster") for name in names)
+
+
+def test_seg_head_export_names_and_args_stay_in_lockstep() -> None:
+    """Name i must be the tensor at position i, for every decoder configuration.
+
+    ``serialized_order`` and ``serialized_inverse`` have identical shapes, so a rule that
+    drifted between the name list, the arg builder, and the module's unpacking would not
+    raise anywhere — it would decode with the permutation reversed and only show up in
+    mIoU. The three are driven by one field tuple; this pins that they agree.
+    """
+    import torch
+
+    from autoware_ml.models.segmentation3d.encoders.ptv3 import SerializedPoolingMeta
+    from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
+        build_seg_head_export_args,
+        seg_head_export_input_names,
+    )
+
+    stage_count = 4
+    dec_depths = (1, 0, 1)  # stage 1 has no blocks: its metadata must be absent
+
+    def marker(name: str) -> torch.Tensor:
+        """A tensor that carries its own identity, so a swap is visible."""
+        return torch.tensor([float(abs(hash(name)) % 100_000)])
+
+    metas = [
+        SerializedPoolingMeta(
+            indices=marker(f"serialized_pooling_{i}_indices"),
+            indptr=marker(f"serialized_pooling_{i}_indptr"),
+            cluster=marker(f"pooling_cluster_{i}"),
+            head_indices=marker(f"serialized_pooling_{i}_head_indices"),
+            grid_coord=marker(f"serialized_pooling_{i}_grid_coord"),
+            serialized_order=marker(f"serialized_pooling_{i}_serialized_order"),
+            serialized_inverse=marker(f"serialized_pooling_{i}_serialized_inverse"),
+        )
+        for i in range(stage_count - 1)
+    ]
+    stage_feats = [marker(f"point_feat_{i}") for i in range(stage_count)]
+
+    names = seg_head_export_input_names(stage_count, dec_depths)
+    args = build_seg_head_export_args(
+        stage_feats,
+        metas,
+        serialized_code=marker("serialized_code"),
+        grid_coord=marker("grid_coord"),
+        dec_depths=dec_depths,
+    )
+
+    assert len(names) == len(args)
+    for name, tensor in zip(names, args):
+        assert tensor == marker(name), f"{name} is not the tensor at its own position"
+    # Stage 1 declares no decoder blocks, so the metadata it would have read
+    # (serialized_pooling_0_*, one index below the stage) is not an input at all; the
+    # block stages 0 and 2 contribute serialized_code/grid_coord and serialized_pooling_1_*.
+    assert "serialized_pooling_0_serialized_order" not in names
+    assert "serialized_pooling_1_serialized_order" in names
+    assert "serialized_code" in names and "grid_coord" in names

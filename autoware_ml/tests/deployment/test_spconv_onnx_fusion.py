@@ -123,3 +123,60 @@ def test_a_shared_intermediate_is_left_alone() -> None:
 
     assert fused_activations == 0
     assert "Relu" in [node.op_type for node in model.graph.node]
+
+
+def test_an_unfoldable_plugin_node_is_reported(tmp_path, caplog) -> None:
+    """Fusion that quietly stops matching costs latency with no other symptom.
+
+    The graph stays correct — the bias Add and the ReLU are ordinary ONNX ops TensorRT
+    builds — so nothing fails. An exporter change that broke every fold would look
+    exactly like a slow engine, which is why the pass says how many it left behind.
+    """
+    import logging
+
+    from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+
+    # The Add consumes two non-initializer tensors, so the bias fold cannot apply.
+    model = _graph(
+        _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
+        helper.make_node("Add", ["gemm_out", "features"], ["biased"], name="add"),
+        outputs=["biased"],
+        initializers=["w", "p", "m", "a"],
+    )
+    path = tmp_path / "unfused.onnx"
+    onnx.save(model, str(path))
+
+    with caplog.at_level(logging.WARNING, logger="autoware_ml.ops.spconv.onnx_fusion"):
+        fuse_sparse_graph(path)
+
+    assert "kept their bias Add outside the plugin" in caplog.text
+
+
+def test_structurally_identical_nodes_are_removed_by_identity(tmp_path) -> None:
+    """Two folded chains that serialize identically must not delete each other.
+
+    ``node in removed`` compares protobuf messages by value; nodes that differ only in
+    what they are attached to would match, and removing one would drop both.
+    """
+    from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+
+    model = _graph(
+        _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_a_out", "gemm_a"),
+        _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_b_out", "gemm_b"),
+        # Same op, same bias initializer, no name: identical once serialized.
+        helper.make_node("Add", ["gemm_a_out", "bias"], ["a_biased"]),
+        helper.make_node("Add", ["gemm_b_out", "bias"], ["b_biased"]),
+        helper.make_node("Mul", ["a_biased", "b_biased"], ["out"], name="join"),
+        outputs=["out"],
+        initializers=["w", "p", "m", "a", "bias"],
+    )
+    path = tmp_path / "twin_adds.onnx"
+    onnx.save(model, str(path))
+
+    fuse_sparse_graph(path)
+
+    fused = onnx.load(str(path))
+    assert not [node for node in fused.graph.node if node.op_type == "Add"]
+    gemms = [node for node in fused.graph.node if node.op_type == "ImplicitGemm"]
+    assert len(gemms) == 2 and all(len(node.input) == 6 for node in gemms)
+    onnx.checker.check_model(fused)

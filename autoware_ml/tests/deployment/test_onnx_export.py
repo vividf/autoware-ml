@@ -534,40 +534,196 @@ def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
         cast_graph_to_fp16(path)
 
 
-def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
-    """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
+def _topk_graph(path, *, values_is_graph_output: bool):
+    """Write a ``x(fp16) -> Cast(fp32) -> TopK`` graph, with values internal or exported."""
     import numpy as np
     import onnx
     from onnx import TensorProto, helper
 
-    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
-
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 8])
     values = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
     indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 2])
+    scaled = helper.make_tensor_value_info("scaled", TensorProto.FLOAT, [1, 2])
     k = helper.make_tensor("k", TensorProto.INT64, [1], np.array([2], dtype=np.int64))
-    graph = helper.make_graph(
-        [
-            helper.make_node("Cast", ["x"], ["x32"], to=TensorProto.FLOAT, name="lift"),
-            helper.make_node("TopK", ["x32", "k"], ["values", "indices"], name="topk"),
-        ],
-        "topk_graph",
-        [x],
-        [values, indices],
-        [k],
-    )
+    one = helper.make_tensor("one", TensorProto.FLOAT, [1], np.array([1.0], dtype=np.float32))
+    nodes = [
+        helper.make_node("Cast", ["x"], ["x32"], to=TensorProto.FLOAT, name="lift"),
+        helper.make_node("TopK", ["x32", "k"], ["values", "indices"], name="topk"),
+    ]
+    outputs = [values, indices]
+    initializers = [k]
+    if not values_is_graph_output:
+        # values feeds an internal consumer instead of leaving the graph.
+        nodes.append(helper.make_node("Mul", ["values", "one"], ["scaled"], name="scale"))
+        outputs = [scaled, indices]
+        initializers.append(one)
+    graph = helper.make_graph(nodes, "topk_graph", [x], outputs, initializers)
     graph.value_info.append(helper.make_tensor_value_info("x32", TensorProto.FLOAT, [1, 8]))
+    if not values_is_graph_output:
+        graph.value_info.append(values)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    path = tmp_path / "topk_graph.onnx"
     onnx.save(model, str(path))
+    return path
 
+
+def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
+    """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
+    import onnx
+
+    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
+
+    path = _topk_graph(tmp_path / "topk_graph.onnx", values_is_graph_output=False)
     keep_topk_in_fp16(path)
 
     converted = onnx.load(str(path))
     topk = next(node for node in converted.graph.node if node.op_type == "TopK")
     assert topk.input[0] == "x", "TopK must read the FP16 tensor directly"
+    values_info = next(info for info in converted.graph.value_info if info.name == "values")
+    assert values_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16
 
     # A graph whose TopK already reads fp16 (or fp32 exports) is untouched.
     before = converted.SerializeToString()
     keep_topk_in_fp16(path)
     assert onnx.load(str(path)).SerializeToString() == before
+
+
+def test_keep_topk_in_fp16_leaves_an_exported_values_output_alone(tmp_path) -> None:
+    """The values output's declared type is the artifact's interface (keep_io_types).
+
+    Bypassing the cast would make the tensor FP16 while the graph still promises FLOAT to
+    every consumer of the file, so the transform declines and the round-trip stays.
+    """
+    import onnx
+
+    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
+
+    path = _topk_graph(tmp_path / "topk_output.onnx", values_is_graph_output=True)
+    before = onnx.load(str(path)).SerializeToString()
+
+    keep_topk_in_fp16(path)
+
+    after = onnx.load(str(path))
+    assert after.SerializeToString() == before
+    topk = next(node for node in after.graph.node if node.op_type == "TopK")
+    assert topk.input[0] == "x32"
+    onnx.checker.check_model(after)
+
+
+def test_cast_graph_to_fp16_splits_a_cast_feeding_both_the_island_and_the_sea(tmp_path) -> None:
+    """An int->float glue cast read by both worlds has to serve both.
+
+    Keeping the cast FP32 for the island's sake hands FP32 to an FP16 sea consumer,
+    which a strongly-typed engine rejects; retargeting it to FP16 rounds what the island
+    calibrated against. Both sides get their own cast, the way an amphibious initializer
+    gets its own copy.
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
+
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
+    zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
+    )
+    idx = helper.make_tensor_value_info("idx", TensorProto.INT64, [4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [4, 4])
+    graph = helper.make_graph(
+        [
+            # The glue cast: int64 indices lifted to float.
+            helper.make_node("Cast", ["idx"], ["lifted"], to=TensorProto.FLOAT, name="lift"),
+            helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
+            # Island consumer of the lifted tensor (Mul's data slot).
+            helper.make_node("Mul", ["wdq", "lifted"], ["island_out"], name="island_mul"),
+            # Sea consumer of the same tensor.
+            helper.make_node("PluginOp", ["lifted"], ["sea_out"], domain="autoware", name="plugin"),
+            helper.make_node("Add", ["island_out", "sea_out"], ["y"], name="join"),
+        ],
+        "amphibious_cast",
+        [idx],
+        [y],
+        [weight, scale, zero_point],
+    )
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+    )
+    path = tmp_path / "amphibious_cast.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    casts = {
+        node.name: next(a.i for a in node.attribute if a.name == "to")
+        for node in converted.graph.node
+        if node.op_type == "Cast"
+    }
+    # The original cast still serves the island in FP32; the sea reads an FP16 twin cast
+    # made from the same int64 source (not chained off the FP32 one).
+    assert casts["lift"] == TensorProto.FLOAT
+    twin = next(node for node in converted.graph.node if node.name == "lifted__fp16")
+    assert twin.input == ["idx"]
+    assert casts["lifted__fp16"] == TensorProto.FLOAT16
+    plugin = next(node for node in converted.graph.node if node.name == "plugin")
+    assert plugin.input == ["lifted__fp16"]
+    island_mul = next(node for node in converted.graph.node if node.name == "island_mul")
+    assert island_mul.input[1] == "lifted"
+    onnx.checker.check_model(converted)
+
+
+def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_output(
+    tmp_path,
+) -> None:
+    """A sea-produced FP32 graph output that an island also consumes must stay loadable.
+
+    The output name ends up owned by a boundary cast spliced after the producer; an
+    island cast reading that name would be ordered *before* the node that produces it,
+    and the ONNX loader rejects a non-topological graph.
+    """
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
+
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
+    zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
+    )
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [4, 4])
+    shared = helper.make_tensor_value_info("shared", TensorProto.FLOAT, [4, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [4, 4])
+    graph = helper.make_graph(
+        [
+            helper.make_node("PluginOp", ["x"], ["shared"], domain="autoware", name="plugin"),
+            helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
+            # Island consumer of the tensor that is also a graph output.
+            helper.make_node("Mul", ["wdq", "shared"], ["y"], name="island_mul"),
+        ],
+        "sea_output_read_by_island",
+        [x],
+        [shared, y],
+        [weight, scale, zero_point],
+    )
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+    )
+    path = tmp_path / "sea_output_read_by_island.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    onnx.checker.check_model(converted)  # rejects a non-topological node order
+    produced: set[str] = {i.name for i in converted.graph.initializer}
+    produced |= {i.name for i in converted.graph.input}
+    for node in converted.graph.node:
+        assert not (set(node.input) - produced), f"{node.name} reads before it is produced"
+        produced |= set(node.output)
+    # The public output name is still declared FP32 and still produced.
+    assert {output.name for output in converted.graph.output} == {"shared", "y"}

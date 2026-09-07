@@ -81,15 +81,21 @@ artifact 命名規則:`artifact_path(output_dir, stage_name, backend)` →
 
 1. **build_stages()**:載入 ckpt(量化 ckpt 會先按 placement record 重建量化結構),
    模型回傳 stage 序列;`validate_stages` 檢查名字唯一、宣告完整。
-2. **export**:每個 GraphStage `torch.onnx.export`(opset 17),IO 名即宣告名。
+2. **export**:每個 GraphStage `torch.onnx.export`(opset 由 `deploy.onnx.opset_version`
+   決定——框架預設 21,現行三個 experiment 都 pin 17),IO 名即宣告名。
 3. **precision pass**(`onnx/precision.py`,自動路由,模型端零程式碼):
 
    | 圖的事實 | 走哪條 | 原因 |
    | --- | --- | --- |
-   | 有自訂 domain(plugin) | 自家 island cast(整圖無島) | AutoCast 用 TRT parser 型別推導,不認 plugin op |
+   | 有自訂 domain(plugin) | 自家 island cast(island-aware:圖裡若也有 Q/DQ,島照樣成立) | AutoCast 用 TRT parser 型別推導,不認 plugin op |
    | 有 Q/DQ(INT8/FP8) | 自家 island cast(fp32 島 + fp16 海) | AutoCast 拒收 Q/DQ 模型;island 是正確性地基,見 §3 |
    | 純圖 | modelopt AutoCast | 有數值守門(逐節點比對容差) |
    | `deploy.onnx.precision: fp32` | 原樣 | |
+
+   判定順序:**先看 custom domain,再看 Q/DQ**——plugin 圖無論有沒有 Q/DQ 都走同一條
+   island cast,兩者同時成立時不會走 AutoCast。同一步驟裡,`deploy.onnx.modify_graph`
+   在 precision 之前跑(modifier 是照 fp32 匯出圖寫的),stage 自己宣告的
+   `onnx_transforms` 在之後跑(`keep_topk_in_fp16` 改的正是 precision pass 插入的 cast)。
 
 4. **TensorRT build**(`backends/tensorrt_builder.py`):**一律 strongly typed**——
    engine 的精度由 ONNX 圖的型別決定,不由 builder flag 猜。這是刻意決策:weak-typed
@@ -123,11 +129,11 @@ import 時 assert 與 whitelist 鎖死);圖 IO 保 fp32(runtime ABI)。
 | scale 保 fp32 | fp16-typed Q/DQ 踩 TRT 10.8/10.16 缺陷:合併 scale subnormal → 融合 kernel 產 NaN、build 零警告(PTv3 mIoU 0.73→0.075) |
 | DQ→消費者直連 | TRT INT8 融合 pattern 對不上,build assert |
 | 鏈到下一個 Q 零 cast | Q-propagation 被 Cast 擋住 → 量化 conv 具現化 fp32:同一 backbone 4.76 vs 3.87 ms |
-| 海全 fp16 | 未量化區跑 fp32:CenterPoint 6.75 vs 4.44 ms |
+| 海全 fp16 | 未量化區跑 fp32:CenterPoint 端到端 6.75 vs 4.44 ms(`work_dirs/reviews/three-model-results.md`);同一效應在 backbone_neck_head stage 上是 5.91 vs 2.50 ms(`deployment/export.py` docstring) |
 
 **最重要的心智模型:島的 fp32 是「記號」不是執行精度。** TRT 把島內
 `DQ→Conv→Relu→Q` 融合成 int8 進出的 kernel;實際執行 = 海 fp16、島 int8、邊界幾顆
-cast(實測合計 0.118 ms)。fp16-typed Q/DQ(opset 19 合法、ORT 算得對)在 TRT 上是
+cast(實測合計 0.118 ms,出處 `work_dirs/reviews/phase0-profiling-report.md`)。fp16-typed Q/DQ(opset 19 合法、ORT 算得對)在 TRT 上是
 **NO-GO**,完整證據與重測工具:`work_dirs/reviews/fp16-typed-qdq-nogo.md`。
 
 出現 `Quantized chain breaks at ...` 警告時:該 op 若量化可交換 → 加進
@@ -172,10 +178,11 @@ onnx backend)。
 deployment/
   stages.py        TorchStage / GraphStage / StageContext / validate_stages
   pipeline.py      StagedPipeline(三 backend 同一條)、PipelineCache、計時
-  export.py        deploy 流程編排(export→precision→build→verify→evaluate)
+  export.py        export 編排:export→modify_graph→precision→transforms→stamp→build
   onnx/
     export.py      torch.onnx.export 包裝
-    precision.py   precision pass 路由、island 規則、commuting whitelist(§3 全部)
+    precision.py   路由判定函式(custom domain / Q-DQ)、island cast、commuting whitelist(§3)
+    autocast.py    modelopt AutoCast 包裝、keep_topk_in_fp16
     modify.py      config 驅動的圖手術(deploy.onnx.modify_graph)
   backends/
     tensorrt_builder.py   strongly-typed build、plugin 載入
@@ -186,6 +193,9 @@ deployment/
     output_comparator.py  逐 tensor 比對、建議 gate
   config.py        deploy config schema
 ```
+
+verify / evaluate 的**編排**不在這裡:`scripts/deploy.py` 依序呼叫 export → verify →
+evaluate;latency 表與 metric 收斂在 `evaluation/evaluator.py`。
 
 ## 8. 深挖
 

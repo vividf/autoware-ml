@@ -90,6 +90,31 @@ class TestRecordDiff:
         assert [d.module for d in only_other] == ["other.conv"]
 
 
+class TestVerifyMatchesIsStructural:
+    """Loading is gated on (module, transform); the recorded prose is not a contract."""
+
+    def test_reworded_reason_and_detail_still_match(self):
+        saved = _record(("a.conv", "replace_module", "submodule rule", "Conv2d -> QuantConv2d"))
+        # A reworded reason, and a modelopt release that renamed the quantized class.
+        rebuilt = _record(("a.conv", "replace_module", "rules[0] matched", "Conv2d -> QConv2d"))
+        rebuilt.verify_matches(saved, source="test")
+
+    def test_a_different_module_or_transform_still_raises(self):
+        saved = _record(("a.conv", "replace_module", "r", "d"))
+        with pytest.raises(RuntimeError, match="tree drift"):
+            _record(("b.conv", "replace_module", "r", "d")).verify_matches(saved, source="test")
+        with pytest.raises(RuntimeError, match="tree drift"):
+            _record(("a.conv", "fuse_bn", "r", "d")).verify_matches(saved, source="test")
+
+    def test_a_duplicated_decision_is_still_a_difference(self):
+        saved = _record(("a.conv", "replace_module", "r", "d"))
+        twice = _record(
+            ("a.conv", "replace_module", "r", "d"), ("a.conv", "replace_module", "r", "d")
+        )
+        with pytest.raises(RuntimeError, match="tree drift"):
+            twice.verify_matches(saved, source="test")
+
+
 class TestPrepareRecordsDecisions:
     """Backend-free slice of ``prepare``: BN fuse + skip_quantize recording."""
 

@@ -285,8 +285,9 @@ def test_transfusion_bf16_export_rejects_non_fp16_precision() -> None:
         validate_module_onnx_precision(head, OmegaConf.create({"precision": "fp32"}))
 
 
-def test_transfusion_default_export_keeps_explicit_attention(tmp_path: Path) -> None:
-    head = _build_head().prepare_for_export()
+def test_transfusion_export_without_fusion_keeps_explicit_attention(tmp_path: Path) -> None:
+    """Opting out of the fusion restores the max-subtracting (fp16-safe) attention."""
+    head = _build_head(fuse_export_attention=False).prepare_for_export()
     cross_attention = head.decoder[0].cross_attn
     assert head.required_onnx_precision is None
     assert not cross_attention.fuse_attention

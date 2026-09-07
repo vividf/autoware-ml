@@ -56,9 +56,11 @@ def _mapping(raw: Any, where: str) -> Mapping[str, Any]:
 class OnnxPrecision(str, Enum):
     """Precision of the exported graphs.
 
-    Engines build strongly typed, so this is where FP16 is decided: ``FP16`` runs
-    ModelOpt AutoCast on every exported stage without Q/DQ nodes (quantized stages
-    keep the precision their checkpoint bakes in); ``FP32`` exports as traced.
+    Engines build strongly typed, so this is where FP16 is decided. ``FP16`` converts
+    every exported stage: a plain graph through ModelOpt AutoCast, and a graph carrying
+    plugin ops or Q/DQ through the island-aware whole-graph cast — its quantization
+    islands stay FP32 exactly as the checkpoint calibrated them while everything around
+    them runs FP16. ``FP32`` exports as traced.
     """
 
     FP32 = "fp32"
@@ -168,13 +170,20 @@ class StageOnnxConfig:
                 f"{[p.value for p in OnnxPrecision]}."
             ) from None
         raw_metainfo = raw.get("metainfo")
+        metainfo = None
+        if raw_metainfo is not None:
+            # Stamped verbatim into the artifact as JSON, so it must be plain Python by
+            # the time it leaves the parser — an OmegaConf node would not serialize.
+            from omegaconf import OmegaConf
+
+            if OmegaConf.is_config(raw_metainfo):
+                raw_metainfo = OmegaConf.to_container(raw_metainfo, resolve=True)
+            metainfo = _mapping(raw_metainfo, f"deploy.stages.{stage}.onnx.metainfo")
         return cls(
             dynamic_axes=raw.get("dynamic_axes"),
             dynamic_shapes=raw.get("dynamic_shapes"),
             precision=precision,
-            metainfo=_mapping(raw_metainfo, f"deploy.stages.{stage}.onnx.metainfo")
-            if raw_metainfo is not None
-            else None,
+            metainfo=metainfo,
         )
 
 
