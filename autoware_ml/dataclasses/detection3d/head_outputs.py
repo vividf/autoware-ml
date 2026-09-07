@@ -2,28 +2,32 @@
 Modules to save raw outputs from a detection3d head.
 """
 
-from jaxtyping import Float32
+from jaxtyping import Float32, Int64
 from pydantic import BaseModel, ConfigDict
 
 import torch
 
 
 class TransFusionHeadOutputs(BaseModel):
-    """
-    Dataclass to save Transfusion-based outputs from a 3D detection model.
+    """Raw TransFusion head outputs — the head's output dict as a typed container.
 
-    Attributes:
-      model_name: Name of the model.
-      dataset_name: Name of the dataset.
-      max_sweeps: Maximum number of sweeps to include.
-      sample_steps: Number of steps to sample.
+    Field names and shapes mirror ``TransFusionHead.forward``'s dict exactly
+    (``num_predictions`` = decoder layers x num_proposals); the model adapter
+    converts between the two representations losslessly so the head's dict API
+    (``loss`` / ``predict``) stays untouched.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, arbitrary_types_allowed=True)
 
+    center: Float32[torch.Tensor, "batch_size 2 num_predictions"]
+    height: Float32[torch.Tensor, "batch_size 1 num_predictions"]
+    dim: Float32[torch.Tensor, "batch_size 3 num_predictions"]
+    rot: Float32[torch.Tensor, "batch_size 2 num_predictions"]
+    vel: Float32[torch.Tensor, "batch_size 2 num_predictions"] | None
+    heatmap: Float32[torch.Tensor, "batch_size num_classes num_predictions"]
     dense_heatmap: Float32[torch.Tensor, "batch_size num_classes height width"]
-    query_heatmap_scores: Float32[torch.Tensor, "batch_size num_queries num_classes"]
-    query_labels: Float32[torch.Tensor, "batch_size num_queries 1"]
+    query_heatmap_score: Float32[torch.Tensor, "batch_size num_classes num_proposals"]
+    query_labels: Int64[torch.Tensor, "batch_size num_proposals"]
 
 
 class CenterHeadOutputs(BaseModel):
