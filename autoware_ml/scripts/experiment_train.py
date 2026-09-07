@@ -19,6 +19,7 @@ integration, and trainer execution for model training.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import hydra
@@ -36,6 +37,7 @@ from autoware_ml.builders.logger_builder import build_trainer_logger
 from autoware_ml.datamodule.multi_task.multi_task_data_module import MultiTaskDataModule
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.utils.runtime import (
+    EXPERIMENT_CONFIG_NAME_PREFIX,
     configure_torch_runtime,
     get_config_path,
     instantiate_callbacks,
@@ -47,8 +49,8 @@ from autoware_ml.utils.runtime import (
 
 logger = logging.getLogger(__name__)
 _CONFIG_PATH = get_config_path()
-CONFIG_NAME_PREFIX = "experiments/"
-os.environ["POLARS_MAX_THREADS"] =  "1"
+os.environ["POLARS_MAX_THREADS"] = "1"
+
 
 def train(
     trainer: L.Trainer,
@@ -105,7 +107,7 @@ def main(cfg: DictConfig):
         raise ValueError("Hydra config name is not available.")
 
     logger_enabled = cfg.get("logger") is not None
-    config_name = config_name.removeprefix(CONFIG_NAME_PREFIX)
+    config_name = config_name.removeprefix(EXPERIMENT_CONFIG_NAME_PREFIX)
     experiment_name = f"{cfg.experiment_group_name}/{cfg.experiment_name}"
 
     run_context = build_mlflow_run_context(

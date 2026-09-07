@@ -32,6 +32,23 @@ from autoware_ml.utils.session import AUTOWARE_ML_SESSION_OPTION, TMUX_BASE_COMM
 
 register_config_resolvers()
 
+#: Config family prefixes ("tasks/..." vs "experiments/...") shared by the CLI's
+#: dispatch table, the completion callbacks, and the runtime resolvers. Defined here
+#: (not in cli/runtime.py) so importing them never drags in the heavy runtime module —
+#: CLI startup must not import mlflow/hydra transitively.
+TASK_CONFIG_PREFIX = "tasks"
+EXPERIMENT_CONFIG_PREFIX = "experiments"
+
+#: Which config family each verb accepts, mirroring the top-level commands' own
+#: completions. A verb forwarded into a session must complete the same family it
+#: completes at the top level, or the shell offers configs the command will reject.
+_SESSION_CONFIG_FAMILY = {
+    "train": TASK_CONFIG_PREFIX,
+    "test": TASK_CONFIG_PREFIX,
+    "deploy": EXPERIMENT_CONFIG_PREFIX,
+    "quantize": EXPERIMENT_CONFIG_PREFIX,
+}
+
 _NUMERIC_VALUE_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
@@ -286,9 +303,9 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         root = command_args[0]
         last = command_args[-1]
 
-        if root in {"train", "test", "deploy"} and last == "--config-name":
-            return complete_config_value(incomplete, "tasks")
-        if root in {"train", "test", "deploy"} and last == "--weights":
+        if root in _SESSION_CONFIG_FAMILY and last == "--config-name":
+            return complete_config_value(incomplete, _SESSION_CONFIG_FAMILY[root])
+        if root in _SESSION_CONFIG_FAMILY and last == "--weights":
             return complete_path_value(incomplete, file_suffixes=(".ckpt",))
         if root == "train" and last == "--resume-checkpoint":
             return complete_path_value(incomplete, file_suffixes=(".ckpt",))
@@ -299,7 +316,7 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
                 return complete_path_value(incomplete)
             if len(command_args) >= 2 and command_args[1] == "export":
                 if last == "--config-name":
-                    return complete_config_value(incomplete, "tasks")
+                    return complete_config_value(incomplete, TASK_CONFIG_PREFIX)
                 if last == "--db-path":
                     return complete_path_value(incomplete)
                 if last == "--export-dir":
@@ -314,6 +331,7 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         "train",
         "test",
         "deploy",
+        "quantize",
         "create-dataset",
         "mlflow",
     ]
@@ -354,6 +372,7 @@ def complete_session_command_value(command_args: list[str], incomplete: str) -> 
         "train": ["--config-name", "--weights", "--resume-checkpoint"],
         "test": ["--config-name", "--weights"],
         "deploy": ["--config-name", "--weights"],
+        "quantize": ["--config-name", "--weights"],
         "create-dataset": ["--dataset", "--task", "--root-path", "--out-dir"],
         "mlflow": ["ui", "export"],
     }
