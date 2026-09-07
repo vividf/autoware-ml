@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import pytest
 import torch
+from spconv.pytorch import SparseSequential
+import torch.nn as nn
 
 from autoware_ml.models.detection3d.encoders.voxel import HardSimpleVoxelSinCosEncoder
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.models.detection3d.encoders.sparse import SparseConv3d as NativeSparseConv3d
+from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
+from autoware_ml.models.detection3d.encoders.sparse import SubMConv3d as NativeSubMConv3d
+from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
+from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
 
 _MIN = [-122.4, -122.4, -3.0, 0.0]
 _MAX = [122.4, 122.4, 5.0, 255.0]
@@ -37,12 +44,6 @@ def test_voxel_encoder_mean_pooling_ignores_padding() -> None:
 
 @pytest.mark.skipif(not IS_SPCONV_AVAILABLE, reason="SparseEncoder requires spconv")
 def test_sparse_encoder_prepare_for_export_replaces_sparse_convolutions() -> None:
-    from autoware_ml.models.detection3d.encoders.sparse import SparseConv3d as NativeSparseConv3d
-    from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
-    from autoware_ml.models.detection3d.encoders.sparse import SubMConv3d as NativeSubMConv3d
-    from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
-    from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
-
     encoder = SparseEncoder(
         in_channels=32,
         sparse_shape=[16, 16, 5],
@@ -60,10 +61,49 @@ def test_sparse_encoder_prepare_for_export_replaces_sparse_convolutions() -> Non
         for module in export_encoder.modules()
     )
     assert any(isinstance(module, ExportableSparseConv3d) for module in export_encoder.modules())
-    assert torch.equal(export_encoder.conv_input[0].weight, encoder.conv_input[0].weight)
+
+    # BN is folded into the convolutions, so the deployed graph is BatchNorm-free while
+    # the training encoder keeps its BN layers.
+    assert not any(isinstance(module, torch.nn.BatchNorm1d) for module in export_encoder.modules())
+    assert any(isinstance(module, torch.nn.BatchNorm1d) for module in encoder.modules())
+
+    batch_norm = encoder.conv_input[1]
+    fold_scale = batch_norm.weight / torch.sqrt(batch_norm.running_var + batch_norm.eps)
+    # spconv kernels are (out_channels, *kernel, in_channels), so the per-output-channel
+    # fold scale applies along dim 0.
+    expected_weight = encoder.conv_input[0].weight * fold_scale.view(-1, 1, 1, 1, 1)
+    assert torch.equal(export_encoder.conv_input[0].weight, expected_weight)
+
+    # The bias the fold introduces is beta - mu * fold_scale; a wrapper built without it
+    # (bias=False on the export copy) would leave the fold half-applied and silently shift
+    # every output. The fold itself is spconv's, but building the wrapper around it is ours.
+    expected_bias = batch_norm.bias - batch_norm.running_mean * fold_scale
+    assert export_encoder.conv_input[0].bias is not None
+    assert torch.allclose(export_encoder.conv_input[0].bias, expected_bias, atol=1e-6)
 
     export_encoder.conv_input[0].weight.data.add_(1.0)
     assert not torch.equal(export_encoder.conv_input[0].weight, encoder.conv_input[0].weight)
+
+
+@pytest.mark.skipif(
+    not IS_SPCONV_AVAILABLE,
+    reason="BEVFusion sparse encoder requires spconv",
+)
+def test_prepare_for_export_refuses_to_leave_a_batchnorm_in_the_graph() -> None:
+    """ "The deployed sparse graph has no BatchNormalization node" is enforced, not hoped.
+
+    The fold pairs a convolution with the norm declared next to it. Separate the two and
+    the pair stops matching; without this check the export would simply carry a BN node
+    that no plugin absorbs, and nothing would say so.
+    """
+
+    encoder = SparseEncoder(in_channels=4, sparse_shape=[16, 16, 9], dense_output_shapes=[2, 2, 2])
+    # An Identity between the convolution and its norm: adjacency is all the fold has.
+    conv, norm = encoder.conv_input[0], encoder.conv_input[1]
+    encoder.conv_input = SparseSequential(conv, nn.Identity(), norm, encoder.conv_input[2])
+
+    with pytest.raises(RuntimeError, match="survived the export fold"):
+        encoder.prepare_for_export()
 
 
 @pytest.mark.skipif(
@@ -71,8 +111,6 @@ def test_sparse_encoder_prepare_for_export_replaces_sparse_convolutions() -> Non
     reason="BEVFusion sparse encoder requires CUDA spconv",
 )
 def test_sparse_encoder_produces_dense_bev() -> None:
-    from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
-
     device = torch.device("cuda")
     encoder = SparseEncoder(
         in_channels=32,
