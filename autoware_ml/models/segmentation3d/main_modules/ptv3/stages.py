@@ -48,19 +48,24 @@ from typing import Any, Mapping
 import torch
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
-from autoware_ml.types.backend import Backend
 from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     ENCODER_EXPORT_POOLING_FIELDS,
+    _PTv3DetHeadExportModule,
     _PTv3EncoderExportModule,
     _PTv3SegHeadExportModule,
     build_point_feature_dynamic_axes,
     build_ptv3_encoder_dynamic_axes,
     build_seg_head_input_dynamic_axes,
     build_serialized_pooling_metadata,
+    det_head_export_input_names,
     seg_head_export_input_names,
     stage_feature_names,
 )
-from autoware_ml.utils.point_cloud.structures import serialize_point_cloud_batch
+from autoware_ml.types.backend import Backend
+from autoware_ml.utils.point_cloud.structures import (
+    bit_length_tensor,
+    serialize_point_cloud_batch,
+)
 
 # Stage / artifact names (legacy artifact ABI: <name>.onnx).
 SERIALIZE_STAGE = "serialize_points"
@@ -76,8 +81,6 @@ def _export_geometry(model: Any) -> tuple[torch.Tensor, torch.Tensor]:
     (that method only borrowed the batch's device); the export module registers
     both as buffers, so they follow the module to its execution device.
     """
-    from autoware_ml.utils.point_cloud.structures import bit_length_tensor
-
     point_cloud_range = torch.tensor(model.point_cloud_range, dtype=torch.float32)
     axis_extents = (point_cloud_range[3:] - point_cloud_range[:3]) / model.grid_size
     serialization_depth = bit_length_tensor(torch.max(axis_extents))
@@ -214,11 +217,6 @@ def build_ptv3_seg_stages(model: Any) -> tuple[Stage, ...]:
 
 def build_ptv3_det_stages(model: Any) -> tuple[Stage, ...]:
     """Declare the PTv3 detection stage graph over ``model``'s submodules."""
-    from autoware_ml.models.detection3d.ptv3 import (
-        _PTv3DetHeadExportModule,
-        det_head_export_input_names,
-    )
-
     num_poolings = _pooling_count(model)
     stage_count = num_poolings + 1
     output_names = tuple(model.get_export_output_names())

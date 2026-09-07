@@ -15,6 +15,7 @@
 """Folding sparse bias adds and ReLUs into the ImplicitGemm plugin node."""
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import onnx
@@ -24,6 +25,7 @@ from autoware_ml.ops.spconv.onnx_fusion import (
     ACT_RELU,
     fuse_implicit_gemm_bias_activation,
 )
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 
 
 def _implicit_gemm(inputs: list[str], output: str, name: str) -> onnx.NodeProto:
@@ -132,9 +134,6 @@ def test_an_unfoldable_plugin_node_is_reported(tmp_path, caplog) -> None:
     builds — so nothing fails. An exporter change that broke every fold would look
     exactly like a slow engine, which is why the pass says how many it left behind.
     """
-    import logging
-
-    from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 
     # The Add consumes two non-initializer tensors, so the bias fold cannot apply.
     model = _graph(
@@ -158,8 +157,6 @@ def test_structurally_identical_nodes_are_removed_by_identity(tmp_path) -> None:
     ``node in removed`` compares protobuf messages by value; nodes that differ only in
     what they are attached to would match, and removing one would drop both.
     """
-    from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
-
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_a_out", "gemm_a"),
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_b_out", "gemm_b"),

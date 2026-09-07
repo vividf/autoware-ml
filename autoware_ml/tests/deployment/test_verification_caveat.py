@@ -23,6 +23,11 @@ from types import SimpleNamespace
 
 from autoware_ml.deployment.config import DeployConfig
 from autoware_ml.scripts.deploy import verify
+from autoware_ml.models.detection3d.main_modules.bevfusion.model import (
+    BEVFusionLidarDetectionModel,
+)
+from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
+from autoware_ml.models.segmentation3d.main_modules.ptv3.model import PTv3SegmentationModel
 
 
 def _deploy_cfg(verification_enabled: bool) -> DeployConfig:
@@ -64,12 +69,6 @@ def test_declared_caveat_skips_verification_loudly(caplog) -> None:
 
 
 def test_declared_models_carry_their_reasons() -> None:
-    from autoware_ml.models.detection3d.main_modules.bevfusion.model import (
-        BEVFusionLidarDetectionModel,
-    )
-    from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
-    from autoware_ml.models.segmentation3d.main_modules.ptv3.model import PTv3SegmentationModel
-
     assert MultiTaskBaseModel.verification_caveat is None
     assert "shuffle_orders" in PTv3SegmentationModel.verification_caveat
     assert "proposals" in BEVFusionLidarDetectionModel.verification_caveat

@@ -26,13 +26,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
 
 
 def _instantiate_modifier(modify_graph_cfg: Any) -> Any:
-    import hydra
-
     modifier = hydra.utils.instantiate(modify_graph_cfg)
     if callable(modifier):
         return modifier
@@ -52,7 +52,6 @@ def should_modify_graph(modify_graph_cfg: Any) -> bool:
     """Return whether graph modification is enabled (a non-None modifier config)."""
     if modify_graph_cfg is None:
         return False
-    from omegaconf import DictConfig, OmegaConf
 
     if isinstance(modify_graph_cfg, DictConfig):
         return OmegaConf.to_container(modify_graph_cfg, resolve=False) is not None
@@ -66,4 +65,3 @@ def modify_onnx_graph(onnx_path: Path, modify_graph_cfg: Any) -> Path:
     modified_path = _apply_modifier(modifier, onnx_path)
     logger.info("Successfully modified ONNX graph: %s", modified_path)
     return modified_path
-

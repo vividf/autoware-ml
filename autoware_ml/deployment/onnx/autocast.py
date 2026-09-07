@@ -27,7 +27,11 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
+import onnx
 import torch
+from modelopt.onnx.autocast import convert_to_mixed_precision
+from onnx import TensorProto
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +57,6 @@ def autocast_to_fp16(onnx_path: Path, sample_inputs: Mapping[str, Any]) -> None:
         onnx_path: Exported FP32 ``.onnx``, overwritten with the mixed-FP16 graph.
         sample_inputs: ONNX input name -> tensor/array with concrete shapes (one batch).
     """
-    from modelopt.onnx.autocast import convert_to_mixed_precision
-
-    import numpy as np
-    import onnx
 
     feed = {}
     for name, value in sample_inputs.items():
@@ -96,8 +96,6 @@ def keep_topk_in_fp16(onnx_path: Path) -> Path:
 
     No-op when no FP32 cast feeds a TopK (fp32 exports, Q/DQ graphs).
     """
-    import onnx
-    from onnx import TensorProto
 
     model = onnx.load(str(onnx_path))
     graph = model.graph

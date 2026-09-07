@@ -20,6 +20,9 @@ artifact names, ONNX I/O names, output-field table) against the frozen ABI.
 """
 
 from __future__ import annotations
+import io
+import pathlib
+import tokenize
 
 import pytest
 import torch
@@ -204,10 +207,6 @@ class TestCenterPointStages:
 
         Comments and docstrings may point at the reference implementation; code may not.
         """
-        import io
-        import pathlib
-        import tokenize
-
         root = pathlib.Path(__file__).resolve().parents[2]
         triple_quotes = ('"' * 3, "'" * 3)
         offenders = []

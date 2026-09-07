@@ -50,10 +50,20 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule
 from torch import nn
 
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.quantization.config import Precision
 from autoware_ml.quantization.core.descriptors import input_desc
 
 from .quant_blocks import QuantBeforePool, QuantBlockRegistry, QuantSparseBasicBlock
+
+# spconv is an optional runtime dependency (see autoware_ml.ops.spconv.availability), and
+# the module defining SparseBasicBlock imports it unconditionally. Quantization itself does
+# not need spconv — a CenterPoint PTQ run on a machine without it must still work — so the
+# one block class that does is bound here and checked in default_block_specs().
+if IS_SPCONV_AVAILABLE:
+    from autoware_ml.models.detection3d.encoders.sparse import SparseBasicBlock
+else:  # pragma: no cover — exercised only in spconv-less environments
+    SparseBasicBlock = None
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +145,7 @@ def default_block_specs() -> BlockSpecs:
     can exist in any model, so the spec set is simply empty. VoVNet blocks are not defined
     in this repo: the model that brings them declares their specs.
     """
-    try:
-        from autoware_ml.models.detection3d.encoders.sparse import SparseBasicBlock
-    except ImportError:  # pragma: no cover — spconv-less environments
+    if SparseBasicBlock is None:
         return BlockSpecs()
     return BlockSpecs(
         residual=(

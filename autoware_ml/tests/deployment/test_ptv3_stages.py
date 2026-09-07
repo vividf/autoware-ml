@@ -24,6 +24,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from torch import nn
+import torch
 
 from autoware_ml.deployment.stages import graph_stages, validate_stages
 from autoware_ml.models.segmentation3d.main_modules.ptv3.stages import (
@@ -35,6 +36,11 @@ from autoware_ml.models.segmentation3d.main_modules.ptv3.stages import (
     build_ptv3_seg_stages,
     encoder_input_names,
     serialize_output_names,
+)
+from autoware_ml.models.segmentation3d.encoders.ptv3 import SerializedPoolingMeta
+from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
+    build_seg_head_export_args,
+    seg_head_export_input_names,
 )
 
 _NUM_POOLINGS = 3  # -> stage_count 4
@@ -108,13 +114,6 @@ def test_seg_head_export_names_and_args_stay_in_lockstep() -> None:
     raise anywhere — it would decode with the permutation reversed and only show up in
     mIoU. The three are driven by one field tuple; this pins that they agree.
     """
-    import torch
-
-    from autoware_ml.models.segmentation3d.encoders.ptv3 import SerializedPoolingMeta
-    from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
-        build_seg_head_export_args,
-        seg_head_export_input_names,
-    )
 
     stage_count = 4
     dec_depths = (1, 0, 1)  # stage 1 has no blocks: its metadata must be absent

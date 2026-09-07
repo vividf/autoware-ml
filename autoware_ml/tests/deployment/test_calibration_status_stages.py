@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import torch
 from torch import nn
+import onnx
 
 from autoware_ml.deployment.stages import StageContext, validate_stages
 from autoware_ml.models.calibration_status.main_modules.calibration_status.stages import (
@@ -28,6 +29,7 @@ from autoware_ml.models.calibration_status.main_modules.calibration_status.stage
     PROBABILITIES,
     build_calibration_status_stages,
 )
+from autoware_ml.deployment.onnx.export import export_to_onnx
 
 
 class _TinyHead(nn.Module):
@@ -85,10 +87,6 @@ def test_fetch_glue_reads_fused_img_from_batch_inputs() -> None:
 
 
 def test_graph_exports_to_onnx_with_the_abi_names(tmp_path) -> None:
-    import onnx
-
-    from autoware_ml.deployment.onnx.export import export_to_onnx
-
     stages = build_calibration_status_stages(_tiny_model())
     graph = stages[-1]
     path = tmp_path / f"{graph.name}.onnx"

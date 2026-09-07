@@ -1112,7 +1112,7 @@ class TransFusionHead(nn.Module):
         loss_dict["loss"] = sum(value for key, value in loss_dict.items() if "loss" in key)
         return loss_dict
 
-    def prepare_for_export(self) -> "TransFusionHead":
+    def prepare_for_export(self) -> TransFusionHead:
         """Return an export-ready copy with attention replaced by exportable equivalents.
 
         Returns:

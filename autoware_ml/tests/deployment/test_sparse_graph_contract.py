@@ -28,7 +28,14 @@ from __future__ import annotations
 
 import inspect
 
+
+from torch import nn
 from autoware_ml.ops.spconv import sparse_functional
+from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
+    SPARSE_STAGE,
+    build_bevfusion_lidar_stages,
+)
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 
 
 def _emitted_attributes(symbolic) -> set[str]:
@@ -78,13 +85,6 @@ def test_implicit_gemm_emits_the_plugin_field_set() -> None:
 
 def test_the_sparse_stage_wires_the_bias_activation_fusion() -> None:
     """The fusion is only useful if the stage declaration actually runs it."""
-    from torch import nn
-
-    from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
-        SPARSE_STAGE,
-        build_bevfusion_lidar_stages,
-    )
-    from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 
     model = type(
         "Stub",

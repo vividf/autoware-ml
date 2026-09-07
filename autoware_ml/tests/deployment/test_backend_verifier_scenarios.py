@@ -20,6 +20,9 @@ import dataclasses
 
 import pytest
 
+
+from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
+
 backend_verifier = pytest.importorskip(
     "autoware_ml.deployment.verification.backend_verifier",
     reason="backend_verifier transitively needs the full model stack",
@@ -117,8 +120,6 @@ class TestDegenerateScenariosAreRejected:
         assert scenario.ref_device == "cpu" and scenario.test_device == "cuda"
 
     def test_verification_enabled_without_scenarios_raises(self):
-        from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
-
         verifier = BackendVerifier(pipelines=None, tolerance=0.01)
         with pytest.raises(ValueError, match="scenarios is empty"):
             verifier.run(batches=[], scenarios=(), available_backends=set())

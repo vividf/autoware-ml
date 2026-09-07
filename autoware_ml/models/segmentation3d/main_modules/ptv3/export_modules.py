@@ -274,7 +274,7 @@ def _run_ptv3_encoder_export(
     serialized_code: torch.Tensor,
     sparse_shape: torch.Tensor,
     *serialized_pooling_inputs: torch.Tensor,
-    pooling_field_names: "Sequence[str]" = SERIALIZED_POOLING_FIELDS,
+    pooling_field_names: Sequence[str] = SERIALIZED_POOLING_FIELDS,
 ) -> Point:
     """Run the shared tensor-only PTv3 encoder export path.
 
@@ -373,6 +373,63 @@ def link_stage_points(
 def _block_stage_indices(dec_depths: Sequence[int]) -> list[int]:
     """Return the decoder stages that contain blocks of any kind."""
     return [stage for stage, depth in enumerate(dec_depths) if depth > 0]
+
+
+# --- Detection head -----------------------------------------------------------
+# The det head's export pieces live here, next to the seg head's, because the stage
+# graph for both tasks is built in this package. Keeping them in the legacy
+# `models/detection3d/ptv3.py` would make the stage graph import that module, and
+# that module imports back into this package — an import cycle whose only previous
+# answer was a function-level import.
+
+
+def det_head_export_input_names(stage_count: int) -> list[str]:
+    """Return the split det-head export input names for a given stage count."""
+    skip_stage = stage_count - 2
+    deep_stage = stage_count - 1
+    return [
+        f"point_feat_{skip_stage}",
+        f"point_feat_{deep_stage}",
+        f"pooling_cluster_{skip_stage}",
+        f"point_grid_coord_{skip_stage}",
+    ]
+
+
+class _PTv3DetHeadExportModule(nn.Module):
+    """Export-only detection head consuming the two coarsest encoder stages."""
+
+    def __init__(
+        self,
+        bev_neck: nn.Module,
+        bbox_head: nn.Module,
+        output_names: Sequence[str],
+    ) -> None:
+        """Initialize the export-only detection head module.
+
+        Args:
+            bev_neck: Export-ready detection BEV neck (``PTv3DetBEVNeck``).
+            bbox_head: Export-ready detection head module.
+            output_names: Ordered output tensor names emitted by ``bbox_head``.
+        """
+        super().__init__()
+        self.bev_neck = bev_neck
+        self.bbox_head = bbox_head
+        self.output_names = list(output_names)
+
+    def forward(
+        self,
+        skip_feat: torch.Tensor,
+        deepest_feat: torch.Tensor,
+        cluster: torch.Tensor,
+        skip_grid_coord: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Rebuild the coarse pooling link, project to BEV, and run the head."""
+        offset = shape_as_tensor(skip_feat)[:1].to(skip_feat.device)
+        parent = Point(feat=skip_feat, grid_coord=skip_grid_coord, offset=offset)
+        point = Point(feat=deepest_feat, pooling_parent=parent, pooling_inverse=cluster)
+        bev = self.bev_neck(point)
+        outputs = self.bbox_head(bev)
+        return tuple(outputs[name] for name in self.output_names)
 
 
 def seg_head_export_input_names(stage_count: int, dec_depths: Sequence[int]) -> list[str]:

@@ -32,6 +32,7 @@ from autoware_ml.quantization.config import Precision, QuantizationConfig  # noq
 from autoware_ml.quantization.core.quantizer_state import quantizers_disabled  # noqa: E402
 from autoware_ml.quantization.core.replace import replace_quantizable_modules  # noqa: E402
 from autoware_ml.quantization.plan import QuantizationPlan, QuantRules  # noqa: E402
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE  # noqa: E402
 from autoware_ml.quantization.recipes.attach import (  # noqa: E402
     RECIPE_ATTACHERS,
     BlockSpecs,
@@ -40,12 +41,20 @@ from autoware_ml.quantization.recipes.attach import (  # noqa: E402
     ResidualBlockSpec,
     attach_ese_recipe,
     attach_residual_add_recipe,
+    default_block_specs,
 )
 from autoware_ml.quantization.recipes.quant_blocks import (  # noqa: E402
     QuantBeforePool,
     QuantESEModule,
     QuantOSAModule,
 )
+
+# The module defining SparseBasicBlock imports spconv unconditionally, and spconv is an
+# optional runtime dependency — the rest of this file's tests must still run without it.
+if IS_SPCONV_AVAILABLE:
+    from autoware_ml.models.detection3d.encoders.sparse import (  # noqa: E402
+        SparseBasicBlock,
+    )
 
 
 class _DenseBlock(nn.Module):
@@ -254,14 +263,9 @@ class TestMaxPoolRecipe:
             assert torch.equal(model(x), want)
 
 
-@pytest.mark.skipif(
-    pytest.importorskip("importlib").util.find_spec("spconv") is None, reason="spconv not installed"
-)
+@pytest.mark.skipif(not IS_SPCONV_AVAILABLE, reason="spconv not installed")
 class TestSparseBasicBlockSpec:
     def test_default_spec_converts_the_repo_block(self):
-        from autoware_ml.models.detection3d.encoders.sparse import SparseBasicBlock
-        from autoware_ml.quantization.recipes.attach import default_block_specs
-
         specs = default_block_specs()
         assert [s.block_cls for s in specs.residual] == [SparseBasicBlock]
         assert specs.ese == ()

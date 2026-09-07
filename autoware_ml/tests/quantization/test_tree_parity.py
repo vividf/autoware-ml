@@ -26,6 +26,7 @@ Requires nvidia-modelopt (skipped otherwise).
 from __future__ import annotations
 
 import pytest
+from modelopt.torch.quantization.nn import TensorQuantizer as tq_cls
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("modelopt")
@@ -153,8 +154,6 @@ class TestTreeParity:
         )
 
     def test_skip_quantize_subtree_has_no_quantizers(self):
-        from modelopt.torch.quantization.nn import TensorQuantizer as tq_cls
-
         model = _tiny_centerpoint()
         model.build_quantization_plan(_CONFIG).prepare(model)
         kept = [

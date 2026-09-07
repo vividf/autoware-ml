@@ -31,7 +31,7 @@ class LatencyStats:
     median: float
 
     @classmethod
-    def from_samples(cls, samples_ms: list[float]) -> "LatencyStats":
+    def from_samples(cls, samples_ms: list[float]) -> LatencyStats:
         """Compute the summary from raw per-batch timings."""
         if not samples_ms:
             return cls(mean=0.0, std=0.0, min=0.0, max=0.0, median=0.0)

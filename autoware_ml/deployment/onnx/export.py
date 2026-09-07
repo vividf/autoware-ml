@@ -37,7 +37,9 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import onnx
 import torch
+from onnx.external_data_helper import convert_model_from_external_data
 from torch.export import Dim
 
 from autoware_ml.ops.segment.scatter_reduce import register_scatter_reduce_onnx_symbolic
@@ -165,8 +167,6 @@ def _log_export_inputs(args: Sequence[Any], input_names: Sequence[str]) -> None:
 
 def _merge_onnx_external_data(onnx_path: Path) -> None:
     """Merge ONNX external data shards back into a single file."""
-    import onnx
-    from onnx.external_data_helper import convert_model_from_external_data
 
     onnx_model = onnx.load(str(onnx_path), load_external_data=True)
     convert_model_from_external_data(onnx_model)
@@ -250,4 +250,3 @@ def export_to_onnx(
         _merge_onnx_external_data(output_path)
         data_path.unlink()
         logger.info("Successfully merged external data into the ONNX file")
-

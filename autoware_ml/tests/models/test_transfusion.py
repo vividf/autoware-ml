@@ -32,6 +32,7 @@ from autoware_ml.models.detection3d.transfusion import TransFusionDetectionModel
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
 from autoware_ml.utils.onnx_precision import validate_module_onnx_precision
+from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
 
 # Scaled-down mirror of tasks/detection3d/transfusion/base.yaml: an 8 m range
 # with 0.25 m voxels gives a 32x32x40 grid, and the SparseEncoder's three
@@ -45,8 +46,6 @@ _OUT_SIZE_FACTOR = 8
 
 
 def _build_model() -> TransFusionDetectionModel:
-    from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
-
     return TransFusionDetectionModel(
         pts_voxel_encoder=HardSimpleVoxelSinCosEncoder(
             in_channels=4,

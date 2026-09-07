@@ -17,10 +17,15 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
+import logging
+import os
 
 import pytest
 import torch
 from torch import nn
+from omegaconf import OmegaConf
+import onnx
 
 from autoware_ml.deployment.export import available_backends
 from autoware_ml.deployment.pipeline import PipelineCache, StagedPipeline
@@ -33,6 +38,11 @@ from autoware_ml.deployment.stages import (
     validate_stages,
 )
 from autoware_ml.types.backend import Backend
+from autoware_ml.deployment import export as export_module
+from autoware_ml.deployment.config import DeployConfig
+from autoware_ml.deployment.stages import (
+    StageContext,
+)
 
 
 class _Double(nn.Module):
@@ -166,8 +176,6 @@ class TestStagedPipeline:
 
 class TestAvailableBackends:
     def _touch(self, path, mtime=None):
-        import os
-
         path.write_bytes(b"stub")
         if mtime is not None:
             os.utime(path, (mtime, mtime))
@@ -188,8 +196,6 @@ class TestAvailableBackends:
         assert available_backends(_toy_stages(), tmp_path) == {Backend.PYTORCH, Backend.TENSORRT}
 
     def test_stale_engine_stays_available_but_warns(self, tmp_path, caplog):
-        import logging
-
         for name in ("encoder", "head"):
             self._touch(tmp_path / f"{name}.engine", mtime=1_000)
             self._touch(tmp_path / f"{name}.onnx", mtime=2_000)
@@ -207,13 +213,6 @@ def test_graph_stage_declares_its_own_dynamic_axes_and_the_config_overrides_them
     A point model has no static point count, so its axes are a property of the
     declaration rather than a per-experiment choice.
     """
-    from omegaconf import OmegaConf
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment import export as export_module
-    from autoware_ml.deployment.config import DeployConfig
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
 
     seen: list[dict] = []
 
@@ -263,13 +262,6 @@ def test_graph_stage_declares_its_own_dynamic_axes_and_the_config_overrides_them
 
 def test_export_honors_the_per_stage_precision_override(tmp_path, monkeypatch) -> None:
     """`deploy.stages.<name>.onnx.precision` wins over the global fp16 setting."""
-    from omegaconf import OmegaConf
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment import export as export_module
-    from autoware_ml.deployment.config import DeployConfig
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
 
     monkeypatch.setattr(
         export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
@@ -298,14 +290,22 @@ def test_export_honors_the_per_stage_precision_override(tmp_path, monkeypatch) -
     deploy_cfg = DeployConfig.from_dict(
         OmegaConf.create(
             {
-                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17, "precision": "fp16"},
+                "onnx": {
+                    "enabled": True,
+                    "dynamo": False,
+                    "opset_version": 17,
+                    "precision": "fp16",
+                },
                 "tensorrt": {"enabled": False},
                 "stages": {"kept_fp32": {"onnx": {"precision": "fp32"}}},
             }
         )
     )
     export_module.export_stages(
-        stages, batch_inputs=None, deploy_cfg=deploy_cfg, output_dir=tmp_path,
+        stages,
+        batch_inputs=None,
+        deploy_cfg=deploy_cfg,
+        output_dir=tmp_path,
         device=torch.device("cpu"),
     )
     assert converted == ["goes_fp16"]
@@ -317,14 +317,6 @@ def test_export_routes_plugin_and_qdq_graphs_to_the_island_cast(tmp_path, monkey
     The unit tests cover each pass; this covers the *choice* — a plugin graph and a Q/DQ
     graph must take the whole-graph island cast, and a plain graph AutoCast.
     """
-    from omegaconf import OmegaConf
-    import pytest
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment import export as export_module
-    from autoware_ml.deployment.config import DeployConfig
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
 
     monkeypatch.setattr(
         export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
@@ -346,7 +338,12 @@ def test_export_routes_plugin_and_qdq_graphs_to_the_island_cast(tmp_path, monkey
     deploy_cfg = DeployConfig.from_dict(
         OmegaConf.create(
             {
-                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17, "precision": "fp16"},
+                "onnx": {
+                    "enabled": True,
+                    "dynamo": False,
+                    "opset_version": 17,
+                    "precision": "fp16",
+                },
                 "tensorrt": {"enabled": False},
             }
         )
@@ -376,14 +373,6 @@ def test_export_routes_plugin_and_qdq_graphs_to_the_island_cast(tmp_path, monkey
 
 def test_graph_rewrites_must_write_back_to_the_stage_artifact(tmp_path, monkeypatch) -> None:
     """A transform that renames the file would leave verification reading the old one."""
-    from omegaconf import OmegaConf
-    import pytest
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment import export as export_module
-    from autoware_ml.deployment.config import DeployConfig
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
 
     monkeypatch.setattr(
         export_module, "export_to_onnx", lambda *args, path=None, **kwargs: args[2].write_bytes(b"")
@@ -410,8 +399,10 @@ def test_graph_rewrites_must_write_back_to_the_stage_artifact(tmp_path, monkeypa
     )
     deploy_cfg = DeployConfig.from_dict(
         OmegaConf.create(
-            {"onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
-             "tensorrt": {"enabled": False}}
+            {
+                "onnx": {"enabled": True, "dynamo": False, "opset_version": 17},
+                "tensorrt": {"enabled": False},
+            }
         )
     )
     with pytest.raises(ValueError, match="must write back to the path"):
@@ -426,16 +417,6 @@ def test_graph_rewrites_must_write_back_to_the_stage_artifact(tmp_path, monkeypa
 
 def test_export_stamps_provenance_into_every_stage_artifact(tmp_path, monkeypatch) -> None:
     """`--release` and the export's identity land in the ONNX metadata, not a side file."""
-    import json
-
-    import onnx
-    from omegaconf import OmegaConf
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment import export as export_module
-    from autoware_ml.deployment.config import DeployConfig
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
 
     def fake_export(module, args, path, **kwargs):
         graph = onnx.helper.make_graph(
@@ -498,15 +479,6 @@ def test_validate_stages_rejects_a_declaration_that_opens_with_a_graph_stage() -
     Everything past the opening stage is a run-time question — a ``TorchStage`` declares
     no outputs — and ``StageContext.__getitem__`` is what answers it.
     """
-    import pytest
-    from torch import nn
-
-    from autoware_ml.deployment.stages import (
-        GraphStage,
-        StageContext,
-        TorchStage,
-        validate_stages,
-    )
 
     first = GraphStage(
         "first",
@@ -529,10 +501,6 @@ def test_validate_stages_rejects_a_declaration_that_opens_with_a_graph_stage() -
 
 def test_pytorch_backend_answers_the_artifact_question_the_same_way_twice() -> None:
     """`artifact_suffix` and `artifact_path` must agree that PyTorch has no artifact."""
-    import pytest
-
-    from autoware_ml.deployment.stages import artifact_path
-    from autoware_ml.types.backend import Backend
 
     with pytest.raises(ValueError, match="no exported artifact"):
         _ = Backend.PYTORCH.artifact_suffix

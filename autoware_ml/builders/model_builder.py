@@ -23,6 +23,7 @@ import torch
 from autoware_ml.models.multi_task_base_model import MultiTaskBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.quantization.checkpoint import find_quantization
+from autoware_ml.quantization.loader import load_quantized_model
 from autoware_ml.utils.checkpoints import apply_matching_weights
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,6 @@ def build_model(
         )
         quantized = find_quantization(weight_paths)
         if quantized is not None:
-            from autoware_ml.quantization.loader import load_quantized_model
-
             path, description = quantized
             logger.info(
                 "Quantized checkpoint detected (%s, mode=%s): rebuilding the quantized tree "

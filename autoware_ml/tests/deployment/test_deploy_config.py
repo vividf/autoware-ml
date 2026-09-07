@@ -120,8 +120,6 @@ class TestDeployConfig:
 
 def test_stage_onnx_precision_overrides_the_global_setting() -> None:
     """A stage may pin its own precision; unset stages inherit ``deploy.onnx.precision``."""
-    from autoware_ml.deployment.config import DeployConfig, OnnxPrecision
-
     cfg = DeployConfig.from_dict(
         {
             "onnx": {"enabled": True, "precision": "fp16"},
@@ -135,10 +133,6 @@ def test_stage_onnx_precision_overrides_the_global_setting() -> None:
 
 
 def test_stage_onnx_precision_rejects_unknown_values() -> None:
-    import pytest
-
-    from autoware_ml.deployment.config import DeployConfig
-
     with pytest.raises(ValueError, match="fragile_head.onnx.precision"):
         DeployConfig.from_dict(
             {
@@ -150,10 +144,6 @@ def test_stage_onnx_precision_rejects_unknown_values() -> None:
 
 
 def test_evaluation_split_parses_and_rejects_unknown_values() -> None:
-    import pytest
-
-    from autoware_ml.deployment.config import DeployConfig
-
     base = {"onnx": {"enabled": True}, "tensorrt": {"enabled": False}, "stages": {}}
     cfg = DeployConfig.from_dict({**base, "evaluation": {"enabled": True, "split": "val"}})
     assert cfg.evaluation.split == "val"

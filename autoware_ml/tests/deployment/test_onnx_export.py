@@ -18,6 +18,11 @@ from __future__ import annotations
 
 from omegaconf import OmegaConf
 import torch
+from onnx import TensorProto, helper
+from onnx import numpy_helper
+import numpy as np
+import onnx
+import pytest
 
 from autoware_ml.deployment.onnx.export import (
     build_dynamic_axes,
@@ -27,6 +32,8 @@ from autoware_ml.deployment.onnx.export import (
 )
 from autoware_ml.deployment.onnx.modify import should_modify_graph
 from autoware_ml.deployment.onnx.precision import onnx_has_qdq
+from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
+from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
 
 def test_build_dynamic_axes_from_axes_spec() -> None:
@@ -98,9 +105,6 @@ def test_should_modify_graph_handles_none_and_config() -> None:
 
 
 def test_onnx_has_qdq_detects_quantize_nodes(tmp_path) -> None:
-    import onnx
-    from onnx import TensorProto, helper
-
     def graph(nodes, name):
         x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
         y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
@@ -129,8 +133,6 @@ def test_onnx_has_qdq_detects_quantize_nodes(tmp_path) -> None:
 
 
 def test_export_to_onnx_writes_named_graph(tmp_path) -> None:
-    import onnx
-
     class _AddOne(torch.nn.Module):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return x + 1
@@ -156,11 +158,6 @@ def test_export_to_onnx_writes_named_graph(tmp_path) -> None:
 def test_cast_graph_to_fp16_converts_internals_and_keeps_io(tmp_path) -> None:
     """Plugin graphs go FP16 wholesale: initializers and internal casts become FP16,
     while the graph I/O (the artifact ABI) stays FP32."""
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     n = helper.make_tensor_value_info("n", TensorProto.INT32, [2])
@@ -211,11 +208,6 @@ def test_cast_graph_to_fp16_rewires_internal_consumers_of_kept_fp32_outputs(tmp_
     encoder emits its per-stage point features and keeps pooling them), so an internal
     consumer would read FP32 and meet FP16 weights.
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     feat = helper.make_tensor_value_info("feat", TensorProto.FLOAT, [2, 4])
@@ -261,11 +253,6 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     an FP16-rounded scale changes the quantization itself, and a Cast between DQ and its
     consumer defeats TensorRT's INT8 fusion (both failure modes measured on PTv3).
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper, numpy_helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     # 0.0001 is not representable in fp16 (rounds to ~0.00010002); a round trip shows.
     scale_value = np.float32(1e-4)
@@ -368,11 +355,6 @@ def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) ->
     pass must recognize these spellings, or the whole-graph cast rounds the FP8 scales
     through fp16 (the INT8 version of that mistake measured mIoU 0.545 -> 0.067).
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper, numpy_helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     scale_value = np.float32(1e-4)  # not representable in fp16; a round trip shows
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
@@ -446,11 +428,6 @@ def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_
     (the int64 shape here — the reason the whitelist and the float-slot table are kept
     in lockstep by the import-time check).
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])
@@ -503,12 +480,6 @@ def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_
 
 def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
     """If/Loop/Scan bodies are not converted; the pass must refuse loudly, not corrupt."""
-    import numpy as np
-    import onnx
-    import pytest
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     cond = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
@@ -536,10 +507,6 @@ def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
 
 def _topk_graph(path, *, values_is_graph_output: bool):
     """Write a ``x(fp16) -> Cast(fp32) -> TopK`` graph, with values internal or exported."""
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 8])
     values = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
     indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 2])
@@ -568,9 +535,6 @@ def _topk_graph(path, *, values_is_graph_output: bool):
 
 def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
     """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
-    import onnx
-
-    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 
     path = _topk_graph(tmp_path / "topk_graph.onnx", values_is_graph_output=False)
     keep_topk_in_fp16(path)
@@ -593,9 +557,6 @@ def test_keep_topk_in_fp16_leaves_an_exported_values_output_alone(tmp_path) -> N
     Bypassing the cast would make the tensor FP16 while the graph still promises FLOAT to
     every consumer of the file, so the transform declines and the round-trip stays.
     """
-    import onnx
-
-    from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 
     path = _topk_graph(tmp_path / "topk_output.onnx", values_is_graph_output=True)
     before = onnx.load(str(path)).SerializeToString()
@@ -617,11 +578,6 @@ def test_cast_graph_to_fp16_splits_a_cast_feeding_both_the_island_and_the_sea(tm
     calibrated against. Both sides get their own cast, the way an amphibious initializer
     gets its own copy.
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
     zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
@@ -683,11 +639,6 @@ def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_ou
     island cast reading that name would be ordered *before* the node that produces it,
     and the ONNX loader rejects a non-topological graph.
     """
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-
-    from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
     scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
     zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])

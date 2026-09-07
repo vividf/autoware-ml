@@ -18,11 +18,19 @@ the evaluator's: a task the evaluator has never heard of still gets a headline."
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
+
+from onnx import TensorProto, helper
+from torch import nn
+import onnx
+import torch
 from autoware_ml.evaluation.evaluator import EvaluationResult, log_backend_report, log_comparison
 from autoware_ml.metrics.detection3d.suite import Detection3DMetricSuite
 from autoware_ml.metrics.segmentation3d.suite import Segmentation3DMetricSuite
 from autoware_ml.types.backend import Backend
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.deployment.stages import GraphStage, TorchStage
 
 
 def _result(backend: Backend, headline: tuple[str, ...]) -> EvaluationResult:
@@ -72,8 +80,6 @@ def test_a_suite_declaring_nothing_reports_no_headline(caplog) -> None:
 
 def test_fallback_stages_are_visible_in_report_and_comparison(caplog) -> None:
     """A backend whose stages ran in torch must say so — never a silent pytorch copy."""
-    from dataclasses import replace
-
     starred = replace(_result(Backend.ONNX, ("mIoU",)), fallback_stages=("encoder", "head"))
     clean = _result(Backend.TENSORRT, ("mIoU",))
     with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
@@ -85,14 +91,6 @@ def test_fallback_stages_are_visible_in_report_and_comparison(caplog) -> None:
 
 
 def test_pipeline_reports_its_fallback_stages(tmp_path) -> None:
-    import onnx
-    from onnx import TensorProto, helper
-    import torch
-    from torch import nn
-
-    from autoware_ml.deployment.pipeline import StagedPipeline
-    from autoware_ml.deployment.stages import GraphStage, TorchStage
-
     x = helper.make_tensor_value_info("mid", TensorProto.FLOAT, [1, 2])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2])
     graph = helper.make_graph([helper.make_node("Identity", ["mid"], ["y"])], "g", [x], [y])
@@ -114,7 +112,10 @@ def test_pipeline_reports_its_fallback_stages(tmp_path) -> None:
             torch_fallback_backends=(Backend.ONNX,),
         ),
         GraphStage(
-            "plain", module=nn.Identity(), inputs=("mid",), outputs=("y",),
+            "plain",
+            module=nn.Identity(),
+            inputs=("mid",),
+            outputs=("y",),
             output_fields=(("y", "y"),),
         ),
     )

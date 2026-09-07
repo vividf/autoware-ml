@@ -20,6 +20,8 @@ so that ``trainer.test`` and deployment evaluation report under the same metric
 keys (``{split}/{backend}/{metric}``).
 """
 
+from __future__ import annotations
+
 from enum import Enum
 
 
@@ -31,12 +33,13 @@ class Backend(str, Enum):
     TENSORRT = "tensorrt"
 
     @classmethod
-    def parse(cls, value: "str | Backend") -> "Backend":
+    def parse(cls, value: str | Backend) -> Backend:
         """Parse a backend name, raising a readable error on an unknown one."""
         if isinstance(value, cls):
             return value
+
         try:
-            return cls(str(value))
+            return cls(value)
         except ValueError as error:
             raise ValueError(
                 f"Unknown backend {value!r}. Supported: {[b.value for b in cls]}."

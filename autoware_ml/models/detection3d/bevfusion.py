@@ -694,7 +694,7 @@ class BEVFusionDetectionModel(BaseModel):
         num_points_per_voxel = batch_inputs_dict["num_points"][first_sample].int()
         return voxels, coors, num_points_per_voxel
 
-    def _prepare_export_model(self) -> "BEVFusionDetectionModel":
+    def _prepare_export_model(self) -> BEVFusionDetectionModel:
         """Return an export-ready model copy with exportable submodules.
 
         Returns:

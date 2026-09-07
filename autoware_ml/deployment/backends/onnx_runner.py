@@ -25,6 +25,7 @@ import logging
 from pathlib import Path
 import time
 
+import onnxruntime as ort
 import torch
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,6 @@ class OnnxModuleRunner:
     """
 
     def __init__(self, onnx_path: str | Path, device: torch.device) -> None:
-        import onnxruntime as ort
-
         onnx_path = Path(onnx_path)
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX module not found: {onnx_path}")

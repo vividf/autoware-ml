@@ -35,6 +35,7 @@ import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential
 from spconv.pytorch.conv import SparseConvolution as SparseConvolutionBase
 from spconv.pytorch.modules import SparseModule
+from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
 
 from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
 from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
@@ -122,10 +123,6 @@ def _fuse_sparse_convolution_bn(module: nn.Module) -> int:
     Returns:
         Number of fused pairs.
     """
-    # Local import: spconv.pytorch.quantization pulls in spconv's quantization stack,
-    # which nothing else in this module needs and training never touches.
-    from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
-
     fused = 0
     for parent in list(module.modules()):
         # `children` is a snapshot, so replacing a pair's members while scanning is safe:
@@ -343,7 +340,7 @@ class SparseEncoder(nn.Module):
         dense = dense.permute(0, 4, 3, 1, 2).contiguous()
         return dense.view(batch_size, channels * depth, height, width)
 
-    def prepare_for_export(self) -> "SparseEncoder":
+    def prepare_for_export(self) -> SparseEncoder:
         """Return an export-ready copy with folded BN and sparse convolution wrappers.
 
         Returns:

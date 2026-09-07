@@ -24,6 +24,8 @@ from types import SimpleNamespace
 from omegaconf import OmegaConf
 import torch
 from torch import nn
+from onnx import TensorProto, helper
+import onnx
 
 from autoware_ml.deployment.config import DeployConfig
 from autoware_ml.deployment.export import available_backends
@@ -39,6 +41,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
 from autoware_ml.models.detection3d.heads.transfusion import TransFusionHead
 from autoware_ml.models.detection3d.task_modules.bbox_coders import TransFusionBBoxCoder
 from autoware_ml.types.backend import Backend
+from autoware_ml.deployment import export as export_module
 
 
 def _stub_model() -> SimpleNamespace:
@@ -87,9 +90,6 @@ def _fallback_test_stages() -> tuple:
 
 
 def test_fallback_stage_uses_the_torch_module_on_its_fallback_backend(tmp_path) -> None:
-    import onnx
-    from onnx import TensorProto, helper
-
     # Only the dense-like stage needs an ONNX artifact on the onnx backend.
     x = helper.make_tensor_value_info("mid", TensorProto.FLOAT, [1, 2])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2])
@@ -110,9 +110,6 @@ def test_fallback_stage_uses_the_torch_module_on_its_fallback_backend(tmp_path) 
 
 
 def test_available_backends_exempts_fallback_stages_from_artifacts(tmp_path) -> None:
-    import onnx
-    from onnx import TensorProto, helper
-
     x = helper.make_tensor_value_info("mid", TensorProto.FLOAT, [1, 2])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2])
     graph = helper.make_graph(
@@ -134,8 +131,6 @@ def test_export_skips_engines_for_tensorrt_fallback_stages(tmp_path, monkeypatch
     from it fails (the plugin is not registered) and the pipeline would never use it,
     because the stage runs in PyTorch on the tensorrt backend.
     """
-    from autoware_ml.deployment import export as export_module
-
     built: list[str] = []
     monkeypatch.setattr(
         export_module,

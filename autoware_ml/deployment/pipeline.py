@@ -40,6 +40,8 @@ from torch import nn
 
 from autoware_ml.dataclasses.multi_task_batch_inputs import MultiTaskBatchInputs
 from autoware_ml.dataclasses.multi_task_predictions import MultiTaskPredictions
+from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
+from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner
 from autoware_ml.deployment.stages import (
     GraphStage,
     Stage,
@@ -129,12 +131,8 @@ def _artifact_runner(
 ):
     path = artifact_path(artifacts_dir, stage.name, backend)
     if backend is Backend.ONNX:
-        from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
-
         return OnnxModuleRunner(path, device)
     if backend is Backend.TENSORRT:
-        from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner
-
         return TensorRTModuleRunner(path, device)
     raise ValueError(f"No artifact runner for backend {backend}.")
 

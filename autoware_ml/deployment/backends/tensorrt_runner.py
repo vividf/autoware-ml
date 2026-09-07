@@ -31,6 +31,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import tensorrt as trt
 import torch
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,6 @@ def load_trt_engine(engine_path: str | Path, *, component_name: str | None = Non
         RuntimeError: If deserialization or context creation fails
             (context failure is usually GPU out-of-memory).
     """
-    import tensorrt as trt
 
     engine_path = Path(engine_path)
     label = component_name or engine_path.name
@@ -75,7 +75,6 @@ def load_trt_engine(engine_path: str | Path, *, component_name: str | None = Non
 
 def list_trt_io_names(engine) -> tuple[list[str], list[str]]:
     """Return ``(input_names, output_names)`` in TensorRT tensor-index order."""
-    import tensorrt as trt
 
     inputs: list[str] = []
     outputs: list[str] = []
@@ -94,7 +93,6 @@ def _trt_dtype_to_torch(trt_dtype) -> torch.dtype:
     Guessing a size (e.g. defaulting to float32) would mis-size the GPU buffer and
     silently corrupt the data, so unknown dtypes raise via TensorRT's own ``nptype``.
     """
-    import tensorrt as trt
 
     numpy_dtype = np.dtype(trt.nptype(trt_dtype))
     return torch.from_numpy(np.zeros(0, dtype=numpy_dtype)).dtype

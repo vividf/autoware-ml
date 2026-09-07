@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from omegaconf import OmegaConf
 from autoware_ml.deployment.verification.backend_verifier import VerificationScenario
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.config_parsing import reject_unknown_keys as _reject_unknown
@@ -174,8 +175,6 @@ class StageOnnxConfig:
         if raw_metainfo is not None:
             # Stamped verbatim into the artifact as JSON, so it must be plain Python by
             # the time it leaves the parser — an OmegaConf node would not serialize.
-            from omegaconf import OmegaConf
-
             if OmegaConf.is_config(raw_metainfo):
                 raw_metainfo = OmegaConf.to_container(raw_metainfo, resolve=True)
             metainfo = _mapping(raw_metainfo, f"deploy.stages.{stage}.onnx.metainfo")

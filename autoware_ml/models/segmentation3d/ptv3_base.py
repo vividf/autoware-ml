@@ -3,29 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.onnx.operators import shape_as_tensor
 
 from autoware_ml.models.base import BaseModel
 from autoware_ml.models.segmentation3d.encoders.ptv3 import (
-    Block,
     PointTransformerV3Encoder,
     SerializedPooling,
     SerializedPoolingMeta,
-    _pooling_depth,
-    build_serialized_pooling_meta,
-    collect_encoder_stage_points,
 )
-from autoware_ml.ops.indexing.operators import argsort
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.structures import (
-    Point,
     bit_length_tensor,
-    invert_permutation,
     serialize_point_cloud_batch,
 )
 
@@ -63,6 +55,7 @@ from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     stage_voxel_axis_name,
 )
 
+
 def validate_serialization_geometry(
     encoder: nn.Module, grid_size: float, point_cloud_range: Sequence[float]
 ) -> None:
@@ -76,7 +69,6 @@ def validate_serialization_geometry(
             f"point_cloud_range {tuple(point_cloud_range)} with grid_size {grid_size} cannot "
             f"cover the encoder's cumulative pooling depth {pooling_depth}."
         )
-
 
 
 class PTv3BaseModel(BaseModel):
@@ -195,7 +187,6 @@ class PTv3BaseModel(BaseModel):
         return self.encoder.prepare_for_export(self.EXPORT_ORDER)
 
 
-
 class PTv3ExportContext:
     """Shared front half of every split PTv3 export.
 
@@ -235,7 +226,7 @@ class PTv3ExportContext:
 
 
 def build_ptv3_export_context(
-    model: "PTv3BaseModel", batch: Mapping[str, torch.Tensor]
+    model: PTv3BaseModel, batch: Mapping[str, torch.Tensor]
 ) -> PTv3ExportContext:
     """Serialize the batch, precompute pooling metadata, and run the encoder once."""
     sparse_shape, serialization_depth = model._compute_export_geometry(batch)
@@ -286,7 +277,7 @@ class MonolithicExportInputs:
 
 
 def build_monolithic_export_inputs(
-    model: "PTv3BaseModel", batch: Mapping[str, torch.Tensor]
+    model: PTv3BaseModel, batch: Mapping[str, torch.Tensor]
 ) -> MonolithicExportInputs:
     """Serialize a batch and derive the encoder inputs for a single-graph export.
 
@@ -319,7 +310,7 @@ def build_monolithic_export_inputs(
     )
 
 
-def build_encoder_export_spec(context: PTv3ExportContext) -> "ExportSpec":
+def build_encoder_export_spec(context: PTv3ExportContext) -> ExportSpec:
     """Build the shared per-stage-feature encoder export spec."""
     input_names = context.encoder_input_names
     return ExportSpec(
@@ -334,7 +325,7 @@ def build_encoder_export_spec(context: PTv3ExportContext) -> "ExportSpec":
 
 def build_seg_head_export_spec(
     context: PTv3ExportContext, seg3d_head: nn.Module, output_names: Sequence[str]
-) -> "ExportSpec":
+) -> ExportSpec:
     """Build the segmentation-head export spec for any decoder configuration.
 
     Args:
@@ -362,4 +353,3 @@ def build_seg_head_export_spec(
         dynamic_axes=dynamic_axes,
         supported_stages=PTv3BaseModel.EXPORT_SUPPORTED_STAGES,
     )
-

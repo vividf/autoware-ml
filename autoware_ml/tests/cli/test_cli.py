@@ -25,6 +25,8 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 from typer.testing import CliRunner
+from hydra import compose, initialize_config_module
+from hydra.core.global_hydra import GlobalHydra
 
 import __main__
 import autoware_ml.cli.cli as cli
@@ -524,9 +526,6 @@ class TestCliCommands:
     def test_test_single_device_override_wins_in_composed_config(self) -> None:
         # End-to-end: the override order the CLI + runtime produce (user devices first,
         # forcing override last) resolves to a single device in the real config.
-        from hydra import compose, initialize_config_module
-        from hydra.core.global_hydra import GlobalHydra
-
         GlobalHydra.instance().clear()
         with initialize_config_module(version_base=None, config_module="autoware_ml.configs"):
             cfg = compose(

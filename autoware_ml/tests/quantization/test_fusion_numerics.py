@@ -29,6 +29,7 @@ import torch
 from torch import nn
 
 from autoware_ml.quantization.core.fusion import fuse_model_bn
+from autoware_ml.quantization.core.fusion import find_conv_bn_pairs
 
 _ATOL = 1e-5
 
@@ -108,10 +109,6 @@ def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
     PTv3 composes its blocks in ``PointSequential``, which registers children under
     numeric names but implements no ``__setitem__``; folding used to crash there.
     """
-    import torch
-    from torch import nn
-
-    from autoware_ml.quantization.core.fusion import find_conv_bn_pairs, fuse_model_bn
 
     class NumericContainer(nn.Module):
         """A container with numeric child names and no ``__getitem__``/``__setitem__``."""

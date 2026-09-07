@@ -30,9 +30,12 @@ are strongly typed.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import tensorrt as trt
 
 from autoware_ml.deployment.config import ShapeProfile
 
@@ -50,7 +53,6 @@ def load_tensorrt_plugin_libraries(plugin_libraries: Sequence[str] | None) -> No
     """
     if not plugin_libraries:
         return
-    import ctypes
 
     for library in plugin_libraries:
         library_path = Path(library)
@@ -62,7 +64,6 @@ def load_tensorrt_plugin_libraries(plugin_libraries: Sequence[str] | None) -> No
 
 def _create_builder(workspace_size: int, plugin_libraries: Sequence[str]):
     """Create ``(builder, network, parser, config)`` for one strongly typed engine build."""
-    import tensorrt as trt
 
     # Custom plugins must be loadable before plugin registry initialization.
     load_tensorrt_plugin_libraries(plugin_libraries)

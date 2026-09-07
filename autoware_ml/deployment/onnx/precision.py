@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import onnx
+from onnx import TensorProto, helper, numpy_helper
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,6 @@ _QDQ_OPS = _QUANTIZE_OPS + _DEQUANTIZE_OPS
 
 def onnx_has_qdq(onnx_path: Path) -> bool:
     """Whether the ONNX graph contains quantize/dequantize nodes (INT8 or FP8)."""
-    import onnx
 
     model = onnx.load(str(onnx_path), load_external_data=False)
     return any(node.op_type in _QDQ_OPS for node in model.graph.node)
@@ -56,7 +57,6 @@ def onnx_custom_op_domains(onnx_path: Path) -> tuple[str, ...]:
     it infers types with TensorRT's ONNX parser, which rejects an op whose plugin
     is not registered in the exporting process.
     """
-    import onnx
 
     model = onnx.load(str(onnx_path), load_external_data=False)
     domains = {
@@ -292,8 +292,6 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     list protected from recomputation — three patch layers this pass makes unnecessary
     by only ever creating casts at true island/IO boundaries.
     """
-    import onnx
-    from onnx import TensorProto, helper, numpy_helper
 
     model = onnx.load(str(onnx_path))
     graph = model.graph
