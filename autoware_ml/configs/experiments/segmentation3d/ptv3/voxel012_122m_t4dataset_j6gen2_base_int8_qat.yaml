@@ -1,0 +1,32 @@
+# @package _global_
+# QAT variant: frozen-amax STE fine-tuning on top of the INT8 PTv3 experiment.
+#
+#   autoware-ml quantize \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_int8_qat \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_int8_qat \
+#     --weights <best.ckpt produced by the quantize run>
+#
+# A QAT checkpoint deploys exactly like a PTQ one — the loader never branches on mode.
+# Recipe (Wu et al. 2020 / modelopt): epochs ~ 10% of the original training (50 -> 5),
+# cosine schedule with peak lr = 1% of the original peak (2e-3 -> 2e-5).
+defaults:
+  - voxel012_122m_t4dataset_j6gen2_base_int8
+  - _self_
+
+experiment_name: voxel012_122m_t4dataset_int8_qat
+
+quantization:
+  mode: qat
+  # Drop the inherited producer block for the other mode (a ptq block under mode=qat is
+  # a config lie and is rejected).
+  ptq: null
+  qat:
+    epochs: 5
+    # ~1% of the original training peak lr (2e-3 -> 2e-5, Wu et al. 2020).
+    lr: 2.0e-5
+    schedule: cosine
+    freeze_unquantized: true
+    val_check_interval: 0.25
+    calibrate_samples: 400
