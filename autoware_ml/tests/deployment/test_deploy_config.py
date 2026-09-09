@@ -93,6 +93,58 @@ class TestDeployConfig:
         with pytest.raises(ValueError, match=where):
             DeployConfig.from_dict(raw)
 
+    @pytest.mark.parametrize(
+        "profile, message",
+        [
+            ({"min_shape": [1, 4], "opt_shape": [2, 4], "max_shape": [3]}, "same non-zero rank"),
+            ({"min_shape": [], "opt_shape": [], "max_shape": []}, "same non-zero rank"),
+            (
+                {"min_shape": [-1, 4], "opt_shape": [2, 4], "max_shape": [3, 4]},
+                "dim 0 has min=-1",
+            ),
+            (
+                {"min_shape": [0, 4], "opt_shape": [0, 4], "max_shape": [3, 4]},
+                "dim 0 has min=0, opt=0",
+            ),
+            (
+                {"min_shape": [100, 4], "opt_shape": [50, 4], "max_shape": [200, 4]},
+                "dim 0 violates",
+            ),
+            ({"min_shape": [1, 4], "opt_shape": [2, 4], "max_shape": [2, 3]}, "dim 1 violates"),
+        ],
+    )
+    def test_semantically_invalid_shape_profile_rejected(self, profile, message):
+        """Rank, sign and min <= opt <= max are checked at parse time, with the config path."""
+        raw = {"stages": {"s": {"tensorrt": {"input_shapes": {"x": profile}}}}}
+        with pytest.raises(ValueError, match=message) as error:
+            DeployConfig.from_dict(raw)
+        assert "deploy.stages.s.tensorrt.input_shapes.x" in str(error.value)
+
+    def test_zero_minimum_is_a_valid_profile(self):
+        """An empty tensor is a legal minimum (empty point clouds); the values come back exact."""
+        raw = {
+            "stages": {
+                "s": {
+                    "tensorrt": {
+                        "input_shapes": {
+                            "x": {
+                                "min_shape": [0, 4],
+                                "opt_shape": [60000, 4],
+                                "max_shape": [160000, 4],
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        config = DeployConfig.from_dict(raw)
+        profile = config.stage("s").tensorrt.input_shapes["x"]
+        assert (profile.min_shape, profile.opt_shape, profile.max_shape) == (
+            (0, 4),
+            (60000, 4),
+            (160000, 4),
+        )
+
     def test_incomplete_shape_profile_rejected(self):
         raw = {"stages": {"s": {"tensorrt": {"input_shapes": {"x": {"min_shape": [1]}}}}}}
         with pytest.raises(ValueError, match="incomplete"):

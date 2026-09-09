@@ -188,7 +188,12 @@ class StageOnnxConfig:
 
 @dataclass(frozen=True)
 class ShapeProfile:
-    """One TensorRT optimization-profile entry."""
+    """One TensorRT optimization-profile entry.
+
+    Parsed *and* validated here — equal ranks, ``min >= 0``, ``opt >= 1`` and
+    component-wise ``min <= opt <= max`` — so a bad profile is a config error naming
+    the stage, input and dimension, not a TensorRT build failure.
+    """
 
     min_shape: tuple[int, ...]
     opt_shape: tuple[int, ...]
@@ -203,11 +208,31 @@ class ShapeProfile:
         missing = cls.KNOWN_KEYS - set(raw)
         if missing:
             raise ValueError(f"{where} is incomplete: missing {sorted(missing)}.")
-        return cls(
-            min_shape=tuple(int(x) for x in raw["min_shape"]),
-            opt_shape=tuple(int(x) for x in raw["opt_shape"]),
-            max_shape=tuple(int(x) for x in raw["max_shape"]),
-        )
+        shapes = {
+            key: tuple(int(x) for x in raw[key]) for key in ("min_shape", "opt_shape", "max_shape")
+        }
+        ranks = {key: len(shape) for key, shape in shapes.items()}
+        if len(set(ranks.values())) != 1 or ranks["min_shape"] == 0:
+            raise ValueError(
+                f"{where}: min/opt/max must describe one tensor, so they need the same non-zero "
+                f"rank; got {ranks}."
+            )
+        for index, (low, opt, high) in enumerate(
+            zip(shapes["min_shape"], shapes["opt_shape"], shapes["max_shape"])
+        ):
+            # A zero *minimum* is legal (TensorRT accepts empty tensors, and a point model
+            # may see an empty cloud); the optimum and maximum have to be real extents.
+            if low < 0 or opt < 1:
+                raise ValueError(
+                    f"{where}: dim {index} has min={low}, opt={opt}; min must be >= 0 and "
+                    "opt >= 1."
+                )
+            if not low <= opt <= high:
+                raise ValueError(
+                    f"{where}: dim {index} violates min <= opt <= max "
+                    f"({low} <= {opt} <= {high} is false)."
+                )
+        return cls(**shapes)
 
 
 @dataclass(frozen=True)
