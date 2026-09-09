@@ -239,11 +239,19 @@ Two consequences worth knowing:
 - **The engine needs a plugin built with the INT8 path** (`precision` / `input_scale`
   attributes). See `docker/tensorrt_plugins/README.md`.
 
-Sparse INT8 is not uniformly a win. Per-layer measurement on this model puts the GEMM
-speedup **below 1.0** for the input convolution (0.45x) and all of stage 1 (0.77-0.82x) —
-those layers carry the most active voxels with the fewest channels, so the INT8 GEMM saves
-less than quantizing the features costs — against 1.4-1.55x in stage 4. The shipped recipe
-therefore quantizes stage 3.1 onwards and keeps the rest FP16.
+Whether sparse INT8 pays depends on the shape of the convolutions, and the two models that
+use it answer differently (measured 2026-09-10, `work_dirs/reviews/`):
+
+| | BEVFusion sparse tower | PTv3 `cpe` convolutions |
+| --- | --- | --- |
+| shape | 16-128 channels, k=3, most of the voxels in the early stages | 32-512 channels, k=3, one per block |
+| accuracy | −1.2% mAP with 8 of 21 layers INT8 | flat: every block within 0.0001 mIoU, LOO and ONLY |
+| latency | inside noise (−0.03 ms of a 4.0 ms stage) | −0.49 ms of a 5.6 ms encoder (−8.7%) |
+| recipe | stage 3.1 onwards; earlier layers measured *slower* in INT8 (0.45-0.82x GEMM speedup) | all 12 convolutions; keeping the shallow ones FP16 changed nothing |
+
+The rule of thumb the two agree on: the INT8 GEMM has to save more than quantizing the
+features costs, so it pays where channels are wide and loses where they are narrow and the
+voxel count is high.
 
 ### Self-describing checkpoints
 

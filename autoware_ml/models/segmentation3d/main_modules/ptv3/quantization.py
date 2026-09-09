@@ -19,14 +19,21 @@ projections (``attn.qkv``, ``attn.proj``), the MLP blocks, the patch embedding, 
 head's classifier — 74 of them in the trained segmentation checkpoint. Those are what
 INT8 buys here, so both submodules declare the ``linear`` kind.
 
+The ``cpe`` sparse convolutions declare the ``spconv`` kind, pinned to INT8. They are not
+depthwise and not cheap: each is a ``SubMConv3d(C, C, k=3)``, i.e. ``27 * C^2`` MACs per
+active voxel, and ``C`` reaches 512 in the deepest encoder stage — the same implicit-GEMM
+work BEVFusion's sparse tower does. They deploy as ``autoware::ImplicitGemm`` plugin nodes,
+so their INT8 form is per-layer scales on the node rather than Q/DQ (see
+:mod:`autoware_ml.ops.spconv.onnx_int8`), which is why the kind is pinned INT8 instead of
+following ``default_precision``: the plugin has no FP8 path.
+
 What is deliberately *not* declared:
 
 - The attention core itself (the ``q @ k`` and ``attn @ v`` batched matmuls). They are
   not modules, so there is nothing for module replacement to swap; quantizing them needs
   functional-level insertion and its own accuracy study.
-- The serialization and pooling glue (``spconv``-style scatter/gather, the
-  ``cpe`` depthwise convolutions on sparse tensors). Their cost is memory movement, not
-  multiply-accumulate, so INT8 would add quantize/dequantize traffic for no gain.
+- The serialization and pooling glue (scatter / gather / segment-CSR). Its cost is memory
+  movement, not multiply-accumulate, so INT8 would add quantize traffic for no gain.
 """
 
 from __future__ import annotations
@@ -37,8 +44,8 @@ from autoware_ml.quantization.plan import QuantizationPlan, QuantRules
 #: PTv3's quantization declaration. The GEMM-bearing submodules, nothing else.
 PTV3_QUANT_RULES = QuantRules(
     quantize_submodules={
-        "encoder": ("linear",),
-        "seg3d_head": ("linear",),
+        "encoder": {"linear": None, "spconv": "int8"},
+        "seg3d_head": {"linear": None, "spconv": "int8"},
     },
 )
 
