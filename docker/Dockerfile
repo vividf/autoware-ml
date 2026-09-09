@@ -6,6 +6,10 @@ ARG PIXI_VERSION=0.66.0
 ARG USERNAME=autoware-ml
 ARG USER_UID=1000
 ARG USER_GID=1000
+# TensorRT plugins for sparse-convolution graphs (see docker/tensorrt_plugins/README.md).
+# Set to "false" to skip both native builds — the image then cannot build engines for
+# graphs carrying autoware:: custom ops.
+ARG BUILD_TENSORRT_PLUGINS="true"
 
 # Core environment variables
 ENV AUTOWARE_ML_DATA_PATH="/workspace/data" \
@@ -36,6 +40,7 @@ RUN apt-get update && \
   bash-completion \
   build-essential \
   ca-certificates \
+  cmake \
   curl \
   git \
   gosu \
@@ -82,6 +87,26 @@ COPY LICENSE README.md pyproject.toml setup.py pixi.lock /workspace/
 WORKDIR /workspace
 RUN CONDA_OVERRIDE_CUDA=12.8 /opt/pixi/bin/pixi install --locked --environment dev && \
     PIXI_HOME=/opt/pixi PIXI_BIN_DIR=/opt/pixi/bin /opt/pixi/bin/pixi shell-hook --manifest-path /workspace --environment dev --change-ps1 false > /etc/profile.d/autoware-ml.sh
+
+# TensorRT plugins for the sparse-convolution custom ops the deployed graphs bind against
+# (autoware::ImplicitGemm and friends). Two native builds, kept in their own layer so the
+# project copy below does not invalidate them: the spconv/cumm C++ packages the plugin
+# links against, then the plugin itself into /opt/plugins. Both use the system toolchain —
+# cumm installs headers into /usr/local/include, which the pixi compilers do not search.
+# Two layers, so editing the plugin build does not rebuild the (much slower) spconv one.
+COPY docker/tensorrt_plugins/build_spconv_cpp.sh /workspace/docker/tensorrt_plugins/
+RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
+      bash /workspace/docker/tensorrt_plugins/build_spconv_cpp.sh \
+      && rm -rf /opt/spconv_cpp /var/lib/apt/lists/*; \
+    fi
+
+COPY docker/tensorrt_plugins /workspace/docker/tensorrt_plugins
+RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
+      PYTHON_BIN="$(/opt/pixi/bin/pixi run --environment dev which python)" \
+        bash /workspace/docker/tensorrt_plugins/build_plugin.sh \
+      && rm -rf /tmp/autoware_trt_plugins_build /tmp/autoware_trt_plugins_src \
+                /tmp/tensorrt_oss_headers; \
+    fi
 
 # Install the project itself in editable mode inside the environment
 COPY . /workspace/
