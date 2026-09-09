@@ -172,7 +172,13 @@ def _sync(device: torch.device) -> None:
 
 
 def _is_headline(key: str, headline_metrics: Sequence[str]) -> bool:
-    return bool(headline_metrics) and key.rsplit("/", 1)[-1].startswith(tuple(headline_metrics))
+    """Whether a canonical metric key names one of the declared headline metrics.
+
+    The comparison is on the unqualified metric name (the last ``/`` component) and
+    exact: ``mAP`` is a headline, its per-class ``mAP_car`` and its sibling ``mAPH``
+    are the breakdown a compact report leaves out.
+    """
+    return key.rsplit("/", 1)[-1] in headline_metrics
 
 
 def log_backend_report(result: EvaluationResult) -> None:

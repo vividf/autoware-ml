@@ -42,6 +42,9 @@ def _result(backend: Backend, headline: tuple[str, ...]) -> EvaluationResult:
             f"test/{backend.value}/seg3d/mIoU": 0.61,
             f"test/{backend.value}/seg3d/iou_car": 0.9,
             f"test/{backend.value}/det3d/mAP": 0.45,
+            # Same-prefix siblings of the detection headline, as the real suite emits them.
+            f"test/{backend.value}/det3d/mAP_car": 0.5,
+            f"test/{backend.value}/det3d/mAPH": 0.4,
         },
         latency={},
         num_samples=10,
@@ -62,6 +65,20 @@ def test_report_leads_with_the_declared_metrics_only(caplog) -> None:
     # Not declared headline: the per-class breakdown and the other task's metric.
     assert "iou_car" not in logged
     assert "mAP" not in logged
+
+
+def test_headline_matching_is_exact_not_by_prefix(caplog) -> None:
+    """Declaring ``mAP`` selects ``mAP`` alone — not ``mAP_car`` and not ``mAPH``.
+
+    Both exist in the real detection suite (per-class breakdown, heading-aware AP), so a
+    prefix match would turn the compact report into the full one.
+    """
+    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+        log_backend_report(_result(Backend.PYTORCH, ("mAP",)))
+    logged = caplog.text
+    assert "det3d/mAP " in logged  # the %-48s column pads the key with spaces
+    assert "mAP_car" not in logged
+    assert "mAPH" not in logged
 
 
 def test_comparison_table_rows_come_from_the_declared_metrics(caplog) -> None:
