@@ -30,23 +30,23 @@ from pathlib import Path
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
+from autoware_ml.deployment.onnx.dtypes import (
+    DEQUANTIZE_OPS,
+    QDQ_OPS,
+    QUANTIZE_OPS,
+    is_float,
+    tensor_types,
+)
+
 
 logger = logging.getLogger(__name__)
-
-
-#: Quantize/dequantize node spellings. INT8 exports as standard ONNX Q/DQ; FP8 exports
-#: as modelopt's TRT-domain custom ops (its E4M3 symbolic bypasses standard
-#: ``QuantizeLinear``, whose float8 form it never emits).
-_QUANTIZE_OPS = ("QuantizeLinear", "TRT_FP8QuantizeLinear")
-_DEQUANTIZE_OPS = ("DequantizeLinear", "TRT_FP8DequantizeLinear")
-_QDQ_OPS = _QUANTIZE_OPS + _DEQUANTIZE_OPS
 
 
 def onnx_has_qdq(onnx_path: Path) -> bool:
     """Whether the ONNX graph contains quantize/dequantize nodes (INT8 or FP8)."""
 
     model = onnx.load(str(onnx_path), load_external_data=False)
-    return any(node.op_type in _QDQ_OPS for node in model.graph.node)
+    return any(node.op_type in QDQ_OPS for node in model.graph.node)
 
 
 def onnx_custom_op_domains(onnx_path: Path) -> tuple[str, ...]:
@@ -113,12 +113,15 @@ _QDQ_COMMUTING_OPS = frozenset(
     }
 )
 
-#: Positions of the FLOAT-typed inputs, per island op. The boundary-cast logic must
-#: never cast an integer edge (a Q/DQ zero-point, a Reshape shape, a Gather index...),
-#: so every op that can be an island member has an explicit entry here: Q/DQ, the
-#: commuting ops above, and ``None`` rows meaning "every input is float" (the quantized
-#: compute ops and all-float pointwise). The import-time check below keeps this table
-#: and the whitelist in lockstep, so extending one without the other is impossible.
+#: Positions of the FLOAT-typed inputs, per island op, as the op's ONNX spec fixes them.
+#: The boundary-cast logic must never cast an integer edge (a Q/DQ zero-point, a Reshape
+#: shape, a Gather index...). Rows exist for Q/DQ, the commuting ops above (the backward
+#: island growth follows float slots only) and the quantized compute ops; ``None`` means
+#: "every input is float". An island member without a row — anything else rule 3 admits
+#: as a DQ consumer (Expand, ScatterND, a runtime plugin...) — is typed per tensor from
+#: :func:`~autoware_ml.deployment.onnx.dtypes.tensor_types` instead, and the pass refuses
+#: an edge neither settles rather than guess. The import-time check below keeps this
+#: table and the whitelist in lockstep, so extending one without the other is impossible.
 _ALL_FLOAT = None
 _ISLAND_FLOAT_INPUT_SLOTS: dict = {
     # Q/DQ: data + scale are float for Q; only the scale for DQ (its data is int8).
@@ -144,6 +147,11 @@ _ISLAND_FLOAT_INPUT_SLOTS: dict = {
     "Slice": (0,),  # starts/ends/axes/steps are int64
     "Gather": (0,),  # indices are int
     "Identity": (0,),
+    # Quantized compute (island members by rule 3, as DQ consumers): all-float by spec.
+    "Gemm": _ALL_FLOAT,
+    "MatMul": _ALL_FLOAT,
+    "Conv": _ALL_FLOAT,
+    "ConvTranspose": _ALL_FLOAT,
 }
 _MISSING_SLOT_ENTRIES = _QDQ_COMMUTING_OPS - set(_ISLAND_FLOAT_INPUT_SLOTS)
 assert not _MISSING_SLOT_ENTRIES, (
@@ -196,14 +204,14 @@ def _quantized_island_names(graph) -> list[str]:
     island: dict[str, None] = {}
     dq_outputs = set()
     for node in graph.node:
-        if node.op_type not in _QDQ_OPS:
+        if node.op_type not in QDQ_OPS:
             continue
         island[node.name] = None
         for name in node.input[1:]:  # scale / zero_point
             producer = producer_of.get(name)
             if producer is not None:
                 island[producer.name] = None
-        if node.op_type in _DEQUANTIZE_OPS:
+        if node.op_type in DEQUANTIZE_OPS:
             dq_outputs.update(node.output)
     for node in graph.node:
         if node.name not in island and any(name in dq_outputs for name in node.input):
@@ -214,7 +222,7 @@ def _quantized_island_names(graph) -> list[str]:
     # follows FLOAT data edges only (per the slot table): stepping through an integer
     # input (a Gather index chain, a Reshape shape) would drag int-typed glue into the
     # island and let the boundary logic cast integer edges.
-    pending = [node.input[0] for node in graph.node if node.op_type in _QUANTIZE_OPS and node.input]
+    pending = [node.input[0] for node in graph.node if node.op_type in QUANTIZE_OPS and node.input]
     while pending:
         producer = producer_of.get(pending.pop())
         if producer is None or producer.name in island:
@@ -242,10 +250,10 @@ def _warn_broken_quantized_chains(graph, island: set) -> None:
     """
     producer_of = {out: node for node in graph.node for out in node.output}
     dq_consumers = {
-        node.name for node in graph.node if node.name in island and node.op_type not in _QDQ_OPS
+        node.name for node in graph.node if node.name in island and node.op_type not in QDQ_OPS
     }
     for node in graph.node:
-        if node.op_type not in _QUANTIZE_OPS or not node.input:
+        if node.op_type not in QUANTIZE_OPS or not node.input:
             continue
         hop = producer_of.get(node.input[0])
         if hop is None or hop.name in island:
@@ -286,11 +294,23 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     single Casts on the float edges where an island meets the FP16 sea; ``keep_io_types``
     semantics hold the artifact ABI at FP32.
 
+    Casts are decided per tensor edge, not per node: an island member's integer or
+    boolean edges (a Shape result, MaxPool's indices, an Expand shape) are never touched,
+    whatever the node's membership says. Every boundary edge must have a settled type —
+    from the op's float-slot row, or from the graph itself via
+    :func:`~autoware_ml.deployment.onnx.dtypes.tensor_types`; one that has neither is a
+    :class:`ValueError`, because guessing FLOAT is how a shape edge gets cast.
+
     Implemented in-house rather than via onnxconverter-common: the library inserted
     boundary casts around every blocked node (round-trip pairs inside islands), left
     stale value_info entries that hard-fail onnxruntime's loader, and needed the island
     list protected from recomputation — three patch layers this pass makes unnecessary
     by only ever creating casts at true island/IO boundaries.
+
+    Raises:
+        NotImplementedError: For graphs with control-flow subgraphs.
+        ValueError: For an island boundary tensor whose element type the graph does not
+            settle (typically a custom-domain producer without ``value_info``).
     """
 
     model = onnx.load(str(onnx_path))
@@ -304,8 +324,24 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             "recurse into subgraph bodies first."
         )
     _assign_missing_node_names(graph)
+    # Element types before any rewrite: the boundary decisions below are per edge.
+    types = tensor_types(model)
     island = set(_quantized_island_names(graph))
     _warn_broken_quantized_chains(graph, island)
+
+    def settled_type(name: str, node, role: str) -> int:
+        dtype = types.get(name)
+        if dtype is None:
+            raise ValueError(
+                f"cast_graph_to_fp16 cannot type tensor {name!r}, {role} of island node "
+                f"{node.name!r} ({node.op_type}): it is not a graph input, initializer or "
+                "Constant, and ONNX shape inference does not reach it — a custom-domain "
+                "producer without value_info, typically. Declare it (the exporter records "
+                "the traced dtype; a hand-built graph needs a value_info entry) or give "
+                f"{node.op_type!r} a float-slot row in _ISLAND_FLOAT_INPUT_SLOTS. Guessing "
+                "FLOAT is not an option: that is how a shape edge gets cast."
+            )
+        return dtype
 
     node_by_name = {node.name: node for node in graph.node}
     producer_of = {out: node for node in graph.node for out in node.output}
@@ -426,11 +462,6 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     node.input[index] = cast_name
 
     graph_input_names = {i.name for i in graph.input}
-    # Declared element types, for edges whose dtype the slot table does not settle.
-    declared_type = {
-        info.name: info.type.tensor_type.elem_type
-        for info in list(graph.value_info) + list(graph.input) + list(graph.output)
-    }
     # Names step 6 re-homes: an FP32 graph output produced by a sea node. Its public name
     # will belong to a boundary cast spliced *after* the casts made here, so an island
     # reading it must read the producer's internal FP16 tensor instead — otherwise the
@@ -444,29 +475,31 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     }
 
     # --- 5. Island boundaries: a float edge entering an island from the sea gets one
-    # FP32 cast; a float island output consumed by the sea gets one FP16 cast.
+    # FP32 cast; a float island output consumed by the sea gets one FP16 cast. Integer
+    # and boolean edges pass through untouched in both directions.
     for node in list(graph.node):
         if not in_island(node):
             continue
         slots = _ISLAND_FLOAT_INPUT_SLOTS.get(node.op_type)
-        if slots is None and node.op_type not in _QUANTIZE_OPS:
+        if slots is None:
             # Rule 3 admits any consumer of a DQ, including ops that take shape/index
-            # inputs (Expand, ScatterND, Pad, ...). Without a slot table every input is
-            # assumed float, and the dtype check below is what keeps an integer edge from
-            # being cast. Say so, so the table gets an entry rather than silent luck.
+            # inputs (Expand, ScatterND, Pad, ...) and runtime plugins. Their edges are
+            # typed from the graph; say so, so a recurring op gets a slot row.
             logger.debug(
-                "Island node %r (%s) has no float-input slot table; falling back to the "
-                "declared element types of its inputs.",
+                "Island node %r (%s) has no float-input slot row; typing its edges from "
+                "the graph.",
                 node.name,
                 node.op_type,
             )
         for index, name in enumerate(node.input):
+            if not name:
+                continue  # omitted optional input
             if slots is not None and index not in slots:
-                continue
-            if slots is None and declared_type.get(name, TensorProto.FLOAT) not in (
-                TensorProto.FLOAT,
-                TensorProto.FLOAT16,
-            ):
+                continue  # integer slot by spec (a Q/DQ zero-point, a Reshape shape...)
+            dtype = types.get(name)
+            if dtype is None and slots is None:
+                settled_type(name, node, f"input {index}")
+            if dtype is not None and not is_float(dtype):
                 continue  # integer / bool edge: casting it to FLOAT would break the graph
             if name in island_fp32_sources:
                 continue  # a sea cast kept FP32 precisely to feed this slot
@@ -483,11 +516,15 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                 make_cast(cast_source, cast_name, TensorProto.FLOAT, source.name)
                 node_by_name[cast_name] = True
             node.input[index] = cast_name
-        if node.op_type in _QUANTIZE_OPS:
-            continue  # integer outputs, always island-internal (feed DQ)
         for out in node.output:
+            if not out:
+                continue
             sea_users = [n for n in consumers_of.get(out, []) if not in_island(n)]
             if not sea_users:
+                continue
+            if settled_type(out, node, "output") != TensorProto.FLOAT:
+                # A Q's int8, a Shape's int64, MaxPool's indices: the sea reads them as
+                # they are. (So does an output the graph already holds in FP16.)
                 continue
             cast_name = out + "__fp16"
             make_cast(out, cast_name, TensorProto.FLOAT16, node.name)

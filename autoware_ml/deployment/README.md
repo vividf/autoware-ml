@@ -95,7 +95,9 @@ artifact 命名規則:`artifact_path(output_dir, stage_name, backend)` →
    判定順序:**先看 custom domain,再看 Q/DQ**——plugin 圖無論有沒有 Q/DQ 都走同一條
    island cast,兩者同時成立時不會走 AutoCast。同一步驟裡,`deploy.onnx.modify_graph`
    在 precision 之前跑(modifier 是照 fp32 匯出圖寫的),stage 自己宣告的
-   `onnx_transforms` 在之後跑(`keep_topk_in_fp16` 改的正是 precision pass 插入的 cast)。
+   `onnx_transforms` 在之後跑(`keep_topk_in_fp16` 改的正是 precision pass 插入的 cast:
+   讓 TopK 直讀 fp16 heatmap,再把選出的 k 個 values cast 回 fp32 給原消費者 / graph output,
+   所以消費者契約與 artifact ABI 不變,少掉的只有整張 heatmap 的那顆 cast)。
 
 4. **TensorRT build**(`backends/tensorrt_builder.py`):**一律 strongly typed**——
    engine 的精度由 ONNX 圖的型別決定,不由 builder flag 猜。這是刻意決策:weak-typed
@@ -118,9 +120,14 @@ fp16(「海」)。三層規則:
    (`Relu/Add/Concat/MaxPool/Reshape/Transpose/Gather/...`),讓「量化 op → pointwise
    → 下一個 Q」整段零 cast。
 
-**cast 放哪**:只在「島↔海」與「圖 IO」邊界,每條跨界 float 邊恰好一顆;整數邊
-(zero-point、shape、indices)永不 cast(`_ISLAND_FLOAT_INPUT_SLOTS` 顯式表 +
-import 時 assert 與 whitelist 鎖死);圖 IO 保 fp32(runtime ABI)。
+**cast 放哪**:只在「島↔海」與「圖 IO」邊界,每條跨界 float 邊恰好一顆;圖 IO 保 fp32
+(runtime ABI)。**決定「這條邊要不要 cast」的是邊的 dtype,不是節點在不在島**:整數 / bool 邊
+(zero-point、shape、indices、MaxPool 的 Indices)進出島都原封不動。dtype 來源依序是
+`_ISLAND_FLOAT_INPUT_SLOTS`(op spec 固定的 float slot;import 時 assert 與 whitelist 鎖死)、
+`onnx/dtypes.py::tensor_types`(圖 IO + initializer + Constant + Q/DQ 輸出種子 + ONNX shape
+inference 往下推);兩者都說不出型別的邊 **raise**,不猜 FLOAT——猜 FLOAT 正是 shape 邊被 cast
+的來源(Codex review PR14-01 的兩個重現)。匯出圖的 plugin 輸出都有 value_info(exporter 記錄
+trace 到的 dtype),所以這個 raise 只會打到手工圖。
 
 **為什麼**(每條都是量出來的):
 

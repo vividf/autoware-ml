@@ -31,7 +31,9 @@ import numpy as np
 import onnx
 import torch
 from modelopt.onnx.autocast import convert_to_mixed_precision
-from onnx import TensorProto
+from onnx import TensorProto, helper
+
+from autoware_ml.deployment.onnx.dtypes import tensor_types
 
 logger = logging.getLogger(__name__)
 
@@ -89,25 +91,36 @@ def keep_topk_in_fp16(onnx_path: Path) -> Path:
     measured 0.81 ms -> 0.45 ms on the dense graph by bypassing it; the ``sorted``
     attribute measured as irrelevant to TensorRT).
 
+    Selecting in FP16 makes the ``values`` output FP16, and every consumer of it — an
+    FP32 operand downstream, or the artifact's declared FLOAT output — was written
+    against FP32. So the transform casts the *selected* values back to FP32 under their
+    original name (k elements, not the heatmap): consumer contracts and the graph-output
+    ABI are unchanged, and only the big cast is gone. Values nobody reads stay FP16.
+
     A stage declares this transform (``GraphStage.onnx_transforms``) rather than the
     framework applying it globally, because ranking scores in FP16 is a per-model
     accuracy judgement: near-ties may reorder (BEVFusion already declares proposal
     ties in its ``verification_caveat``), and the gate is the evaluated metric.
 
-    No-op when no FP32 cast feeds a TopK (fp32 exports, Q/DQ graphs).
+    No-op when no FP32 cast *of an FP16 tensor* feeds a TopK (fp32 exports, Q/DQ
+    graphs, a Cast lifting integers); running it twice changes nothing more.
     """
 
     model = onnx.load(str(onnx_path))
     graph = model.graph
+    types = tensor_types(model)
     producers = {output: node for node in graph.node for output in node.output}
+    graph_outputs = {output.name for output in graph.output}
 
     def cast_target(node) -> int | None:
         return next((a.i for a in node.attribute if a.name == "to"), None)
 
-    graph_outputs = {output.name for output in graph.output}
+    def consumed(name: str) -> bool:
+        return name in graph_outputs or any(name in node.input for node in graph.node)
 
-    bypassed = 0
-    for node in graph.node:
+    bypassed_casts: list = []
+    cast_backs: dict[int, onnx.NodeProto] = {}  # TopK position -> cast to splice after it
+    for position, node in enumerate(graph.node):
         if node.op_type != "TopK":
             continue
         upstream = producers.get(node.input[0])
@@ -117,29 +130,50 @@ def keep_topk_in_fp16(onnx_path: Path) -> Path:
             or cast_target(upstream) != TensorProto.FLOAT
         ):
             continue
-        if node.output[0] in graph_outputs:
-            # The values output is part of the graph's ABI, declared FLOAT by
-            # ``keep_io_types``. Making it FP16 in place would leave the declaration
-            # lying to every consumer of the artifact, so the round-trip stays.
+        source = upstream.input[0]
+        if types.get(source) != TensorProto.FLOAT16:
             logger.info(
-                "keep_topk_in_fp16: %s keeps its FP32 input — its values output %r is a "
-                "graph output whose declared type is part of the artifact's interface.",
+                "keep_topk_in_fp16: %s keeps its FP32 input — the Cast it reads lifts %r "
+                "(type %s), not an FP16 tensor.",
                 node.name or node.op_type,
-                node.output[0],
+                source,
+                types.get(source),
             )
             continue
-        node.input[0] = upstream.input[0]
-        bypassed += 1
-        # The values output follows the input dtype now.
-        for value_info in graph.value_info:
-            if (
-                value_info.name == node.output[0]
-                and value_info.type.tensor_type.elem_type == TensorProto.FLOAT
-            ):
-                value_info.type.tensor_type.elem_type = TensorProto.FLOAT16
-    if bypassed:
-        onnx.save(model, str(onnx_path))
-        logger.info(
-            "keep_topk_in_fp16: %d TopK input cast(s) bypassed in %s.", bypassed, onnx_path.name
-        )
+        node.input[0] = source
+        bypassed_casts.append(upstream)
+        values = node.output[0]
+        if values and consumed(values):
+            internal = values + "__fp16"
+            node.output[0] = internal
+            cast_backs[position] = helper.make_node(
+                "Cast", [internal], [values], to=TensorProto.FLOAT, name=values
+            )
+    if not bypassed_casts:
+        return onnx_path
+
+    dropped = {node.output[0] for node in bypassed_casts if not consumed(node.output[0])}
+    rebuilt = []
+    for position, node in enumerate(graph.node):
+        if node.op_type == "Cast" and node.output[0] in dropped:
+            continue  # the heatmap cast nobody reads any more
+        rebuilt.append(node)
+        if position in cast_backs:
+            rebuilt.append(cast_backs[position])
+    del graph.node[:]
+    graph.node.extend(rebuilt)
+    # value_info: `values` is still FLOAT (the cast-back produces it); the dropped
+    # cast's tensor no longer exists, and nothing declares the FP16 selection.
+    kept_info = [info for info in graph.value_info if info.name not in dropped]
+    del graph.value_info[:]
+    graph.value_info.extend(kept_info)
+
+    onnx.save(model, str(onnx_path))
+    logger.info(
+        "keep_topk_in_fp16: %d TopK input cast(s) bypassed in %s (%d values output(s) "
+        "cast back to FP32 for their consumers).",
+        len(bypassed_casts),
+        onnx_path.name,
+        len(cast_backs),
+    )
     return onnx_path

@@ -343,7 +343,7 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
                 and upstream.op_type == "Cast"
                 and cast_to(upstream) == TensorProto.FLOAT16
             ), f"fp16 round trip at {node.name}"
-    onnx.checker.check_model(converted)
+    onnx.checker.check_model(converted, full_check=True)
 
 
 def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) -> None:
@@ -475,7 +475,7 @@ def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_
     assert inits["s"].data_type == TensorProto.FLOAT
     assert inits["w"].data_type == TensorProto.FLOAT
     assert inits["g"].data_type == TensorProto.FLOAT16
-    onnx.checker.check_model(converted)
+    onnx.checker.check_model(converted, full_check=True)
 
 
 def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
@@ -505,10 +505,15 @@ def test_cast_graph_to_fp16_rejects_control_flow_subgraphs(tmp_path) -> None:
         cast_graph_to_fp16(path)
 
 
-def _topk_graph(path, *, values_is_graph_output: bool):
-    """Write a ``x(fp16) -> Cast(fp32) -> TopK`` graph, with values internal or exported."""
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 8])
-    values = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
+def _topk_graph(path, *, values: str, source_type=TensorProto.FLOAT16):
+    """Write a ``x -> Cast(fp32) -> TopK`` graph.
+
+    ``values`` says what happens to the values output: ``"internal"`` feeds an FP32 Mul,
+    ``"output"`` leaves the graph as a declared-FLOAT output, ``"unused"`` goes nowhere
+    (indices-only use). ``source_type`` is the dtype of ``x`` the Cast lifts.
+    """
+    x = helper.make_tensor_value_info("x", source_type, [1, 8])
+    values_info = helper.make_tensor_value_info("values", TensorProto.FLOAT, [1, 2])
     indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 2])
     scaled = helper.make_tensor_value_info("scaled", TensorProto.FLOAT, [1, 2])
     k = helper.make_tensor("k", TensorProto.INT64, [1], np.array([2], dtype=np.int64))
@@ -517,57 +522,116 @@ def _topk_graph(path, *, values_is_graph_output: bool):
         helper.make_node("Cast", ["x"], ["x32"], to=TensorProto.FLOAT, name="lift"),
         helper.make_node("TopK", ["x32", "k"], ["values", "indices"], name="topk"),
     ]
-    outputs = [values, indices]
     initializers = [k]
-    if not values_is_graph_output:
-        # values feeds an internal consumer instead of leaving the graph.
+    if values == "internal":
         nodes.append(helper.make_node("Mul", ["values", "one"], ["scaled"], name="scale"))
         outputs = [scaled, indices]
         initializers.append(one)
+    elif values == "output":
+        outputs = [values_info, indices]
+    else:
+        outputs = [indices]
     graph = helper.make_graph(nodes, "topk_graph", [x], outputs, initializers)
     graph.value_info.append(helper.make_tensor_value_info("x32", TensorProto.FLOAT, [1, 8]))
-    if not values_is_graph_output:
-        graph.value_info.append(values)
+    if values == "internal":
+        graph.value_info.append(values_info)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model, full_check=True)
     onnx.save(model, str(path))
     return path
 
 
-def test_keep_topk_in_fp16_bypasses_the_cast_and_is_a_noop_otherwise(tmp_path) -> None:
-    """The transform lets TopK rank the FP16 tensor directly; untouched graphs pass through."""
+def _topk_and_values_cast(graph):
+    topk = next(node for node in graph.node if node.op_type == "TopK")
+    cast_back = next(
+        (node for node in graph.node if node.op_type == "Cast" and node.output[0] == "values"),
+        None,
+    )
+    return topk, cast_back
 
-    path = _topk_graph(tmp_path / "topk_graph.onnx", values_is_graph_output=False)
+
+def test_keep_topk_in_fp16_selects_in_fp16_and_casts_the_values_back_for_consumers(
+    tmp_path,
+) -> None:
+    """TopK ranks the FP16 tensor directly; its FP32 consumer still gets FP32 values.
+
+    The point is to skip casting the whole heatmap, not to retype the consumers: the
+    *selected* values (k elements) are cast back under their original name, so the Mul
+    and its FP32 operand are exactly as exported and the graph stays type-valid.
+    """
+
+    path = _topk_graph(tmp_path / "topk_graph.onnx", values="internal")
     keep_topk_in_fp16(path)
 
     converted = onnx.load(str(path))
-    topk = next(node for node in converted.graph.node if node.op_type == "TopK")
+    onnx.checker.check_model(converted, full_check=True)
+    topk, cast_back = _topk_and_values_cast(converted.graph)
     assert topk.input[0] == "x", "TopK must read the FP16 tensor directly"
-    values_info = next(info for info in converted.graph.value_info if info.name == "values")
-    assert values_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16
+    assert cast_back is not None and cast_back.input == [topk.output[0]]
+    assert next(a.i for a in cast_back.attribute if a.name == "to") == TensorProto.FLOAT
+    mul = next(node for node in converted.graph.node if node.name == "scale")
+    assert list(mul.input) == ["values", "one"], "the consumer is untouched"
+    # The heatmap cast nobody reads any more is gone, with its value_info.
+    assert not any(node.name == "lift" for node in converted.graph.node)
+    assert not any(info.name == "x32" for info in converted.graph.value_info)
 
-    # A graph whose TopK already reads fp16 (or fp32 exports) is untouched.
+    # Idempotent: the second run finds no FP32 cast feeding a TopK.
     before = converted.SerializeToString()
     keep_topk_in_fp16(path)
     assert onnx.load(str(path)).SerializeToString() == before
 
 
-def test_keep_topk_in_fp16_leaves_an_exported_values_output_alone(tmp_path) -> None:
+def test_keep_topk_in_fp16_keeps_an_exported_values_output_fp32(tmp_path) -> None:
     """The values output's declared type is the artifact's interface (keep_io_types).
 
-    Bypassing the cast would make the tensor FP16 while the graph still promises FLOAT to
-    every consumer of the file, so the transform declines and the round-trip stays.
+    The optimization still applies — the cast-back produces the public FLOAT tensor
+    under its own name, so the file promises exactly what it did before.
     """
 
-    path = _topk_graph(tmp_path / "topk_output.onnx", values_is_graph_output=True)
-    before = onnx.load(str(path)).SerializeToString()
+    path = _topk_graph(tmp_path / "topk_output.onnx", values="output")
+    declared_before = [
+        (o.name, o.type.tensor_type.elem_type) for o in onnx.load(str(path)).graph.output
+    ]
 
     keep_topk_in_fp16(path)
 
     after = onnx.load(str(path))
-    assert after.SerializeToString() == before
-    topk = next(node for node in after.graph.node if node.op_type == "TopK")
-    assert topk.input[0] == "x32"
-    onnx.checker.check_model(after)
+    onnx.checker.check_model(after, full_check=True)
+    assert [(o.name, o.type.tensor_type.elem_type) for o in after.graph.output] == declared_before
+    topk, cast_back = _topk_and_values_cast(after.graph)
+    assert topk.input[0] == "x"
+    assert cast_back is not None and cast_back.input == [topk.output[0]]
+
+
+def test_keep_topk_in_fp16_leaves_unread_values_in_fp16(tmp_path) -> None:
+    """Indices-only use: nothing reads the values, so nothing needs them cast back."""
+
+    path = _topk_graph(tmp_path / "topk_indices_only.onnx", values="unused")
+    keep_topk_in_fp16(path)
+
+    after = onnx.load(str(path))
+    onnx.checker.check_model(after, full_check=True)
+    topk, cast_back = _topk_and_values_cast(after.graph)
+    assert topk.input[0] == "x"
+    assert cast_back is None
+    assert topk.output[0] == "values"
+
+
+def test_keep_topk_in_fp16_ignores_a_cast_that_lifts_integers(tmp_path) -> None:
+    """A Cast-to-FLOAT feeding TopK is only an FP16 round-trip if its source is FP16.
+
+    Bypassing an int64 -> FLOAT lift would make TopK rank integers and hand an int64
+    values tensor to FP32 consumers; the transform leaves such a graph alone.
+    """
+
+    path = _topk_graph(
+        tmp_path / "topk_int_source.onnx", values="internal", source_type=TensorProto.INT64
+    )
+    before = onnx.load(str(path)).SerializeToString()
+
+    keep_topk_in_fp16(path)
+
+    assert onnx.load(str(path)).SerializeToString() == before
 
 
 def test_cast_graph_to_fp16_splits_a_cast_feeding_both_the_island_and_the_sea(tmp_path) -> None:
@@ -627,7 +691,7 @@ def test_cast_graph_to_fp16_splits_a_cast_feeding_both_the_island_and_the_sea(tm
     assert plugin.input == ["lifted__fp16"]
     island_mul = next(node for node in converted.graph.node if node.name == "island_mul")
     assert island_mul.input[1] == "lifted"
-    onnx.checker.check_model(converted)
+    onnx.checker.check_model(converted, full_check=True)
 
 
 def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_output(
@@ -670,7 +734,7 @@ def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_ou
     cast_graph_to_fp16(path)
 
     converted = onnx.load(str(path))
-    onnx.checker.check_model(converted)  # rejects a non-topological node order
+    onnx.checker.check_model(converted, full_check=True)  # rejects a non-topological node order
     produced: set[str] = {i.name for i in converted.graph.initializer}
     produced |= {i.name for i in converted.graph.input}
     for node in converted.graph.node:
@@ -678,3 +742,186 @@ def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_ou
         produced |= set(node.output)
     # The public output name is still declared FP32 and still produced.
     assert {output.name for output in converted.graph.output} == {"shared", "y"}
+
+
+def _qdq(x_name, out_name, scale="s", zero_point="zp", tag=""):
+    return [
+        helper.make_node(
+            "QuantizeLinear", [x_name, scale, zero_point], [f"q{tag}"], name=f"q{tag}"
+        ),
+        helper.make_node(
+            "DequantizeLinear", [f"q{tag}", scale, zero_point], [out_name], name=f"dq{tag}"
+        ),
+    ]
+
+
+def _qdq_initializers():
+    return [
+        helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(0.1)]),
+        helper.make_tensor("zp", TensorProto.INT8, [], [0]),
+    ]
+
+
+def _cast_edges(graph):
+    """``{source tensor: target dtype}`` for every Cast in the graph."""
+    return {
+        node.input[0]: next(a.i for a in node.attribute if a.name == "to")
+        for node in graph.node
+        if node.op_type == "Cast"
+    }
+
+
+def test_cast_graph_to_fp16_never_casts_shape_edges_even_without_value_info(tmp_path) -> None:
+    """Island membership says nothing about an edge's dtype; the edge does.
+
+    Two standard-op graphs with no ``value_info`` at all, both valid before conversion:
+    a Shape that joined the island as a DQ consumer (its int64 output must not become
+    FP16 for the ConstantOfShape reading it), and an Expand in the island whose shape
+    input comes from the sea (the int64 edge must not be "lifted" to FLOAT). Both were
+    corrupted by a pass that assumed undeclared tensors are FLOAT.
+    """
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])
+
+    # (1) Q -> DQ -> Shape -> ConstantOfShape.
+    graph = helper.make_graph(
+        _qdq("x", "dq")
+        + [
+            helper.make_node("Shape", ["dq"], ["shp"], name="shape"),
+            helper.make_node(
+                "ConstantOfShape",
+                ["shp"],
+                ["y"],
+                name="cos",
+                value=helper.make_tensor("v", TensorProto.FLOAT, [1], [1.0]),
+            ),
+        ],
+        "shape_from_island",
+        [x],
+        [y],
+        _qdq_initializers(),
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model, full_check=True)
+    path = tmp_path / "shape_from_island.onnx"
+    onnx.save(model, str(path))
+    cast_graph_to_fp16(path)
+    converted = onnx.load(str(path))
+    onnx.checker.check_model(converted, full_check=True)
+    assert "shp" not in _cast_edges(converted.graph)
+    cos = next(node for node in converted.graph.node if node.name == "cos")
+    assert cos.input[0] == "shp"
+
+    # (2) Shape(x) -> Expand(DQ(x), shape).
+    graph = helper.make_graph(
+        [helper.make_node("Shape", ["x"], ["shp"], name="shape")]
+        + _qdq("x", "dq")
+        + [
+            helper.make_node("Expand", ["dq", "shp"], ["e"], name="expand"),
+            helper.make_node("Relu", ["e"], ["y"], name="relu_sea"),
+        ],
+        "shape_into_island",
+        [x],
+        [y],
+        _qdq_initializers(),
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model, full_check=True)
+    path = tmp_path / "shape_into_island.onnx"
+    onnx.save(model, str(path))
+    cast_graph_to_fp16(path)
+    converted = onnx.load(str(path))
+    onnx.checker.check_model(converted, full_check=True)
+    edges = _cast_edges(converted.graph)
+    assert "shp" not in edges
+    expand = next(node for node in converted.graph.node if node.name == "expand")
+    assert expand.input[1] == "shp"
+    # The float island output still crosses into the sea through one FP16 cast.
+    assert edges.get("e") == TensorProto.FLOAT16
+
+
+def test_cast_graph_to_fp16_leaves_integer_island_outputs_alone(tmp_path) -> None:
+    """An island op with a float and an integer output: only the float one is cast.
+
+    MaxPool's ``Indices`` are int64; ``onnx.checker`` accepts an int64 -> FP16 Cast, but
+    FP16 cannot hold an index above 2048 exactly, so the sea must read the indices as
+    they are.
+    """
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 4, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, 2])
+    idx_f = helper.make_tensor_value_info("idx_f", TensorProto.FLOAT, [1, 1, 2, 2])
+    graph = helper.make_graph(
+        _qdq("x", "dq")
+        + [
+            helper.make_node(
+                "MaxPool",
+                ["dq"],
+                ["pooled", "indices"],
+                name="pool",
+                kernel_shape=[2, 2],
+                strides=[2, 2],
+            ),
+        ]
+        + _qdq("pooled", "y", tag="2")
+        + [
+            helper.make_node(
+                "Cast", ["indices"], ["idx_f"], to=TensorProto.FLOAT, name="idx_cast"
+            )
+        ],
+        "maxpool_indices",
+        [x],
+        [y, idx_f],
+        _qdq_initializers(),
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model, full_check=True)
+    path = tmp_path / "maxpool_indices.onnx"
+    onnx.save(model, str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    onnx.checker.check_model(converted, full_check=True)
+    idx_cast = next(node for node in converted.graph.node if node.name == "idx_cast")
+    assert idx_cast.input[0] == "indices", "the sea reads the int64 indices directly"
+    assert not any(
+        node.op_type == "Cast" and node.input[0] == "indices" and node.name != "idx_cast"
+        for node in converted.graph.node
+    )
+
+
+def test_cast_graph_to_fp16_refuses_an_island_edge_the_graph_does_not_type(tmp_path) -> None:
+    """A plugin in the island reading another plugin's untyped output is an error, not a guess.
+
+    Exported graphs declare plugin outputs (the exporter records the traced dtype); a
+    graph that does not gets a refusal naming the tensor, because assuming FLOAT is
+    exactly how an index edge gets cast. Declaring the type makes the same graph pass,
+    with the integer edge untouched.
+    """
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    nodes = [
+        helper.make_node("IndexOp", ["x"], ["pairs"], domain="autoware", name="index_plugin"),
+    ] + _qdq("x", "dq") + [
+        helper.make_node("GemmOp", ["dq", "pairs"], ["y"], domain="autoware", name="gemm_plugin"),
+    ]
+    graph = helper.make_graph(nodes, "untyped_plugin_edge", [x], [y], _qdq_initializers())
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+    )
+    path = tmp_path / "untyped_plugin_edge.onnx"
+    onnx.save(model, str(path))
+    with pytest.raises(ValueError, match="cannot type tensor 'pairs'"):
+        cast_graph_to_fp16(path)
+
+    model.graph.value_info.append(helper.make_tensor_value_info("pairs", TensorProto.INT32, None))
+    onnx.save(model, str(path))
+    cast_graph_to_fp16(path)
+    converted = onnx.load(str(path))
+    gemm = next(node for node in converted.graph.node if node.name == "gemm_plugin")
+    assert gemm.input[1] == "pairs", "the int32 edge is read as it is"
+    assert gemm.input[0] == "dq", "the DQ edge stays castless"
+
