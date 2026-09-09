@@ -226,18 +226,23 @@ class QATCallback(L.Callback):
             )
 
     def _calibration_dataloader(self, trainer: L.Trainer):
-        """Return the clean val dataloader for calibration (train loader as a warned fallback)."""
+        """Return the clean val dataloader for calibration.
+
+        The train loader stands in only when the trainer has no datamodule at all — the
+        one case where "no validation data" is a matter of contract rather than a
+        failure. A datamodule whose ``val_dataloader()`` raises (missing manifest, broken
+        collate, unset validation split) propagates: calibrating on augmented training
+        data instead would let a real bug degrade the amax silently, and the comments
+        above are explicit that this loader is the one that has to match PTQ.
+        """
         datamodule = trainer.datamodule
-        if datamodule is not None:
-            try:
-                return datamodule.val_dataloader()
-            except Exception as error:  # noqa: BLE001 — any failure falls back to train
-                logger.warning(
-                    "QATCallback: could not use the val dataloader for calibration (%s); "
-                    "falling back to the train dataloader (augmented — amax may drift from PTQ).",
-                    error,
-                )
-        return trainer.train_dataloader
+        if datamodule is None:
+            logger.warning(
+                "QATCallback: the trainer has no datamodule, so there is no val dataloader; "
+                "calibrating on the train dataloader (augmented — amax may drift from PTQ)."
+            )
+            return trainer.train_dataloader
+        return datamodule.val_dataloader()
 
     def on_save_checkpoint(
         self, trainer: L.Trainer, pl_module: L.LightningModule, checkpoint: dict

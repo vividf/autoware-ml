@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -64,3 +65,29 @@ class TestQATCallbackBoundaries:
         callback = QATCallback(_QAT_CONFIG)
         with pytest.raises(RuntimeError, match="resume"):
             callback.setup(_trainer(ckpt_path="/tmp/last.ckpt"), pl_module=None, stage="fit")
+
+
+class TestCalibrationDataloader:
+    """The clean val loader is the contract; only a missing datamodule falls back."""
+
+    def test_a_broken_val_dataloader_propagates(self):
+        class Broken:
+            def val_dataloader(self):
+                raise RuntimeError("validation manifest missing")
+
+        trainer = SimpleNamespace(datamodule=Broken(), train_dataloader="TRAIN")
+        with pytest.raises(RuntimeError, match="validation manifest missing"):
+            QATCallback(_QAT_CONFIG)._calibration_dataloader(trainer)
+
+    def test_no_datamodule_falls_back_to_the_train_loader(self, caplog):
+        trainer = SimpleNamespace(datamodule=None, train_dataloader="TRAIN")
+        with caplog.at_level(logging.WARNING, logger="autoware_ml.quantization.qat_callback"):
+            assert QATCallback(_QAT_CONFIG)._calibration_dataloader(trainer) == "TRAIN"
+        assert "no datamodule" in caplog.text
+
+    def test_val_dataloader_is_used_when_available(self):
+        trainer = SimpleNamespace(
+            datamodule=SimpleNamespace(val_dataloader=lambda: "VAL"), train_dataloader="TRAIN"
+        )
+        assert QATCallback(_QAT_CONFIG)._calibration_dataloader(trainer) == "VAL"
+

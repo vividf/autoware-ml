@@ -368,13 +368,13 @@ class QuantizationPlan:
 
     @staticmethod
     def _fuse_bn(model: Any, record: PlacementRecord) -> None:
-        """Step 1: fold every adjacent Conv+BN pair (whole model, independent of skip_quantize)."""
+        """Step 1: fold every structurally proven Conv+BN pair (whole model, regardless of skip)."""
         model.eval()
         for conv_name, bn_name in find_conv_bn_pairs(model):
             record.add(
                 conv_name,
                 "fuse_bn",
-                reason="adjacent Conv+BN pair",
+                reason="Conv+BN pair (sequential container or declared bn_fusion_pairs)",
                 detail=f"folds {bn_name}; BN becomes Identity",
             )
         fuse_model_bn(model)

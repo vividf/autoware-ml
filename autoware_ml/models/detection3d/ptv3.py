@@ -175,6 +175,9 @@ class PTv3BEVProjection(nn.Module):
 class PTv3BEVResidualBlock(nn.Module):
     """Refine dense BEV features with a residual 2D convolution block."""
 
+    #: norm1(conv1(x)) and norm2(conv2(x)); the residual joins after norm2.
+    bn_fusion_pairs = (("conv1", "norm1"), ("conv2", "norm2"))
+
     def __init__(self, in_channels: int, out_channels: int, dilation: int = 1) -> None:
         """Initialize the residual BEV block.
 

@@ -236,7 +236,12 @@ Loading (`build_model` → `quantization.loader`):
    inside the checkpoint and is machine-checked on load.
 2. **`fuse_bn` changes state_dict keys.** BN is fused across the whole model
    regardless of `skip_quantize` — quantize and load must fuse the exact same set;
-   `skip_quantize` only subtracts from the *quantized* set.
+   `skip_quantize` only subtracts from the *quantized* set. Which pairs fold is a
+   *structural* statement, never a guess from registration order: adjacent children
+   of a container that runs them in order (`nn.Sequential`, or a class declaring
+   `applies_children_in_order = True`), plus the pairs a custom block names in
+   `bn_fusion_pairs = ((conv_attr, bn_attr),)`. An undeclared adjacent Conv+BN is
+   left alone and logged at WARNING — add the declaration to the block.
 3. **Precision lives in the ONNX; engines build strongly typed.** TensorRT reads
    INT8 from the QuantizeLinear/DequantizeLinear nodes modelopt bakes into the
    graph, and FP16 from the tensor types AutoCast writes into the non-quantized

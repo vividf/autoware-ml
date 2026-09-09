@@ -132,81 +132,97 @@ def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
     )
 
 
-def _iter_adjacent_named_children(
-    model: nn.Module, prefix: str = ""
-) -> Iterator[tuple[str, nn.Module, str, nn.Module]]:
-    """
-    Iterate adjacent sibling module pairs in the module tree.
+#: Attribute a custom container sets (``True``) to state that its ``forward`` applies
+#: its registered children one after another, in registration order — what
+#: ``nn.Sequential`` does by construction. Only such parents let adjacency stand for
+#: dataflow; PTv3's ``PointSequential`` declares it.
+SEQUENTIAL_MARKER = "applies_children_in_order"
 
-    Unlike scanning ``named_modules()`` linearly, this only emits adjacent
-    modules that share the same parent container, preventing accidental
-    cross-boundary pairing (e.g., last BN of one block with first Conv of
-    another block).
-    """
-    children = list(model._modules.items())
+#: Attribute a custom block sets to name the ``(conv_or_linear, batchnorm)`` child pairs
+#: its ``forward`` connects directly (``bn(conv(x))``, a reshape between them included),
+#: e.g. ``bn_fusion_pairs = (("conv", "norm"),)``; a named BN that is an ``nn.Identity``
+#: (the block was built without one, or was folded already) is skipped. Registration
+#: order proves nothing about dataflow in an arbitrary ``nn.Module`` — ``bn(relu(conv(x)))``
+#: or a residual block can register the two side by side without connecting them — so
+#: the block has to say so.
+FUSION_PAIRS_MARKER = "bn_fusion_pairs"
 
-    # Adjacent siblings under the same parent.
-    for i in range(len(children) - 1):
-        left_name, left_module = children[i]
-        right_name, right_module = children[i + 1]
-        if left_module is None or right_module is None:
-            continue
+#: Conv/Linear types and the BatchNorm type each folds into.
+_CONV_TO_BN: dict[type, type] = {
+    nn.Conv1d: nn.BatchNorm1d,
+    nn.Conv2d: nn.BatchNorm2d,
+    nn.ConvTranspose2d: nn.BatchNorm2d,
+    nn.Linear: nn.BatchNorm1d,
+}
 
-        left_full = f"{prefix}.{left_name}" if prefix else left_name
-        right_full = f"{prefix}.{right_name}" if prefix else right_name
-        yield left_full, left_module, right_full, right_module
 
-    # Recurse into each child.
-    for child_name, child_module in children:
-        if child_module is None:
-            continue
-        child_prefix = f"{prefix}.{child_name}" if prefix else child_name
-        yield from _iter_adjacent_named_children(child_module, child_prefix)
+def _applies_children_in_order(module: nn.Module) -> bool:
+    return isinstance(module, nn.Sequential) or bool(getattr(module, SEQUENTIAL_MARKER, False))
+
+
+def _is_fusible_pair(left: nn.Module, right: nn.Module) -> bool:
+    """Whether ``left`` is a Conv/Linear whose output channels ``right`` normalizes."""
+    for conv_type, bn_type in _CONV_TO_BN.items():
+        if isinstance(left, conv_type) and isinstance(right, bn_type):
+            out_channels = left.out_features if isinstance(left, nn.Linear) else left.out_channels
+            return out_channels == right.num_features
+    return False
 
 
 def find_conv_bn_pairs(model: nn.Module) -> list[tuple[str, str]]:
-    """
-    Find all Conv-BN pairs in the model.
+    """Find the Conv/Linear + BatchNorm pairs the model's structure proves are connected.
 
-    This function identifies consecutive Conv and BatchNorm layers that
-    can be fused together. It matches:
-    - Conv1d + BatchNorm1d
-    - Conv2d + BatchNorm2d
-    - ConvTranspose2d + BatchNorm2d
-    - Linear + BatchNorm1d
+    Two sources, both statements about dataflow rather than guesses from it:
 
-    The function also validates that the Conv output channels match the
-    BatchNorm num_features to ensure correct pairing.
+    - Adjacent children of a container that applies its children in order
+      (``nn.Sequential``, or a class with ``applies_children_in_order = True``).
+    - Pairs a custom block names in its ``bn_fusion_pairs`` attribute.
 
-    Args:
-        model: PyTorch model
+    Adjacent Conv+BN registrations under any other parent are *not* paired — the
+    parent's ``forward`` may put an activation between them or never connect them — and
+    are logged at WARNING so the block gets a declaration rather than a silent skip.
+
+    Matches Conv1d+BatchNorm1d, Conv2d+BatchNorm2d, ConvTranspose2d+BatchNorm2d and
+    Linear+BatchNorm1d, and only when the channel counts agree.
 
     Returns:
-        List of (conv_name, bn_name) tuples
+        List of ``(conv_name, bn_name)`` full module paths, in traversal order.
     """
-    pairs = []
-
-    # Mapping of conv types to their expected BN types
-    conv_to_bn = {
-        nn.Conv1d: nn.BatchNorm1d,
-        nn.Conv2d: nn.BatchNorm2d,
-        nn.ConvTranspose2d: nn.BatchNorm2d,
-        nn.Linear: nn.BatchNorm1d,
-    }
-
-    for left_name, left_module, right_name, right_module in _iter_adjacent_named_children(model):
-        for conv_type, bn_type in conv_to_bn.items():
-            if isinstance(left_module, conv_type) and isinstance(right_module, bn_type):
-                # Validate that channel dimensions match (Linear calls it out_features).
-                out_channels = (
-                    left_module.out_features
-                    if isinstance(left_module, nn.Linear)
-                    else left_module.out_channels
-                )
-                if out_channels == right_module.num_features:
-                    pairs.append((left_name, right_name))
-                break
-
+    pairs: list[tuple[str, str]] = []
+    undeclared: list[str] = []
+    for parent_name, parent in model.named_modules():
+        prefix = f"{parent_name}." if parent_name else ""
+        declared = getattr(parent, FUSION_PAIRS_MARKER, None)
+        if declared is not None:
+            for conv_attr, bn_attr in declared:
+                conv, bn = parent._modules.get(conv_attr), parent._modules.get(bn_attr)
+                if isinstance(bn, nn.Identity):
+                    continue  # the block built without a BN (or it is already folded)
+                if conv is None or bn is None or not _is_fusible_pair(conv, bn):
+                    raise ValueError(
+                        f"{type(parent).__name__}.bn_fusion_pairs names ({conv_attr!r}, "
+                        f"{bn_attr!r}) under {parent_name or '<root>'!r}, which is not a "
+                        "Conv/Linear + matching BatchNorm child pair."
+                    )
+                pairs.append((f"{prefix}{conv_attr}", f"{prefix}{bn_attr}"))
+            continue
+        children = [(name, child) for name, child in parent._modules.items() if child is not None]
+        for (left_name, left), (right_name, right) in zip(children, children[1:]):
+            if not _is_fusible_pair(left, right):
+                continue
+            if _applies_children_in_order(parent):
+                pairs.append((f"{prefix}{left_name}", f"{prefix}{right_name}"))
+            else:
+                undeclared.append(f"{prefix}{left_name} + {prefix}{right_name}")
+    if undeclared:
+        logger.warning(
+            "BN fusion skipped %d adjacent Conv/Linear + BatchNorm registration(s) whose "
+            "parent neither applies its children in order nor declares bn_fusion_pairs "
+            "(registration order does not prove dataflow): %s. If the block computes "
+            "bn(conv(x)), declare `bn_fusion_pairs = ((conv_attr, bn_attr),)` on it.",
+            len(undeclared),
+            ", ".join(undeclared),
+        )
     return pairs
 
 

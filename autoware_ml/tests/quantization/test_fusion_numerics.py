@@ -24,6 +24,8 @@ never skip (the module is imported directly, bypassing any backend-gated API).
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 import torch
 from torch import nn
@@ -113,6 +115,8 @@ def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
     class NumericContainer(nn.Module):
         """A container with numeric child names and no ``__getitem__``/``__setitem__``."""
 
+        applies_children_in_order = True  # what PointSequential declares
+
         def __init__(self, *children: nn.Module) -> None:
             super().__init__()
             for index, child in enumerate(children):
@@ -138,3 +142,85 @@ def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
 
     assert isinstance(model.get_submodule("1"), nn.Identity)
     assert torch.allclose(model(x), expected, atol=1e-5)
+
+
+class _ReluBetween(nn.Module):
+    """Registers conv then bn side by side, but computes ``bn(relu(conv(x)))``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(3, 4, 1)
+        self.bn = nn.BatchNorm2d(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.bn(torch.relu(self.conv(x)))
+
+
+class _DeclaredBlock(nn.Module):
+    """A custom block that states its dataflow, like ConvModule / PFNLayer do."""
+
+    bn_fusion_pairs = (("conv", "norm"),)
+
+    def __init__(self, in_channels: int = 3) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, 4, 1)
+        self.norm = nn.BatchNorm2d(4)
+        self.act = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.norm(self.conv(x)))
+
+
+def _randomize_bn(bn: nn.Module) -> None:
+    bn.running_mean.normal_()
+    bn.running_var.uniform_(0.5, 1.5)
+    bn.weight.data.uniform_(0.5, 1.5)
+    bn.bias.data.normal_()
+
+
+def test_adjacent_registration_alone_does_not_authorize_folding(caplog) -> None:
+    """``bn(relu(conv(x)))`` registers conv and bn side by side; folding would move the BN
+    before the ReLU. An undeclared parent is left alone and named in a warning."""
+
+    torch.manual_seed(0)
+    model = _ReluBetween().eval()
+    _randomize_bn(model.bn)
+    x = torch.randn(2, 3, 5, 5)
+    expected = model(x)
+
+    with caplog.at_level(logging.WARNING, logger="autoware_ml.quantization.core.fusion"):
+        assert find_conv_bn_pairs(model) == []
+        fuse_model_bn(model)
+
+    assert isinstance(model.bn, nn.BatchNorm2d), "the undeclared pair must not be folded"
+    assert torch.equal(model(x), expected)
+    assert "conv + bn" in caplog.text and "bn_fusion_pairs" in caplog.text
+
+
+def test_declared_pairs_fold_and_stay_numerically_equivalent() -> None:
+    torch.manual_seed(0)
+    model = nn.Sequential(_DeclaredBlock(), _DeclaredBlock(in_channels=4)).eval()
+    for block in model:
+        _randomize_bn(block.norm)
+    x = torch.randn(2, 3, 5, 5)
+    expected = model(x)
+
+    assert find_conv_bn_pairs(model) == [("0.conv", "0.norm"), ("1.conv", "1.norm")]
+    fuse_model_bn(model)
+
+    assert all(isinstance(block.norm, nn.Identity) for block in model)
+    assert torch.allclose(model(x), expected, atol=1e-5)
+
+
+def test_a_wrong_declaration_is_an_error_not_a_skip() -> None:
+    class Lying(nn.Module):
+        bn_fusion_pairs = (("conv", "act"),)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(3, 4, 1)
+            self.act = nn.ReLU()
+
+    with pytest.raises(ValueError, match="bn_fusion_pairs names"):
+        find_conv_bn_pairs(Lying())
+
