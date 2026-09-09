@@ -212,6 +212,70 @@ class TestPointPillarPreprocessor(unittest.TestCase):
         self.assertEqual(outputs.voxels_data.coords.shape, (0, 3))
         self.assertEqual(outputs.voxels_data.batch_indices.shape, (0,))
 
+    def _single_sample_inputs(self, points: torch.Tensor) -> MultiTaskBatchInputs:
+        multi_task_gt_batch = MultiTaskGTBatch(
+            point_cloud_gt_batch=PointCloudGTBatch(
+                points=points.to(self.device),
+                batch_indices=torch.zeros(points.shape[0], device=self.device, dtype=torch.int32),
+            ),
+            detection3d_gt_batch=None,
+        )
+        return MultiTaskBatchInputs(multi_task_gt_batch=multi_task_gt_batch, voxels_data=None)
+
+    def test_eval_mode_uses_eval_max_voxels_budget(self) -> None:
+        """
+        Test that the voxel budget switches with ``is_training``: training truncates at
+        ``max_voxels`` while evaluation keeps pillars up to ``eval_max_voxels``.
+        """
+        preprocessor = PointPillarPreprocessor(
+            voxel_size=[1.0, 1.0, 4.0],
+            point_cloud_range=[0.0, 0.0, -2.0, 4.0, 4.0, 2.0],
+            max_num_points=2,
+            max_voxels=1,
+            eval_max_voxels=8,
+            voxelization_z_order_first=True,
+        )
+        # Three points in three distinct pillars
+        points = torch.tensor(
+            [
+                [0.1, 0.1, 0.0, 1.0],
+                [1.1, 1.1, 0.0, 2.0],
+                [2.1, 2.1, 0.0, 3.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        train_outputs = preprocessor(self._single_sample_inputs(points), is_training=True)
+        self.assertEqual(train_outputs.voxels_data.voxels.shape[0], 1)
+
+        eval_outputs = preprocessor(self._single_sample_inputs(points), is_training=False)
+        self.assertEqual(eval_outputs.voxels_data.voxels.shape[0], 3)
+
+    def test_eval_mode_without_eval_max_voxels_raises(self) -> None:
+        """
+        Test that running in evaluation mode without an explicit ``eval_max_voxels`` raises
+        instead of silently reusing the training budget.
+        """
+        inputs = self._single_sample_inputs(
+            torch.tensor([[0.5, 0.5, 0.0, 1.0]], dtype=torch.float32)
+        )
+
+        with self.assertRaises(ValueError):
+            self.point_pillar_preprocessor(inputs, is_training=False)
+
+    def test_train_mode_does_not_require_eval_max_voxels(self) -> None:
+        """
+        Test that training-mode forward keeps working when ``eval_max_voxels`` is not set,
+        so existing training configs stay valid.
+        """
+        inputs = self._single_sample_inputs(
+            torch.tensor([[0.5, 0.5, 0.0, 1.0]], dtype=torch.float32)
+        )
+
+        outputs = self.point_pillar_preprocessor(inputs, is_training=True)
+
+        self.assertEqual(outputs.voxels_data.voxels.shape[0], 1)
+
     def test_passthrough_of_existing_keys(self) -> None:
         """
         Test that the PointPillarPreprocessor correctly passes through existing
