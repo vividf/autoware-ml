@@ -16,10 +16,13 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.onnx.operators import shape_as_tensor
 
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
+from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
+    _PTv3DetHeadExportModule,
+    det_head_export_input_names,
+)
 from autoware_ml.models.segmentation3d.ptv3_base import (
     PTv3BaseModel,
     PTv3EncoderExportBase,
@@ -172,6 +175,9 @@ class PTv3BEVProjection(nn.Module):
 class PTv3BEVResidualBlock(nn.Module):
     """Refine dense BEV features with a residual 2D convolution block."""
 
+    #: norm1(conv1(x)) and norm2(conv2(x)); the residual joins after norm2.
+    bn_fusion_pairs = (("conv1", "norm1"), ("conv2", "norm2"))
+
     def __init__(self, in_channels: int, out_channels: int, dilation: int = 1) -> None:
         """Initialize the residual BEV block.
 
@@ -294,18 +300,6 @@ class PTv3DetBEVNeck(nn.Module):
         return self.bev_encoder(bev)
 
 
-def det_head_export_input_names(stage_count: int) -> list[str]:
-    """Return the split det-head export input names for a given stage count."""
-    skip_stage = stage_count - 2
-    deep_stage = stage_count - 1
-    return [
-        f"point_feat_{skip_stage}",
-        f"point_feat_{deep_stage}",
-        f"pooling_cluster_{skip_stage}",
-        f"point_grid_coord_{skip_stage}",
-    ]
-
-
 def det_head_export_dynamic_axes(stage_count: int) -> dict[str, dict[int, str]]:
     """Build dynamic axes for the split det-head export graph inputs."""
     skip_stage = stage_count - 2
@@ -319,7 +313,7 @@ def det_head_export_dynamic_axes(stage_count: int) -> dict[str, dict[int, str]]:
 
 
 def build_det_head_export_spec(
-    context: "PTv3ExportContext",
+    context: PTv3ExportContext,
     bev_neck: PTv3DetBEVNeck,
     bbox_head: nn.Module,
     output_names: Sequence[str],
@@ -387,43 +381,6 @@ class _PTv3DetectionExportModule(PTv3EncoderExportBase):
         point = self.run_encoder(grid_coord, feat, serialized_code, *serialized_pooling_inputs)
         bev_features = self.bev_neck(point)
         outputs = self.bbox_head(bev_features)
-        return tuple(outputs[name] for name in self.output_names)
-
-
-class _PTv3DetHeadExportModule(nn.Module):
-    """Export-only detection head consuming the two coarsest encoder stages."""
-
-    def __init__(
-        self,
-        bev_neck: PTv3DetBEVNeck,
-        bbox_head: nn.Module,
-        output_names: Sequence[str],
-    ) -> None:
-        """Initialize the export-only detection head module.
-
-        Args:
-            bev_neck: Export-ready detection BEV neck.
-            bbox_head: Export-ready detection head module.
-            output_names: Ordered output tensor names emitted by ``bbox_head``.
-        """
-        super().__init__()
-        self.bev_neck = bev_neck
-        self.bbox_head = bbox_head
-        self.output_names = list(output_names)
-
-    def forward(
-        self,
-        skip_feat: torch.Tensor,
-        deepest_feat: torch.Tensor,
-        cluster: torch.Tensor,
-        skip_grid_coord: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """Rebuild the coarse pooling link, project to BEV, and run the head."""
-        offset = shape_as_tensor(skip_feat)[:1].to(skip_feat.device)
-        parent = Point(feat=skip_feat, grid_coord=skip_grid_coord, offset=offset)
-        point = Point(feat=deepest_feat, pooling_parent=parent, pooling_inverse=cluster)
-        bev = self.bev_neck(point)
-        outputs = self.bbox_head(bev)
         return tuple(outputs[name] for name in self.output_names)
 
 
@@ -513,6 +470,7 @@ class PTv3DetectionModel(PTv3BaseModel):
         del batch_inputs_dict
         return self.bbox_head.predict(outputs)
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_spec(self, batch_inputs_dict: Mapping[str, torch.Tensor]) -> ExportSpec:
         """Build the PTv3 detection ONNX export specification."""
         inputs = build_monolithic_export_inputs(self, batch_inputs_dict)
