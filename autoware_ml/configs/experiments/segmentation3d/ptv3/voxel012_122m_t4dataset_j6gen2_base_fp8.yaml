@@ -37,3 +37,7 @@ quantization:
     batch_size: 1
     calib_seed: 0
     calib_shuffle: false
+  # The cpe sparse convolutions stay FP16 here: this recipe measures the Linear tree.
+  # Their INT8 form (ImplicitGemm plugin scales) is the *_int8_spconv variant.
+  skip_quantize:
+    - "*cpe.0"

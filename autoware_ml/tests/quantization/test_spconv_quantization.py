@@ -135,3 +135,21 @@ def test_an_uncalibrated_quantizer_is_an_error_not_a_silent_fp16_tower():
 
     with pytest.raises(ValueError, match="un-calibrated"):
         collect_sparse_layer_scales(model.pts_middle_encoder)
+
+
+def test_ptv3_pins_its_sparse_convolutions_to_int8():
+    """The ImplicitGemm plugin has no FP8 path, so the cpe convs must not follow FP8.
+
+    Without the pin, the ``*_fp8`` experiment would ask for FP8 sparse convolutions and the
+    descriptor lookup would fail at quantize time — or, worse, a future FP8 descriptor would
+    ship a graph the plugin cannot execute.
+    """
+    from autoware_ml.models.segmentation3d.main_modules.ptv3.quantization import (
+        PTV3_QUANT_RULES,
+    )
+    from autoware_ml.quantization.config import Precision
+
+    for submodule in ("encoder", "seg3d_head"):
+        kinds = PTV3_QUANT_RULES.resolved_kinds(submodule, Precision.FP8)
+        assert kinds["spconv"] is Precision.INT8
+        assert kinds["linear"] is Precision.FP8
