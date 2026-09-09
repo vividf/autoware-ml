@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Stage-graph declaration, the generic pipeline, and artifact discovery — on toy stages."""
+"""The generic pipeline, export orchestration, and artifact discovery — on toy stages.
+
+The pure stage-declaration contract (``validate_stages``, ``GraphStage`` checks,
+``StageContext`` diagnostics, ``Backend.artifact_suffix``) is in ``test_stages_contract.py``.
+"""
 
 from __future__ import annotations
 
@@ -29,20 +33,10 @@ import onnx
 
 from autoware_ml.deployment.export import available_backends
 from autoware_ml.deployment.pipeline import PipelineCache, StagedPipeline
-from autoware_ml.deployment.stages import (
-    GraphStage,
-    TorchStage,
-    artifact_path,
-    final_stage,
-    graph_stages,
-    validate_stages,
-)
+from autoware_ml.deployment.stages import GraphStage, TorchStage
 from autoware_ml.types.backend import Backend
 from autoware_ml.deployment import export as export_module
 from autoware_ml.deployment.config import DeployConfig
-from autoware_ml.deployment.stages import (
-    StageContext,
-)
 
 
 class _Double(nn.Module):
@@ -68,51 +62,6 @@ def _toy_stages():
             output_fields=(("plus", "a"), ("minus", "b")),
         ),
     )
-
-
-class TestStageDeclaration:
-    def test_validate_returns_tuple_and_final_stage(self):
-        stages = validate_stages(_toy_stages())
-        assert [s.name for s in graph_stages(stages)] == ["encoder", "head"]
-        assert final_stage(stages).name == "head"
-
-    def test_duplicate_names_rejected(self):
-        stages = list(_toy_stages())
-        stages[2] = TorchStage("encoder", run=lambda ctx: {})
-        with pytest.raises(ValueError, match="Duplicate"):
-            validate_stages(stages)
-
-    def test_final_stage_needs_output_fields(self):
-        stages = list(_toy_stages())
-        stages[3] = GraphStage(
-            "head", module=_SplitHead(), inputs=("z",), outputs=("plus", "minus")
-        )
-        with pytest.raises(ValueError, match="output_fields"):
-            validate_stages(stages)
-
-    def test_only_final_stage_may_declare_output_fields(self):
-        stages = list(_toy_stages())
-        stages[1] = GraphStage(
-            "encoder", module=_Double(), inputs=("x",), outputs=("y",), output_fields=(("y", "f"),)
-        )
-        with pytest.raises(ValueError, match="Only the final"):
-            validate_stages(stages)
-
-    def test_output_fields_must_name_declared_outputs(self):
-        with pytest.raises(ValueError, match="not among its outputs"):
-            GraphStage(
-                "h", module=_Double(), inputs=("x",), outputs=("y",), output_fields=(("q", "f"),)
-            )
-
-    def test_no_graph_stage_rejected(self):
-        with pytest.raises(ValueError, match="at least one"):
-            validate_stages([TorchStage("only", run=lambda ctx: {})])
-
-    def test_artifact_paths_derive_from_stage_name(self, tmp_path):
-        assert artifact_path(tmp_path, "encoder", Backend.ONNX) == tmp_path / "encoder.onnx"
-        assert artifact_path(tmp_path, "encoder", "tensorrt") == tmp_path / "encoder.engine"
-        with pytest.raises(ValueError):
-            artifact_path(tmp_path, "encoder", Backend.PYTORCH)
 
 
 class TestStagedPipeline:
@@ -471,39 +420,3 @@ def test_export_stamps_provenance_into_every_stage_artifact(tmp_path, monkeypatc
     assert json.loads(props["class_names"]) == ["car", "truck"]
     assert stamped.producer_version == "abc1234"
     assert stamped.model_version == 10203
-
-
-def test_validate_stages_rejects_a_declaration_that_opens_with_a_graph_stage() -> None:
-    """The context starts empty, so the first stage cannot be one that reads from it.
-
-    Everything past the opening stage is a run-time question — a ``TorchStage`` declares
-    no outputs — and ``StageContext.__getitem__`` is what answers it.
-    """
-
-    first = GraphStage(
-        "first",
-        module=nn.Identity(),
-        inputs=("x",),
-        outputs=("y",),
-        output_fields=(("y", "y"),),
-    )
-    with pytest.raises(ValueError, match="context starts empty"):
-        validate_stages((first,))
-
-    assert len(validate_stages((TorchStage("glue", run=lambda ctx: {}), first))) == 2
-
-    # The run-time half of the same contract.
-    context = StageContext(batch_inputs=None, device=torch.device("cpu"))
-    context.tensors["mid"] = torch.ones(1)
-    with pytest.raises(KeyError, match="available: \\['mid'\\]"):
-        context["typo"]
-
-
-def test_pytorch_backend_answers_the_artifact_question_the_same_way_twice() -> None:
-    """`artifact_suffix` and `artifact_path` must agree that PyTorch has no artifact."""
-
-    with pytest.raises(ValueError, match="no exported artifact"):
-        _ = Backend.PYTORCH.artifact_suffix
-    with pytest.raises(ValueError, match="no exported artifact"):
-        artifact_path("/tmp", "s", Backend.PYTORCH)
-    assert Backend.ONNX.artifact_suffix == ".onnx"

@@ -98,9 +98,11 @@ def mlflow_run_scope(run_context: MlflowRunContext | None) -> Iterator[MlflowCli
     The one spelling of the run-termination boilerplate shared by the deploy and
     quantize entrypoints: yields an ``MlflowClient`` bound to ``run_context``
     (``None`` when logging is disabled), marks the run FAILED when the body raises,
-    FINISHED otherwise. Interrupts (Ctrl+C, SIGTERM) terminate the run KILLED — deploy
-    and quantize are long jobs and are interrupted routinely, and a run left RUNNING
-    forever is indistinguishable on the tracking server from one still working.
+    FINISHED otherwise. Python-level interrupts (Ctrl+C, ``SystemExit``) terminate the
+    run KILLED — deploy and quantize are long jobs and are interrupted routinely, and a
+    run left RUNNING forever is indistinguishable on the tracking server from one still
+    working. An OS signal without a Python handler (plain SIGTERM) ends the process
+    before this branch runs, so it is not covered here.
     """
     if run_context is None:
         yield None
