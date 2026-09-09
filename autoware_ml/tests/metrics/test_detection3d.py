@@ -280,7 +280,7 @@ def test_metric_eval_mixin_logs_test_map() -> None:
     )
     model.on_test_epoch_end()
 
-    assert model.logged_metrics[-1]["test/det3d/mAP"] == pytest.approx(1.0)
+    assert model.logged_metrics[-1]["test/pytorch/det3d/mAP"] == pytest.approx(1.0)
 
 
 def test_metric_eval_mixin_logs_val_map() -> None:
@@ -296,7 +296,7 @@ def test_metric_eval_mixin_logs_val_map() -> None:
     )
     model.on_validation_epoch_end()
 
-    assert model.logged_metrics[-1]["val/det3d/mAP"] == pytest.approx(1.0)
+    assert model.logged_metrics[-1]["val/pytorch/det3d/mAP"] == pytest.approx(1.0)
 
 
 def test_metric_eval_mixin_rejects_missing_required_keys() -> None:

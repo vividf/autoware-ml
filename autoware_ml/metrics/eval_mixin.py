@@ -4,7 +4,10 @@
 test metric lifecycle for a list of :class:`~autoware_ml.metrics.base.MetricSuite`
 objects. A model only implements ``build_eval_output``. The mixin resets each
 suite at epoch start, calls ``update`` per batch, and ``result`` at epoch end,
-logging under ``{split}/{prefix}/{key}``.
+logging under the canonical ``{split}/{backend}/{prefix}/{key}`` convention of
+:mod:`autoware_ml.metrics.report` with ``backend=pytorch`` — the trainer is just one
+more backend, so deployment evaluation of an ONNX/TensorRT export of the same model
+lands next to it in MLflow.
 
 Each suite is cloned per stage and registered as a submodule, so Lightning moves
 its state to the right device. torchmetrics owns the cross-GPU sync, which runs
@@ -19,6 +22,8 @@ from typing import Any
 import torch.nn as nn
 
 from autoware_ml.metrics.base import EvalStage, MetricSuite
+from autoware_ml.metrics.report import check_required_keys, collect_suite_results
+from autoware_ml.types.backend import Backend
 
 
 class MetricEvalMixin:
@@ -54,6 +59,15 @@ class MetricEvalMixin:
 
     def _stage_metrics(self, stage: EvalStage) -> nn.ModuleList:
         return self._metrics_by_stage[stage.value]
+
+    def clone_metrics(self, stage: EvalStage) -> list[MetricSuite]:
+        """Return fresh clones of this model's metric suites for one stage.
+
+        Deployment evaluation scores each exported backend with its own clone of
+        the model's suites, so per-backend state never cross-contaminates and the
+        numbers are computed by exactly the same metric code as ``trainer.test``.
+        """
+        return [metric.clone() for metric in self._stage_metrics(stage)]
 
     def on_validation_epoch_start(self) -> None:
         """Reset the validation metric state for a fresh epoch."""
@@ -96,30 +110,12 @@ class MetricEvalMixin:
         )
         eval_out = self.build_eval_output(batch, raw_outputs)
         if batch_idx == 0:
-            self._check_required_keys(metrics, eval_out)
+            check_required_keys(metrics, eval_out, producer=type(self).__name__)
         for metric in metrics:
             metric.update(eval_out)
 
-    def _check_required_keys(self, metrics: nn.ModuleList, eval_out: Mapping[str, Any]) -> None:
-        for metric in metrics:
-            missing = [key for key in metric._required_keys if key not in eval_out]
-            if missing:
-                raise ValueError(
-                    f"Metric {type(metric).__name__!r} needs {missing}, not produced by "
-                    f"{type(self).__name__}.build_eval_output."
-                )
-
     def _log_metrics(self, stage: EvalStage) -> None:
-        metrics = self._stage_metrics(stage)
-        report: dict[str, float] = {}
-        for metric in metrics:
-            for name, value in metric.result(stage).items():
-                key = f"{stage.value}/{metric.prefix}/{name}"
-                if key in report:
-                    raise ValueError(
-                        f"Two metrics log the same key {key!r}. Set a distinct prefix."
-                    )
-                report[key] = value
+        report = collect_suite_results(self._stage_metrics(stage), stage, backend=Backend.PYTORCH)
         if not report:
             return
         # Values are already global and identical on every rank after sync, so no sync_dist.

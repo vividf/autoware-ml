@@ -64,17 +64,17 @@ trainer:
 
 callbacks:
   model_checkpoint:
-    monitor: val/det3d/mAP
+    monitor: val/pytorch/det3d/mAP
     mode: max
   early_stopping:
-    monitor: val/det3d/mAP
+    monitor: val/pytorch/det3d/mAP
     patience: 20
     mode: max
 
 deploy:
   onnx:
     enabled: true
-    opset_version: 17
+    opset_version: 19
     dynamo: false
     do_constant_folding: false
     modules:
