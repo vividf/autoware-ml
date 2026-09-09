@@ -11,10 +11,10 @@
 #     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8 \
 #     --weights <ptq.ckpt produced by the quantize run>
 #
-# Only the dense graph quantizes (backbone / neck / head Conv2d); the sparse stage's
-# INT8 form is the libspconv engine from the dedicated exporter (module TODO in
-# main_modules/bevfusion/stages.py). Engines build strongly typed; the non-quantized
-# graph regions inherit deploy.onnx.precision: fp16 from base.yaml (AutoCast).
+# Only the dense graph quantizes (backbone / neck / head Conv2d): this is the dense
+# reference recipe, so the sparse tower is skipped here and takes INT8 in the
+# `*_int8_spconv` variant instead. Engines build strongly typed; the non-quantized
+# graph regions inherit deploy.onnx.precision: fp16 from base.yaml.
 defaults:
   - lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base
   - _self_
@@ -43,6 +43,8 @@ quantization:
   # 0.4513 (FP16 0.4512, all-conv INT8 0.4217) and the dense stage runs 1.60 ms
   # (FP16 1.77, all-conv INT8 1.44).
   skip_quantize:
+    # Dense-only recipe: the sparse tower stays FP16 (see *_int8_spconv for its INT8 form).
+    - pts_middle_encoder
     - bbox_head.decoder
     - pts_neck.blocks.0
     - pts_backbone.blocks.0

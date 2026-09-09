@@ -63,6 +63,14 @@ _CONV_TRANSPOSE2D_WEIGHT: Mapping[Precision, QuantizerAttributeConfig] = {
     Precision.FP8: QuantizerAttributeConfig(num_bits=(4, 3)),
 }
 
+#: Per-output-channel weight descriptor for a sparse convolution. The weight is
+#: ``[C_out, k1, k2, k3, C_in]``, so ``axis=0`` is one scale per output channel — the
+#: layout the ImplicitGemm plugin's ``channel_scale`` input expects. There is no FP8 row:
+#: the plugin has an INT8 path only.
+_SPCONV_WEIGHT: Mapping[Precision, QuantizerAttributeConfig] = {
+    Precision.INT8: QuantizerAttributeConfig(num_bits=8, axis=0),
+}
+
 #: Weight descriptor for Linear: INT8 per-output-channel (per-row); FP8 per-tensor.
 _LINEAR_WEIGHT: Mapping[Precision, QuantizerAttributeConfig] = {
     Precision.INT8: QuantizerAttributeConfig(num_bits=8, axis=0),
@@ -108,3 +116,8 @@ def conv_transpose2d_weight_desc(precision: Precision) -> QuantizerAttributeConf
 def linear_weight_desc(precision: Precision) -> QuantizerAttributeConfig:
     """Linear weight descriptor for ``precision``."""
     return _lookup(_LINEAR_WEIGHT, precision, "Linear weight")
+
+
+def spconv_weight_desc(precision: Precision) -> QuantizerAttributeConfig:
+    """Sparse-convolution weight descriptor for ``precision`` (INT8 only)."""
+    return _lookup(_SPCONV_WEIGHT, precision, "sparse convolution weight")

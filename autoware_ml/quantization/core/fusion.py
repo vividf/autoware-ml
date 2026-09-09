@@ -21,10 +21,17 @@ Fusing BatchNorm into preceding convolutions is important for quantization becau
 """
 
 import logging
-from collections.abc import Iterator
 
 import torch
 from torch import nn
+
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+
+if IS_SPCONV_AVAILABLE:
+    # Guarded at the top rather than imported inside a function: spconv is the framework's
+    # one optional dependency (see replace.py).
+    from spconv.pytorch import SparseSequential
+    from spconv.pytorch.conv import SparseConvolution
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +162,25 @@ _CONV_TO_BN: dict[type, type] = {
     nn.Linear: nn.BatchNorm1d,
 }
 
+#: Containers whose ``forward`` applies registered children in order, like ``nn.Sequential``.
+#: spconv's ``SparseSequential`` is one; it exists only because a sparse layer takes a
+#: ``SparseConvTensor`` rather than a tensor, not because the dataflow differs.
+_SEQUENTIAL_CONTAINERS: tuple[type, ...] = (nn.Sequential,)
+
+if IS_SPCONV_AVAILABLE:
+    # A sparse convolution normalizes its output with BatchNorm1d over the feature columns,
+    # and its weight is ``[C_out, k1, k2, k3, C_in]`` — output channels on dim 0, exactly what
+    # `fuse_bn_weights` scales for a non-transposed convolution, so no special case is needed
+    # beyond naming the pair. Folding here rather than at export time is what lets the weight
+    # quantizer calibrate on the *folded* weight the deployed graph actually carries.
+    _CONV_TO_BN[SparseConvolution] = nn.BatchNorm1d
+    _SEQUENTIAL_CONTAINERS = (*_SEQUENTIAL_CONTAINERS, SparseSequential)
+
 
 def _applies_children_in_order(module: nn.Module) -> bool:
-    return isinstance(module, nn.Sequential) or bool(getattr(module, SEQUENTIAL_MARKER, False))
+    return isinstance(module, _SEQUENTIAL_CONTAINERS) or bool(
+        getattr(module, SEQUENTIAL_MARKER, False)
+    )
 
 
 def _is_fusible_pair(left: nn.Module, right: nn.Module) -> bool:

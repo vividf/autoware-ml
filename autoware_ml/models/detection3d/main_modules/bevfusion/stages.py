@@ -45,14 +45,16 @@ Contract with the interface migration:
   detections rather than head outputs, so the model implements ``assemble_predictions``
   (not ``assemble_outputs``) and reaches it through :func:`decode_packed_detections`.
 
-.. todo:: TODO(vividf): INT8 for the sparse stage needs the quantized libspconv ABI
-   (``ImplicitGemmInt8`` with per-layer ``*_channel_scale`` / ``*_bias_scaled``
-   inputs) plus its own plugin; the current quantization declaration deliberately
-   covers the dense graph only.
+The sparse stage deploys in INT8 when the checkpoint carries calibrated sparse quantizers:
+:func:`~autoware_ml.ops.spconv.onnx_int8.sparse_int8_transform` writes their scales into the
+exported graph as plugin attributes and inputs (``precision=1`` + ``channel_scale`` /
+``bias_scaled``), because a plugin op cannot absorb Q/DQ nodes. It is a no-op for an
+un-quantized encoder, so one stage declaration serves both deployments.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Mapping
 
 import torch
@@ -63,6 +65,7 @@ from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, Torch
 from autoware_ml.models.detection3d.feature_extractors import LidarBEVFeatureExtractor
 from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.types.backend import Backend
 
 # Stage / artifact names (AWML split-deployment ABI: <name>.onnx / .engine).
@@ -206,7 +209,14 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             # TensorRT cannot fuse a standard operator into a plugin node, so the traced
             # bias adds and block ReLUs are folded into the plugin's own bias input and
             # act_type instead.
-            onnx_transforms=(fuse_sparse_graph,),
+            # Order matters: the INT8 pass reads the bias out of the node's sixth input, so
+            # it has to run after the fusion that puts it there. Both run after the
+            # precision pass, which is what leaves the new FP32 scale initializers FP32
+            # while the filters and features are already FP16 — the plugin's INT8 contract.
+            onnx_transforms=(
+                fuse_sparse_graph,
+                partial(sparse_int8_transform, encoder=model.pts_middle_encoder),
+            ),
         ),
         GraphStage(
             DENSE_STAGE,
