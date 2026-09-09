@@ -155,7 +155,7 @@ trainer:
 deploy:
   onnx:
     dynamo: false
-    opset_version: 17
+    opset_version: 19
     do_constant_folding: false
     modules:
       bevfusion_lidar:

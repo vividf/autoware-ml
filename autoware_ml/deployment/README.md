@@ -106,46 +106,41 @@ artifact 命名規則:`artifact_path(output_dir, stage_name, backend)` →
    build 前載入。
 5. **verification**(§4)→ 6. **evaluation**(§5)。
 
-## 3. Precision:fp16 的海、fp32 的島
+## 3. Precision:fp16 的海、fp32 的線性島
 
-量化圖的 fp16 化**不是**全圖轉型。Q/DQ 及其周邊保持 fp32-typed(「島」),其餘轉
-fp16(「海」)。三層規則:
+量化圖的 fp16 化是**全圖轉型 + 一條例外**:conv 家族的 Q/DQ 連 scale 一起轉 fp16(opset 19
+起合法),只有 **餵 Gemm/MatMul 的 Q/DQ** 保持 fp32-typed(「線性島」)。
 
-**誰進島**(`_quantized_island_names`,4 條依序):
+**誰進島**(`_quantized_island_names`):每個 DQ 若其輸出(直接或穿過 Transpose/Reshape 等
+純 layout op)到達 Gemm/MatMul,則 {該 DQ、它的 Q、兩者的 scale/zero-point producer、
+layout hop、線性 op 本體} 進島,整段零 cast。其餘 Q/DQ 是海。
 
-1. 所有 Q/DQ 節點;
-2. scale/zero-point 的 producer(fp32 scale 位元組級保留——scale 就是量化本身);
-3. 每個 DQ 輸出的消費者(被量化的 Conv/Gemm 本體);
-4. 反向生長:從每個 Q 的 data 輸入沿 **float data 邊**往回穿過 commuting whitelist
-   (`Relu/Add/Concat/MaxPool/Reshape/Transpose/Gather/...`),讓「量化 op → pointwise
-   → 下一個 Q」整段零 cast。
+**為什麼按 op 類型切**(`_LINEAR_OPS` 註解、`work_dirs/reviews/uniform-fp16-exception-rule.md`):
+
+| 事實 | 量測 |
+| --- | --- |
+| fp16-typed INT8 **Gemm** 在 TRT 10.8/10.16 會產 NaN | 合併 scale `s_x·s_w[c]` 掉到 fp16 subnormal 時融合 kernel 出事;PTv3 head mIoU 0.734→0.075,build 零警告 |
+| conv kernel 免疫 | CenterPoint/BEVFusion 26 顆 conv 模組 combined scale 同樣 subnormal,uniform fp16 的 mAP 與 island 版相同 |
+| 不能按 node 名單 | 「4 顆兇手」保護後仍有 1.9% NaN 級錯行,add-one 掃描再抓到 2 顆;名單隨卡/版本/校準變 |
+| 不能按 scale 閾值 | PTv3 head 19 顆有 15 顆 subnormal,只有 6 顆出事;encoder 55 顆有 53 顆 subnormal 卻全對 |
+| 線性島不需要沿鏈生長 | head 上 19 顆迷你島 1.077 ms vs 舊 region-island 1.087 vs 全 uniform 1.038(precision 0.998 = 純 fp16 天花板) |
+| 海全 fp16 | 未量化區跑 fp32:CenterPoint 端到端 6.75 vs 4.44 ms(`three-model-results.md`) |
 
 **cast 放哪**:只在「島↔海」與「圖 IO」邊界,每條跨界 float 邊恰好一顆;圖 IO 保 fp32
 (runtime ABI)。**決定「這條邊要不要 cast」的是邊的 dtype,不是節點在不在島**:整數 / bool 邊
-(zero-point、shape、indices、MaxPool 的 Indices)進出島都原封不動。dtype 來源依序是
-`_ISLAND_FLOAT_INPUT_SLOTS`(op spec 固定的 float slot;import 時 assert 與 whitelist 鎖死)、
-`onnx/dtypes.py::tensor_types`(圖 IO + initializer + Constant + Q/DQ 輸出種子 + ONNX shape
-inference 往下推);兩者都說不出型別的邊 **raise**,不猜 FLOAT——猜 FLOAT 正是 shape 邊被 cast
-的來源(Codex review PR14-01 的兩個重現)。匯出圖的 plugin 輸出都有 value_info(exporter 記錄
-trace 到的 dtype),所以這個 raise 只會打到手工圖。
+(zero-point、Reshape 的 shape)進出島都原封不動。dtype 來源依序是 `_ISLAND_FLOAT_INPUT_SLOTS`
+(每個可進島的 op 一行,import 時 assert 齊全)、`onnx/dtypes.py::tensor_types`(圖 IO +
+initializer + Constant + Q/DQ 輸出種子 + ONNX shape inference);兩者都說不出型別的邊 **raise**,
+不猜 FLOAT。
 
-**為什麼**(每條都是量出來的):
+**前置條件**:標準域 Q/DQ 要轉 fp16 需 opset ≥ 19(`QuantizeLinear` 的 fp16 `x`/`y_scale`);
+圖低於 19 又有 conv 側 Q/DQ 時 pass 直接 raise,提示改 `deploy.onnx.opset_version`。
+三個量化模型 config 已是 19。
 
-| 規則 | 違反的實測代價 |
-| --- | --- |
-| scale 保 fp32 | fp16-typed Q/DQ 踩 TRT 10.8/10.16 缺陷:合併 scale subnormal → 融合 kernel 產 NaN、build 零警告(PTv3 mIoU 0.73→0.075) |
-| DQ→消費者直連 | TRT INT8 融合 pattern 對不上,build assert |
-| 鏈到下一個 Q 零 cast | Q-propagation 被 Cast 擋住 → 量化 conv 具現化 fp32:同一 backbone 4.76 vs 3.87 ms |
-| 海全 fp16 | 未量化區跑 fp32:CenterPoint 端到端 6.75 vs 4.44 ms(`work_dirs/reviews/three-model-results.md`);同一效應在 backbone_neck_head stage 上是 5.91 vs 2.50 ms(`deployment/export.py` docstring) |
-
-**最重要的心智模型:島的 fp32 是「記號」不是執行精度。** TRT 把島內
-`DQ→Conv→Relu→Q` 融合成 int8 進出的 kernel;實際執行 = 海 fp16、島 int8、邊界幾顆
-cast(實測合計 0.118 ms,出處 `work_dirs/reviews/phase0-profiling-report.md`)。fp16-typed Q/DQ(opset 19 合法、ORT 算得對)在 TRT 上是
-**NO-GO**,完整證據與重測工具:`work_dirs/reviews/fp16-typed-qdq-nogo.md`。
-
-出現 `Quantized chain breaks at ...` 警告時:該 op 若量化可交換 → 加進
-`_QDQ_COMMUTING_OPS`(連 slot 表一行,少一半 import 直接爆)並重跑三模型 battery;
-不可交換(LayerNorm/Gelu 類)→ 加 `_KNOWN_NON_COMMUTING_OPS` 消音。
+**心智模型:島的 fp32 是「記號」不是執行精度。** TRT 把 `DQ→Gemm` 融成 int8 kernel、把海裡的
+`Q/DQ→Conv→Relu→Q` 融成 int8 進出的 kernel;實際執行 = 海 fp16、量化 op int8、線性島邊界幾顆
+cast。fp16-typed 線性 Q/DQ 的完整驗屍與重測工具:`work_dirs/reviews/fp16-typed-qdq-nogo.md`;
+規則本身的實驗:`uniform-fp16-exception-rule.md`。
 
 ## 4. Verification:比對哲學
 
@@ -188,7 +183,7 @@ deployment/
   export.py        export 編排:export→modify_graph→precision→transforms→stamp→build
   onnx/
     export.py      torch.onnx.export 包裝
-    precision.py   路由判定函式(custom domain / Q-DQ)、island cast、commuting whitelist(§3)
+    precision.py   路由判定函式(custom domain / Q-DQ)、線性島 fp16 cast(§3)
     autocast.py    modelopt AutoCast 包裝、keep_topk_in_fp16
     modify.py      config 驅動的圖手術(deploy.onnx.modify_graph)
   backends/

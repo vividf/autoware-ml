@@ -32,7 +32,7 @@ trainer:
 deploy:
   onnx:
     dynamo: false
-    opset_version: 17
+    opset_version: 19
     do_constant_folding: false
     # Deployed CenterPoint runs FP16 outside the quantized (Q/DQ) regions; AutoCast
     # bakes that into the exported graphs (engines build strongly typed).

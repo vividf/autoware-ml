@@ -19,7 +19,7 @@ Three graph kinds, three treatments (driven by :mod:`autoware_ml.deployment.expo
 
 - Q/DQ graphs without plugin ops keep the precision their checkpoint bakes in.
 - Plugin graphs (``autoware::`` domains) take :func:`cast_graph_to_fp16` — whole-graph
-  FP16, Q/DQ-island-aware when the graph is also quantized.
+  FP16; when the graph is also quantized, its linear (Gemm/MatMul) Q/DQ stay fp32-typed.
 - Everything else takes :func:`autocast_to_fp16` (ModelOpt AutoCast, per-node).
 """
 
@@ -79,219 +79,120 @@ def _assign_missing_node_names(graph) -> None:
             taken.add(candidate)
 
 
-#: Ops TensorRT's Q/DQ propagation commutes across. The backward walk from each
-#: QuantizeLinear grows the island through these so quantized chains stay castless end
-#: to end (conv -> relu -> reshape -> next Q); anything else ends the region. Membership
-#: means "quantization commutes with this op, so TensorRT can move the Q across it and
-#: fuse an int8-out kernel": monotone/value-neutral activations, linear pooling, and
-#: pure data-movement ops qualify. Deliberately ABSENT: nonlinear activations quantization
-#: does not commute with (Gelu, Sigmoid, Tanh, Erf, Mul-gating ...) — TensorRT cannot
-#: propagate Q across them anyway, so islanding them would only force FP32 execution of
-#: ops that are cheaper left in the FP16 sea (requantized after).
-#: MAINTENANCE CONTRACT: this list approximates the propagation rules of the pinned
-#: TensorRT version. When a quantized chain breaks on an op missing here, the pass logs
-#: a warning naming it; extend the list (with a slot entry below — enforced at import —
-#: and re-run the three-model battery) then.
-_QDQ_COMMUTING_OPS = frozenset(
-    {
-        "Relu",
-        "LeakyRelu",
-        "Clip",
-        "Concat",
-        "Add",
-        "MaxPool",
-        "AveragePool",
-        "GlobalAveragePool",
-        "Reshape",
-        "Transpose",
-        "Flatten",
-        "Squeeze",
-        "Unsqueeze",
-        "Slice",
-        "Gather",
-        "Identity",
-    }
-)
+#: The quantized compute ops whose Q/DQ stay fp32-typed. TensorRT 10.8/10.16 emits NaN
+#: from a strongly-typed fp16 Q/DQ -> INT8 **Gemm** when the fp16 combined scale
+#: ``s_x * s_w[c]`` goes subnormal (the fused kernel folds the dequant scales into an fp16
+#: intermediate); fp32-typed Q/DQ take a different kernel path and are exact. Conv kernels
+#: are immune: CenterPoint and BEVFusion carry 26 conv modules with subnormal combined
+#: scales and evaluate identically under fp16-typed Q/DQ. Hence the split is by op type,
+#: not by node name or scale threshold — both were tried and are unreliable (a name list
+#: missed two culprits; 15 of PTv3's 19 head Gemms are subnormal yet only 6 misbehave).
+#: Evidence: work_dirs/reviews/fp16-typed-qdq-nogo.md, uniform-fp16-exception-rule.md.
+_LINEAR_OPS = frozenset({"Gemm", "MatMul"})
+
+#: Pure layout ops a DQ output may pass through on its way to the linear op (a weight
+#: DQ -> Transpose -> MatMul is how modelopt's FP8 export spells a Linear). They join the
+#: island so the DQ -> op edge stays castless (a Cast between DQ and its consumer defeats
+#: TensorRT's Q/DQ fusion — measured as "Per-tensor quantization/dequantization layer
+#: should have 1 scale factor element").
+_LAYOUT_OPS = frozenset({"Transpose", "Reshape", "Flatten", "Squeeze", "Unsqueeze", "Identity"})
 
 #: Positions of the FLOAT-typed inputs, per island op, as the op's ONNX spec fixes them.
 #: The boundary-cast logic must never cast an integer edge (a Q/DQ zero-point, a Reshape
-#: shape, a Gather index...). Rows exist for Q/DQ, the commuting ops above (the backward
-#: island growth follows float slots only) and the quantized compute ops; ``None`` means
-#: "every input is float". An island member without a row — anything else rule 3 admits
-#: as a DQ consumer (Expand, ScatterND, a runtime plugin...) — is typed per tensor from
-#: :func:`~autoware_ml.deployment.onnx.dtypes.tensor_types` instead, and the pass refuses
-#: an edge neither settles rather than guess. The import-time check below keeps this
-#: table and the whitelist in lockstep, so extending one without the other is impossible.
+#: shape...), so every op that can be an island member has a row; ``None`` means "every
+#: input is float".
 _ALL_FLOAT = None
 _ISLAND_FLOAT_INPUT_SLOTS: dict = {
-    # Q/DQ: data + scale are float for Q; only the scale for DQ (its data is int8).
+    # Q/DQ: data + scale are float for Q; only the scale for DQ (its data is int8/fp8).
     "QuantizeLinear": (0, 1),
     "TRT_FP8QuantizeLinear": (0, 1),
     "DequantizeLinear": (1,),
     "TRT_FP8DequantizeLinear": (1,),
-    # Commuting ops: data input(s) only — trailing inputs are ints (shape/axes/indices)
-    # or all inputs are float.
-    "Relu": (0,),
-    "LeakyRelu": (0,),
-    "Clip": _ALL_FLOAT,  # min/max inputs are float
-    "Concat": _ALL_FLOAT,
-    "Add": _ALL_FLOAT,
-    "MaxPool": (0,),
-    "AveragePool": (0,),
-    "GlobalAveragePool": (0,),
-    "Reshape": (0,),  # input[1] is the int64 shape
+    # Layout hops: data input only — trailing inputs are int64 shape/axes.
     "Transpose": (0,),
+    "Reshape": (0,),
     "Flatten": (0,),
-    "Squeeze": (0,),  # input[1] (opset 13+) is the int64 axes
+    "Squeeze": (0,),
     "Unsqueeze": (0,),
-    "Slice": (0,),  # starts/ends/axes/steps are int64
-    "Gather": (0,),  # indices are int
     "Identity": (0,),
-    # Quantized compute (island members by rule 3, as DQ consumers): all-float by spec.
+    # The quantized linear op itself: all-float by spec.
     "Gemm": _ALL_FLOAT,
     "MatMul": _ALL_FLOAT,
-    "Conv": _ALL_FLOAT,
-    "ConvTranspose": _ALL_FLOAT,
 }
-_MISSING_SLOT_ENTRIES = _QDQ_COMMUTING_OPS - set(_ISLAND_FLOAT_INPUT_SLOTS)
+_MISSING_SLOT_ENTRIES = (_LINEAR_OPS | _LAYOUT_OPS | set(QDQ_OPS)) - set(_ISLAND_FLOAT_INPUT_SLOTS)
 assert not _MISSING_SLOT_ENTRIES, (
-    f"_QDQ_COMMUTING_OPS entries missing a float-slot row: {sorted(_MISSING_SLOT_ENTRIES)}. "
-    "Every whitelisted op needs one so island boundary casts never touch integer edges."
+    f"Island-eligible ops missing a float-slot row: {sorted(_MISSING_SLOT_ENTRIES)}. "
+    "Every one needs a row so island boundary casts never touch integer edges."
 )
 
-#: Ops quantization mathematically does NOT commute with: a chain deliberately ends here
-#: (the op runs FP16 in the sea and the activation is requantized after), so the
-#: broken-chain check reports these at DEBUG, not WARNING — only genuinely unclassified
-#: ops deserve a look at the whitelist.
-_KNOWN_NON_COMMUTING_OPS = frozenset(
-    {
-        "LayerNormalization",
-        "BatchNormalization",
-        "Softmax",
-        "Sigmoid",
-        "HardSigmoid",
-        "Gelu",
-        "Erf",
-        "Tanh",
-        "Mul",
-        "Div",
-        "Pow",
-        "Sqrt",
-        "Exp",
-    }
-)
+#: Minimum default-domain opset for fp16-typed Q/DQ (fp16 ``x`` and ``y_scale`` on
+#: QuantizeLinear/DequantizeLinear are legal from opset 19).
+_FP16_QDQ_MIN_OPSET = 19
 
 
 def _quantized_island_names(graph) -> list[str]:
-    """The nodes that must stay FP32 for the Q/DQ regions to survive an FP16 cast.
+    """The nodes that stay FP32-typed when the graph is cast to FP16: the linear islands.
 
-    An island is a Q/DQ pair *plus* what TensorRT's INT8 fusion pattern-matches around
-    it: the scale/zero-point producers (their FP32 values are the quantization — rounding
-    them through FP16 is what broke the naive cast, measured mIoU 0.545 -> 0.067), the
-    consumers of DequantizeLinear outputs (the quantized GEMM itself: a Cast between
-    DQ and its consumer defeats the DQ -> op -> Q fusion, measured as TensorRT's
-    "Per-tensor quantization/dequantization layer should have 1 scale factor element"),
-    and the pointwise chain between a quantized op and the next QuantizeLinear (a Cast
-    there blocks Q propagation into the producer, forcing every quantized conv to
-    materialize an FP32 output: measured 4.76 ms vs 3.87 for the same CenterPoint
-    backbone when the chains stay castless).
-
-    fp32-typed islands are deliberate and load-bearing: retyping Q/DQ to fp16 (legal
-    since opset 19) hits a TensorRT 10.8/10.16 defect that emits NaN when the fp16
-    combined scale s_x*s_w goes subnormal (see fp16-typed-qdq-nogo.md).
+    An island is a DQ whose output reaches a Gemm/MatMul (directly or through layout
+    ops), plus that DQ's Q, both nodes' scale/zero-point producers (their FP32 values
+    *are* the quantization), the layout hops and the linear op itself — the exact
+    pattern TensorRT fuses into one INT8 kernel, kept castless. Every other Q/DQ (the
+    conv family) is sea: it is retyped to fp16 with the rest of the graph, scale
+    included. See ``_LINEAR_OPS`` for why the split runs along op type.
     """
     producer_of = {out: node for node in graph.node for out in node.output}
-    island: dict[str, None] = {}
-    dq_outputs = set()
+    consumers_of: dict[str, list] = {}
     for node in graph.node:
-        if node.op_type not in QDQ_OPS:
-            continue
-        island[node.name] = None
-        for name in node.input[1:]:  # scale / zero_point
-            producer = producer_of.get(name)
-            if producer is not None:
-                island[producer.name] = None
-        if node.op_type in DEQUANTIZE_OPS:
-            dq_outputs.update(node.output)
-    for node in graph.node:
-        if node.name not in island and any(name in dq_outputs for name in node.input):
-            island[node.name] = None
+        for name in node.input:
+            consumers_of.setdefault(name, []).append(node)
 
-    # Grow each island backward from the Q data inputs through commuting ops, so the
-    # region between a quantized op and its re-quantization carries no casts. The walk
-    # follows FLOAT data edges only (per the slot table): stepping through an integer
-    # input (a Gather index chain, a Reshape shape) would drag int-typed glue into the
-    # island and let the boundary logic cast integer edges.
-    pending = [node.input[0] for node in graph.node if node.op_type in QUANTIZE_OPS and node.input]
-    while pending:
-        producer = producer_of.get(pending.pop())
-        if producer is None or producer.name in island:
+    island: dict[str, None] = {}
+
+    def admit(node) -> None:
+        island[node.name] = None
+        if node.op_type in QDQ_OPS:
+            for name in node.input[1:]:  # scale / zero_point
+                producer = producer_of.get(name)
+                if producer is not None:
+                    island[producer.name] = None
+
+    for node in graph.node:
+        if node.op_type not in DEQUANTIZE_OPS or not node.output:
             continue
-        if producer.op_type not in _QDQ_COMMUTING_OPS:
+        # Follow the DQ output forward through layout ops; collect the linear consumers
+        # and the hops that lead to them.
+        hops: list = []
+        linear: list = []
+        frontier = [(node.output[0], [])]
+        while frontier:
+            name, path = frontier.pop()
+            for consumer in consumers_of.get(name, []):
+                if consumer.op_type in _LINEAR_OPS:
+                    linear.append(consumer)
+                    hops.extend(path)
+                elif consumer.op_type in _LAYOUT_OPS and consumer.input[0] == name:
+                    frontier.append((consumer.output[0], path + [consumer]))
+        if not linear:
             continue
-        island[producer.name] = None
-        slots = _ISLAND_FLOAT_INPUT_SLOTS[producer.op_type]
-        pending.extend(
-            name
-            for index, name in enumerate(producer.input)
-            if slots is _ALL_FLOAT or index in slots
-        )
+        admit(node)
+        quantize = producer_of.get(node.input[0])
+        if quantize is not None and quantize.op_type in QUANTIZE_OPS:
+            admit(quantize)
+        for member in hops + linear:
+            island[member.name] = None
     return list(island)
 
 
-def _warn_broken_quantized_chains(graph, island: set) -> None:
-    """Log when a quantized chain ends on an op outside the commuting whitelist.
-
-    A QuantizeLinear fed (via one non-island hop) from a quantized island op means the
-    backward growth stopped on that hop's op type: the chain gets a cast boundary and
-    the upstream quantized op materializes FP32 output instead of fusing int8-out.
-    Correctness is unaffected — this is a silent-latency guard, and the fix is usually
-    one entry in ``_QDQ_COMMUTING_OPS``.
-    """
-    producer_of = {out: node for node in graph.node for out in node.output}
-    dq_consumers = {
-        node.name for node in graph.node if node.name in island and node.op_type not in QDQ_OPS
-    }
-    for node in graph.node:
-        if node.op_type not in QUANTIZE_OPS or not node.input:
-            continue
-        hop = producer_of.get(node.input[0])
-        if hop is None or hop.name in island:
-            continue
-        if any(
-            producer_of.get(name) is not None and producer_of[name].name in dq_consumers
-            for name in hop.input
-        ):
-            if hop.op_type in _KNOWN_NON_COMMUTING_OPS:
-                logger.debug(
-                    "Quantized chain ends at %s %r feeding %r (known non-commuting op; "
-                    "it runs FP16 and the activation is requantized after — by design).",
-                    hop.op_type,
-                    hop.name,
-                    node.name,
-                )
-            else:
-                logger.warning(
-                    "Quantized chain breaks at %s %r feeding %r: the op is not in "
-                    "_QDQ_COMMUTING_OPS, so the upstream quantized op will materialize FP32 "
-                    "output instead of fusing. If quantization commutes with it, whitelist "
-                    "it (with a float-slot row) and re-run the battery; if it does not, "
-                    "add it to _KNOWN_NON_COMMUTING_OPS to silence this.",
-                    hop.op_type,
-                    hop.name,
-                    node.name,
-                )
-
-
 def cast_graph_to_fp16(onnx_path: Path) -> None:
-    """Convert a graph to FP16 in place, around FP32 Q/DQ islands, keeping the I/O FP32.
+    """Convert a graph to FP16 in place, around FP32 linear Q/DQ islands, keeping the I/O FP32.
 
     The FP16 path for graphs AutoCast cannot process: plugin graphs (AutoCast types the
     graph with TensorRT's parser, which rejects unregistered plugin ops) and quantized
-    graphs (AutoCast rejects Q/DQ models). Everything outside the quantization islands
-    becomes FP16 (plugins run FP16 when their tensors are — filters and bias follow the
-    feature dtype); the islands stay exactly as the checkpoint calibrated them, with
-    single Casts on the float edges where an island meets the FP16 sea; ``keep_io_types``
+    graphs (AutoCast rejects Q/DQ models). The whole graph becomes FP16 — conv-family
+    Q/DQ included, scale and all (legal from opset 19; plugins run FP16 when their
+    tensors are) — except the linear islands (:func:`_quantized_island_names`): a Q/DQ
+    pair feeding a Gemm/MatMul stays fp32-typed exactly as the checkpoint calibrated it,
+    with single Casts on the float edges where it meets the FP16 sea. ``keep_io_types``
     semantics hold the artifact ABI at FP32.
 
     Casts are decided per tensor edge, not per node: an island member's integer or
@@ -309,6 +210,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
 
     Raises:
         NotImplementedError: For graphs with control-flow subgraphs.
+        ValueError: For a graph below opset 19 that has conv-side Q/DQ to retype.
         ValueError: For an island boundary tensor whose element type the graph does not
             settle (typically a custom-domain producer without ``value_info``).
     """
@@ -327,7 +229,17 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     # Element types before any rewrite: the boundary decisions below are per edge.
     types = tensor_types(model)
     island = set(_quantized_island_names(graph))
-    _warn_broken_quantized_chains(graph, island)
+    sea_standard_qdq = [
+        n for n in graph.node if n.op_type in QDQ_OPS and not n.domain and n.name not in island
+    ]
+    default_opset = next((o.version for o in model.opset_import if o.domain in ("", "ai.onnx")), 0)
+    if sea_standard_qdq and default_opset < _FP16_QDQ_MIN_OPSET:
+        raise ValueError(
+            f"cast_graph_to_fp16 retypes {len(sea_standard_qdq)} conv-side Q/DQ node(s) of "
+            f"{onnx_path.name} to fp16, which QuantizeLinear/DequantizeLinear only allow from "
+            f"opset {_FP16_QDQ_MIN_OPSET}; the graph is opset {default_opset}. Export with "
+            f"deploy.onnx.opset_version >= {_FP16_QDQ_MIN_OPSET}."
+        )
 
     def settled_type(name: str, node, role: str) -> int:
         dtype = types.get(name)
@@ -481,16 +393,6 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         if not in_island(node):
             continue
         slots = _ISLAND_FLOAT_INPUT_SLOTS.get(node.op_type)
-        if slots is None:
-            # Rule 3 admits any consumer of a DQ, including ops that take shape/index
-            # inputs (Expand, ScatterND, Pad, ...) and runtime plugins. Their edges are
-            # typed from the graph; say so, so a recurring op gets a slot row.
-            logger.debug(
-                "Island node %r (%s) has no float-input slot row; typing its edges from "
-                "the graph.",
-                node.name,
-                node.op_type,
-            )
         for index, name in enumerate(node.input):
             if not name:
                 continue  # omitted optional input
@@ -570,7 +472,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
 
     onnx.save(model, str(onnx_path))
     logger.info(
-        "Cast %s to FP16 around %d island node(s); graph I/O kept FP32.",
+        "Cast %s to FP16 around %d linear-island node(s); graph I/O kept FP32.",
         onnx_path.name,
         len(island),
     )

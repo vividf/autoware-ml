@@ -36,6 +36,10 @@ from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 
 
+def producer_named(model, tensor_name):
+    return next(node for node in model.graph.node if tensor_name in node.output)
+
+
 def test_build_dynamic_axes_from_axes_spec() -> None:
     spec = {
         "feat": {0: "voxels_num"},
@@ -246,12 +250,13 @@ def test_cast_graph_to_fp16_rewires_internal_consumers_of_kept_fp32_outputs(tmp_
 
 
 def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> None:
-    """A Q/DQ graph converts to FP16 *around* intact FP32 quantization islands.
+    """A Q/DQ graph converts to FP16 *around* intact FP32 linear islands.
 
-    The island — Q/DQ, their scale constants, and the GEMM consuming the dequantized
-    tensors — must come through byte-identical and with no Cast on its internal edges:
-    an FP16-rounded scale changes the quantization itself, and a Cast between DQ and its
-    consumer defeats TensorRT's INT8 fusion (both failure modes measured on PTv3).
+    The island — the Gemm's Q/DQ, their scale, and the Gemm itself — must come through
+    byte-identical and with no Cast on its internal edges: an FP16-rounded scale on an
+    INT8 Gemm hits TensorRT's subnormal-combined-scale NaN, and a Cast between DQ and
+    its consumer defeats the Q/DQ fusion. A Q/DQ pair that feeds anything else (here a
+    Mul) is sea: retyped to fp16 with its own fp16 scale copy.
     """
 
     # 0.0001 is not representable in fp16 (rounds to ~0.00010002); a round trip shows.
@@ -274,14 +279,10 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
             helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
             helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
             helper.make_node("Gemm", ["dq", "wdq", "b"], ["gemm_out"], name="gemm"),
-            # A commuting pointwise chain into a re-quantization: the island must grow
-            # through the Relu so the quantized chain stays castless (a Cast here blocks
-            # TensorRT's Q propagation into the Gemm, which then materializes FP32).
+            # A pointwise chain into a re-quantization that feeds a non-linear op: sea.
             helper.make_node("Relu", ["gemm_out"], ["relu_out"], name="relu"),
             helper.make_node("QuantizeLinear", ["relu_out", "s", "zp"], ["q2"], name="q2"),
             helper.make_node("DequantizeLinear", ["q2", "s", "zp"], ["dq2"], name="dq2"),
-            # mul consumes a DQ output, so it belongs to the island; its gain therefore
-            # stays FP32, and the plugin-only "g" shows the outside conversion instead.
             helper.make_node("Mul", ["dq2", "g2"], ["y"], name="mul"),
         ],
         "qdq_island_graph",
@@ -298,7 +299,7 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     )
     model = helper.make_model(
         graph,
-        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+        opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("autoware", 1)],
     )
     path = tmp_path / "qdq_island_graph.onnx"
     onnx.save(model, str(path))
@@ -313,8 +314,8 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     assert numpy_helper.to_array(inits["s"]) == scale_value
     assert inits["w"].data_type == TensorProto.FLOAT
     assert inits["b"].data_type == TensorProto.FLOAT
-    # The island mul's gain stays FP32; outside the island (plugin-only g) converts.
-    assert inits["g2"].data_type == TensorProto.FLOAT
+    # Everything outside the linear island converts, the sea Mul's gain included.
+    assert inits["g2"].data_type == TensorProto.FLOAT16
     assert inits["g"].data_type == TensorProto.FLOAT16
 
     nodes = {n.name: n for n in converted.graph.node}
@@ -322,13 +323,17 @@ def test_cast_graph_to_fp16_keeps_qdq_islands_fp32_and_castless(tmp_path) -> Non
     # (the converter renames the tensors; what matters is that no node sits between).
     assert nodes["gemm"].input[0] == nodes["dq"].output[0]
     assert nodes["gemm"].input[1] == nodes["wdq"].output[0]
-    # The quantized chain into the re-quantization is castless: the Relu joined the
-    # island (Gemm -> Relu -> Q2 with no Cast on either edge).
-    assert nodes["relu"].input[0] == nodes["gemm"].output[0]
-    assert nodes["q2"].input[0] == nodes["relu"].output[0]
-    # Q/DQ still read the scale directly (no Cast between the constant and the island).
-    for name in ("q", "dq", "wq", "wdq", "q2", "dq2"):
+    # The island's Q/DQ read the FP32 scale directly.
+    for name in ("q", "dq", "wq", "wdq"):
         assert nodes[name].input[1] == "s"
+    # The Gemm output crosses into the sea through one FP16 cast; the sea Q/DQ pair is
+    # fp16-typed end to end, reading the split fp16 copy of the shared scale.
+    relu_source = producer_named(converted, nodes["relu"].input[0])
+    assert relu_source.op_type == "Cast" and relu_source.input[0] == nodes["gemm"].output[0]
+    assert nodes["q2"].input[0] == nodes["relu"].output[0]
+    for name in ("q2", "dq2"):
+        assert nodes[name].input[1] == "s__fp16"
+    assert inits["s__fp16"].data_type == TensorProto.FLOAT16
 
     # The island's boundaries are single casts: no fp16 round-trip pairs anywhere.
     def cast_to(node):
@@ -418,46 +423,109 @@ def test_cast_graph_to_fp16_keeps_fp8_qdq_islands_fp32_and_castless(tmp_path) ->
         assert nodes[name].input[1] == nodes["s_const"].output[0]
 
 
-def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_edges(
-    tmp_path,
-) -> None:
-    """A Reshape between the quantized Gemm and the next Q joins the island castless.
+def _conv_qdq_graph(opset: int):
+    """Plugin + INT8 conv: Q/DQ feeding a Conv, the sea rule's own case."""
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 2, 4, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2, 4, 4])
+    weight = helper.make_tensor(
+        "w", TensorProto.FLOAT, [2, 2, 1, 1], np.eye(2, dtype=np.float32).flatten()
+    )
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
+    zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
+    graph = helper.make_graph(
+        [
+            helper.make_node("PluginOp", ["x"], ["mid"], domain="autoware", name="plugin"),
+            helper.make_node("QuantizeLinear", ["mid", "s", "zp"], ["q"], name="q"),
+            helper.make_node("DequantizeLinear", ["q", "s", "zp"], ["dq"], name="dq"),
+            helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
+            helper.make_node("Conv", ["dq", "wdq"], ["conv_out"], name="conv"),
+            helper.make_node("Relu", ["conv_out"], ["y"], name="relu"),
+        ],
+        "conv_qdq_graph",
+        [x],
+        [y],
+        [weight, scale, zero_point],
+    )
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", opset), helper.make_opsetid("autoware", 1)],
+    )
 
-    Shape ops are pure data movement, so TensorRT's Q/DQ propagation crosses them; the
-    island must include them (castless chain) while never casting their integer inputs
-    (the int64 shape here — the reason the whitelist and the float-slot table are kept
-    in lockstep by the import-time check).
+
+def test_cast_graph_to_fp16_retypes_conv_qdq_to_fp16_with_no_island(tmp_path) -> None:
+    """Conv-side Q/DQ is sea: fp16-typed end to end, scale included, with no casts.
+
+    TensorRT's INT8 conv kernels handle fp16 scales correctly (CenterPoint and BEVFusion
+    evaluate identically with 26 subnormal combined scales among them), and a uniformly
+    typed graph is the simplest one to build — so nothing is protected here.
+    """
+
+    path = tmp_path / "conv_qdq_graph.onnx"
+    onnx.save(_conv_qdq_graph(opset=19), str(path))
+
+    cast_graph_to_fp16(path)
+
+    converted = onnx.load(str(path))
+    inits = {i.name: i for i in converted.graph.initializer}
+    assert inits["s"].data_type == TensorProto.FLOAT16
+    assert inits["w"].data_type == TensorProto.FLOAT16
+    assert inits["zp"].data_type == TensorProto.INT8
+    nodes = {n.name: n for n in converted.graph.node}
+    # Direct edges everywhere: the only casts are the graph's FP32 I/O boundary.
+    assert nodes["conv"].input[0] == "dq" and nodes["conv"].input[1] == "wdq"
+    assert nodes["q"].input[0] == "mid"
+    casts = [n for n in converted.graph.node if n.op_type == "Cast"]
+    assert sorted(c.output[0] for c in casts) == ["x__fp16", "y"]
+    onnx.checker.check_model(converted, full_check=True)
+
+
+def test_cast_graph_to_fp16_refuses_fp16_qdq_below_opset_19(tmp_path) -> None:
+    """Retyping standard Q/DQ to fp16 needs opset 19; an older graph is refused, not bent."""
+
+    path = tmp_path / "conv_qdq_graph_17.onnx"
+    onnx.save(_conv_qdq_graph(opset=17), str(path))
+    with pytest.raises(ValueError, match="opset 19"):
+        cast_graph_to_fp16(path)
+
+
+def test_cast_graph_to_fp16_islands_a_layout_hop_between_dq_and_matmul(tmp_path) -> None:
+    """DQ -> Transpose -> MatMul (modelopt's Linear spelling) is one castless island.
+
+    The hop joins the island so no Cast sits between the DQ and the MatMul; its own
+    non-float inputs (the Reshape's int64 shape here) are never cast — the reason every
+    island-eligible op has a float-slot row.
     """
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
-    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
     weight = helper.make_tensor(
         "w", TensorProto.FLOAT, [4, 4], np.eye(4, dtype=np.float32).flatten()
     )
-    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(0.1)])
+    scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
     zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
-    shape = helper.make_tensor("new_shape", TensorProto.INT64, [2], [1, 8])
-    gain = helper.make_tensor("g", TensorProto.FLOAT, [8], np.ones(8, dtype=np.float32))
+    shape = helper.make_tensor("new_shape", TensorProto.INT64, [2], [4, 4])
     graph = helper.make_graph(
         [
-            helper.make_node("PluginOp", ["x", "g"], ["mid"], domain="autoware", name="plugin"),
+            helper.make_node("PluginOp", ["x"], ["mid"], domain="autoware", name="plugin"),
             helper.make_node("QuantizeLinear", ["mid", "s", "zp"], ["q"], name="q"),
             helper.make_node("DequantizeLinear", ["q", "s", "zp"], ["dq"], name="dq"),
-            helper.make_node("Gemm", ["dq", "w"], ["gemm_out"], name="gemm"),
-            helper.make_node("Reshape", ["gemm_out", "new_shape"], ["reshaped"], name="reshape"),
-            helper.make_node("QuantizeLinear", ["reshaped", "s", "zp"], ["q2"], name="q2"),
-            helper.make_node("DequantizeLinear", ["q2", "s", "zp"], ["y"], name="dq2"),
+            helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
+            helper.make_node("Reshape", ["wdq", "new_shape"], ["w_r"], name="reshape"),
+            helper.make_node("Transpose", ["w_r"], ["w_t"], name="transpose", perm=[1, 0]),
+            helper.make_node("MatMul", ["dq", "w_t"], ["mm"], name="matmul"),
+            helper.make_node("Relu", ["mm"], ["y"], name="relu"),
         ],
-        "shape_op_island_graph",
+        "layout_hop_island",
         [x],
         [y],
-        [weight, scale, zero_point, shape, gain],
+        [weight, scale, zero_point, shape],
     )
     model = helper.make_model(
-        graph,
-        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)],
+        graph, opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("autoware", 1)]
     )
-    path = tmp_path / "shape_op_island_graph.onnx"
+    path = tmp_path / "layout_hop_island.onnx"
     onnx.save(model, str(path))
 
     cast_graph_to_fp16(path)
@@ -465,16 +533,14 @@ def test_cast_graph_to_fp16_grows_islands_through_shape_ops_without_casting_int_
     converted = onnx.load(str(path))
     nodes = {n.name: n for n in converted.graph.node}
     inits = {i.name: i for i in converted.graph.initializer}
-    # Castless chain through the Reshape: Gemm -> Reshape -> Q2 direct edges.
-    assert nodes["reshape"].input[0] == nodes["gemm"].output[0]
-    assert nodes["q2"].input[0] == nodes["reshape"].output[0]
-    # The int64 shape input is untouched — no cast, same initializer.
-    assert nodes["reshape"].input[1] == "new_shape"
+    assert nodes["reshape"].input == ["wdq", "new_shape"]
+    assert nodes["transpose"].input == ["w_r"]
+    assert nodes["matmul"].input == ["dq", "w_t"]
     assert inits["new_shape"].data_type == TensorProto.INT64
-    # Island tensors stay FP32; the sea (plugin gain) converted.
     assert inits["s"].data_type == TensorProto.FLOAT
     assert inits["w"].data_type == TensorProto.FLOAT
-    assert inits["g"].data_type == TensorProto.FLOAT16
+    relu_source = producer_named(converted, nodes["relu"].input[0])
+    assert relu_source.op_type == "Cast" and relu_source.input[0] == "mm"
     onnx.checker.check_model(converted, full_check=True)
 
 
@@ -656,8 +722,8 @@ def test_cast_graph_to_fp16_splits_a_cast_feeding_both_the_island_and_the_sea(tm
             helper.make_node("Cast", ["idx"], ["lifted"], to=TensorProto.FLOAT, name="lift"),
             helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
             helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
-            # Island consumer of the lifted tensor (Mul's data slot).
-            helper.make_node("Mul", ["wdq", "lifted"], ["island_out"], name="island_mul"),
+            # Island consumer of the lifted tensor (the MatMul's second operand).
+            helper.make_node("MatMul", ["wdq", "lifted"], ["island_out"], name="island_mul"),
             # Sea consumer of the same tensor.
             helper.make_node("PluginOp", ["lifted"], ["sea_out"], domain="autoware", name="plugin"),
             helper.make_node("Add", ["island_out", "sea_out"], ["y"], name="join"),
@@ -718,7 +784,7 @@ def test_cast_graph_to_fp16_keeps_node_order_when_an_island_reads_a_sea_graph_ou
             helper.make_node("QuantizeLinear", ["w", "s", "zp"], ["wq"], name="wq"),
             helper.make_node("DequantizeLinear", ["wq", "s", "zp"], ["wdq"], name="wdq"),
             # Island consumer of the tensor that is also a graph output.
-            helper.make_node("Mul", ["wdq", "shared"], ["y"], name="island_mul"),
+            helper.make_node("MatMul", ["wdq", "shared"], ["y"], name="island_mul"),
         ],
         "sea_output_read_by_island",
         [x],
@@ -775,8 +841,8 @@ def test_cast_graph_to_fp16_never_casts_shape_edges_even_without_value_info(tmp_
     """Island membership says nothing about an edge's dtype; the edge does.
 
     Two standard-op graphs with no ``value_info`` at all, both valid before conversion:
-    a Shape that joined the island as a DQ consumer (its int64 output must not become
-    FP16 for the ConstantOfShape reading it), and an Expand in the island whose shape
+    a Shape reading a (sea) DQ output — its int64 result must not become FP16 for the
+    ConstantOfShape reading it — and a Reshape hop inside a linear island whose shape
     input comes from the sea (the int64 edge must not be "lifted" to FLOAT). Both were
     corrupted by a pass that assumed undeclared tensors are FLOAT.
     """
@@ -802,7 +868,7 @@ def test_cast_graph_to_fp16_never_casts_shape_edges_even_without_value_info(tmp_
         [y],
         _qdq_initializers(),
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
     onnx.checker.check_model(model, full_check=True)
     path = tmp_path / "shape_from_island.onnx"
     onnx.save(model, str(path))
@@ -813,20 +879,27 @@ def test_cast_graph_to_fp16_never_casts_shape_edges_even_without_value_info(tmp_
     cos = next(node for node in converted.graph.node if node.name == "cos")
     assert cos.input[0] == "shp"
 
-    # (2) Shape(x) -> Expand(DQ(x), shape).
+    # (2) Shape(x) -> Reshape(DQ(x), shape) -> MatMul: the hop is in the island.
+    y33 = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])
     graph = helper.make_graph(
         [helper.make_node("Shape", ["x"], ["shp"], name="shape")]
         + _qdq("x", "dq")
         + [
-            helper.make_node("Expand", ["dq", "shp"], ["e"], name="expand"),
-            helper.make_node("Relu", ["e"], ["y"], name="relu_sea"),
+            helper.make_node("Reshape", ["dq", "shp"], ["r"], name="reshape"),
+            helper.make_node("MatMul", ["r", "w33"], ["mm"], name="matmul"),
+            helper.make_node("Relu", ["mm"], ["y"], name="relu_sea"),
         ],
         "shape_into_island",
         [x],
-        [y],
-        _qdq_initializers(),
+        [y33],
+        _qdq_initializers()
+        + [
+            helper.make_tensor(
+                "w33", TensorProto.FLOAT, [3, 3], np.eye(3, dtype=np.float32).flatten()
+            )
+        ],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
     onnx.checker.check_model(model, full_check=True)
     path = tmp_path / "shape_into_island.onnx"
     onnx.save(model, str(path))
@@ -835,18 +908,18 @@ def test_cast_graph_to_fp16_never_casts_shape_edges_even_without_value_info(tmp_
     onnx.checker.check_model(converted, full_check=True)
     edges = _cast_edges(converted.graph)
     assert "shp" not in edges
-    expand = next(node for node in converted.graph.node if node.name == "expand")
-    assert expand.input[1] == "shp"
+    reshape = next(node for node in converted.graph.node if node.name == "reshape")
+    assert reshape.input == ["dq", "shp"]
     # The float island output still crosses into the sea through one FP16 cast.
-    assert edges.get("e") == TensorProto.FLOAT16
+    assert edges.get("mm") == TensorProto.FLOAT16
 
 
 def test_cast_graph_to_fp16_leaves_integer_island_outputs_alone(tmp_path) -> None:
-    """An island op with a float and an integer output: only the float one is cast.
+    """A sea op with a float and an integer output: the integer one is never cast.
 
     MaxPool's ``Indices`` are int64; ``onnx.checker`` accepts an int64 -> FP16 Cast, but
     FP16 cannot hold an index above 2048 exactly, so the sea must read the indices as
-    they are.
+    they are (the conv-side Q/DQ around the pool are sea too, fp16-typed).
     """
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 4, 4])
@@ -865,17 +938,13 @@ def test_cast_graph_to_fp16_leaves_integer_island_outputs_alone(tmp_path) -> Non
             ),
         ]
         + _qdq("pooled", "y", tag="2")
-        + [
-            helper.make_node(
-                "Cast", ["indices"], ["idx_f"], to=TensorProto.FLOAT, name="idx_cast"
-            )
-        ],
+        + [helper.make_node("Cast", ["indices"], ["idx_f"], to=TensorProto.FLOAT, name="idx_cast")],
         "maxpool_indices",
         [x],
         [y, idx_f],
         _qdq_initializers(),
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
     onnx.checker.check_model(model, full_check=True)
     path = tmp_path / "maxpool_indices.onnx"
     onnx.save(model, str(path))
@@ -893,7 +962,7 @@ def test_cast_graph_to_fp16_leaves_integer_island_outputs_alone(tmp_path) -> Non
 
 
 def test_cast_graph_to_fp16_refuses_an_island_edge_the_graph_does_not_type(tmp_path) -> None:
-    """A plugin in the island reading another plugin's untyped output is an error, not a guess.
+    """An island MatMul reading a plugin's untyped output is an error, not a guess.
 
     Exported graphs declare plugin outputs (the exporter records the traced dtype); a
     graph that does not gets a refusal naming the tensor, because assuming FLOAT is
@@ -903,25 +972,28 @@ def test_cast_graph_to_fp16_refuses_an_island_edge_the_graph_does_not_type(tmp_p
 
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
-    nodes = [
-        helper.make_node("IndexOp", ["x"], ["pairs"], domain="autoware", name="index_plugin"),
-    ] + _qdq("x", "dq") + [
-        helper.make_node("GemmOp", ["dq", "pairs"], ["y"], domain="autoware", name="gemm_plugin"),
-    ]
+    nodes = (
+        [
+            helper.make_node("IndexOp", ["x"], ["pairs"], domain="autoware", name="index_plugin"),
+        ]
+        + _qdq("x", "dq")
+        + [
+            helper.make_node("MatMul", ["dq", "pairs"], ["y"], name="gemm_plugin"),
+        ]
+    )
     graph = helper.make_graph(nodes, "untyped_plugin_edge", [x], [y], _qdq_initializers())
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+        graph, opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("autoware", 1)]
     )
     path = tmp_path / "untyped_plugin_edge.onnx"
     onnx.save(model, str(path))
     with pytest.raises(ValueError, match="cannot type tensor 'pairs'"):
         cast_graph_to_fp16(path)
 
-    model.graph.value_info.append(helper.make_tensor_value_info("pairs", TensorProto.INT32, None))
+    model.graph.value_info.append(helper.make_tensor_value_info("pairs", TensorProto.FLOAT, None))
     onnx.save(model, str(path))
     cast_graph_to_fp16(path)
     converted = onnx.load(str(path))
     gemm = next(node for node in converted.graph.node if node.name == "gemm_plugin")
-    assert gemm.input[1] == "pairs", "the int32 edge is read as it is"
+    assert gemm.input[1] == "pairs__fp32", "the declared FP32 plugin edge gets its boundary cast"
     assert gemm.input[0] == "dq", "the DQ edge stays castless"
-

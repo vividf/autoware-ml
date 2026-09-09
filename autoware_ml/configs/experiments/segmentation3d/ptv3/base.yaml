@@ -27,7 +27,7 @@ trainer:
 deploy:
   onnx:
     dynamo: false
-    opset_version: 17
+    opset_version: 19
     do_constant_folding: false
     # The quantized regions carry their own scales (Q/DQ); everything else runs FP16,
     # which AutoCast bakes into the exported graphs (engines build strongly typed).

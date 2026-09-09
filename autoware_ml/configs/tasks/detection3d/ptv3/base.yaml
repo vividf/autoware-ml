@@ -74,7 +74,7 @@ callbacks:
 deploy:
   onnx:
     enabled: true
-    opset_version: 17
+    opset_version: 19
     dynamo: false
     do_constant_folding: false
     modules:

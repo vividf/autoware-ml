@@ -129,10 +129,11 @@ FP8 走 modelopt 的 trt-domain 自訂 op、per-tensor scale、max 校準;ONNX R
 5. **verification tolerance 實測校準**:量化 stage 的 raw-logit 跨 backend 差是預期,
    metric 相等才是 gate;fail 訊息會給建議值。→ 實例:centerpoint `_int8.yaml`。
 
-**一條不可動的地基**:ONNX 圖上 Q/DQ 保持 **fp32-typed(island)**。fp16-typed Q/DQ
-(opset 19 合法)踩 TRT 10.8/10.16 缺陷:fp16 合併 scale subnormal → 融合 kernel 產
-NaN、build 零警告。island 規則與證據:deployment README §3、
-`work_dirs/reviews/fp16-typed-qdq-nogo.md`(金絲雀 = PTv3 INT8 QAT)。
+**一條不可動的地基**:餵 **Gemm/MatMul** 的 Q/DQ 在 ONNX 圖上保持 **fp32-typed(線性島)**;
+conv 側的 Q/DQ 走 uniform fp16。fp16-typed 的 INT8 Gemm 踩 TRT 10.8/10.16 缺陷:fp16 合併
+scale subnormal → 融合 kernel 產 NaN、build 零警告;conv kernel 免疫(實測)。規則與證據:
+deployment README §3、`work_dirs/reviews/fp16-typed-qdq-nogo.md`、
+`uniform-fp16-exception-rule.md`(金絲雀 = PTv3 INT8 QAT)。
 
 ## 6. 檔案地圖
 
