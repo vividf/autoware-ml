@@ -211,6 +211,40 @@ trains at the experiment config's training batch size. Deploy evaluation follows
 dataloader batch size on the PyTorch backend; the TensorRT backend is bound by the
 engine's shape profiles (the shipped CenterPoint engines are built for batch 1).
 
+### Sparse convolutions (the `spconv` kind)
+
+A sparse convolution quantizes like any other GEMM on the PyTorch side — modelopt
+`input_quantizer` (per tensor) + `weight_quantizer` (per output channel, axis 0 of
+`[C_out, k1, k2, k3, C_in]`) — but it does **not** deploy as Q/DQ. Its deployed form is an
+`autoware::ImplicitGemm` plugin node, and TensorRT cannot fuse Q/DQ into a plugin, so the
+calibrated scales are written into the exported graph as plugin attributes and inputs
+instead (`autoware_ml.ops.spconv.onnx_int8`):
+
+| Calibrated value | Travels as |
+| --- | --- |
+| `input_amax / 127` | `input_scale` attribute + `precision = 1` |
+| `input_scale * weight_amax / 127` | `channel_scale`, the node's 6th input (FP32, per output channel) |
+| the BN-folded bias | `bias_scaled`, the node's 7th input (FP32) |
+
+`output_scale` stays 1.0: the plugin folds it into the GEMM scale/bias *and* divides it back
+out of the weight scale, so it cancels — the graph needs no activation-chain output scale.
+
+Two consequences worth knowing:
+
+- **`skip_quantize` is the only precision control**, and it acts at PTQ time. A skipped
+  sparse layer never gets a quantizer, so its successor's `input_scale` is calibrated
+  against the genuine FP16 activation the engine will feed it. Excluding a layer only in
+  the exported graph would leave that scale calibrated for a fake-quantized input — the
+  classic way this recipe collapses.
+- **The engine needs a plugin built with the INT8 path** (`precision` / `input_scale`
+  attributes). See `docker/tensorrt_plugins/README.md`.
+
+Sparse INT8 is not uniformly a win. Per-layer measurement on this model puts the GEMM
+speedup **below 1.0** for the input convolution (0.45x) and all of stage 1 (0.77-0.82x) —
+those layers carry the most active voxels with the fewest channels, so the INT8 GEMM saves
+less than quantizing the features costs — against 1.4-1.55x in stage 4. The shipped recipe
+therefore quantizes stage 3.1 onwards and keeps the rest FP16.
+
 ### Self-describing checkpoints
 
 A quantized checkpoint is `{"state_dict": ..., "quantization": {config, placement_record}}`
