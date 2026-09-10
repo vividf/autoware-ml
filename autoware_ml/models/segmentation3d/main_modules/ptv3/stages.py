@@ -52,14 +52,19 @@ from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, Torch
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     ENCODER_EXPORT_POOLING_FIELDS,
+    INPUT_LEVEL_SERIALIZATION_INPUTS,
+    SERIALIZED_POOLING_FIELDS,
     _PTv3DetHeadExportModule,
     _PTv3EncoderExportModule,
     _PTv3SegHeadExportModule,
+    build_input_level_serialization,
     build_point_feature_dynamic_axes,
     build_ptv3_encoder_dynamic_axes,
     build_seg_head_input_dynamic_axes,
     build_serialized_pooling_metadata,
     det_head_export_input_names,
+    embed_patch_sizes_metadata,
+    export_patch_sizes,
     seg_head_export_input_names,
     stage_feature_names,
 )
@@ -100,7 +105,7 @@ def encoder_input_names(num_poolings: int) -> list[str]:
     return [
         "grid_coord",
         "feat",
-        "serialized_code",
+        *INPUT_LEVEL_SERIALIZATION_INPUTS,
         *(
             f"serialized_pooling_{stage}_{field}"
             for stage in range(num_poolings)
@@ -112,6 +117,11 @@ def encoder_input_names(num_poolings: int) -> list[str]:
 def serialize_output_names(num_poolings: int) -> set[str]:
     """Every context tensor the serialize glue produces (for declaration checks)."""
     names = set(encoder_input_names(num_poolings))
+    names.update(
+        f"serialized_pooling_{stage}_{field}"
+        for stage in range(num_poolings)
+        for field in SERIALIZED_POOLING_FIELDS
+    )
     names.update(f"pooling_cluster_{stage}" for stage in range(num_poolings))
     skip_stage = num_poolings - 1  # stage_count - 2 with stage_count = num_poolings + 1
     names.add(f"point_grid_coord_{skip_stage}")
@@ -126,13 +136,16 @@ def _serialize_stage(model: Any) -> TorchStage:
     """
     num_poolings = _pooling_count(model)
     _, serialization_depth = _export_geometry(model)
+    # Read once, off the real modules: a level's attention window is what pads its
+    # patch_order, and it is a model fact, not a per-frame one.
+    patch_sizes = export_patch_sizes(model)
 
     def serialize_points(context: StageContext) -> Mapping[str, torch.Tensor]:
         points = context.batch_inputs.points_data
         if points is None:
             raise ValueError("MultiTaskBatchInputs must carry points_data for PTv3.")
         depth = serialization_depth.to(context.device)
-        point, (grid_coord, feat, _depth, serialized_code) = serialize_point_cloud_batch(
+        point, (grid_coord, feat, _depth, _serialized_code) = serialize_point_cloud_batch(
             points.as_point_dict(), model.EXPORT_ORDER, depth
         )
         metadata = build_serialized_pooling_metadata(
@@ -140,14 +153,19 @@ def _serialize_stage(model: Any) -> TorchStage:
             point["serialized_code"],
             point["serialized_order"],
             model.encoder.stride,
+            patch_sizes,
         )
+        # The input level's order and inverse are what the serialization just computed to
+        # derive the metadata above; the graph reads them instead of sorting the codes again.
         produced: dict[str, torch.Tensor] = {
             "grid_coord": grid_coord,
             "feat": feat,
-            "serialized_code": serialized_code,
+            **build_input_level_serialization(point, patch_sizes[0]),
         }
         for stage_index, meta in enumerate(metadata):
-            for field in ENCODER_EXPORT_POOLING_FIELDS:
+            for field in SERIALIZED_POOLING_FIELDS:
+                # Every field, including the ones no graph reads (the bare order): the
+                # context is the record of what the serialization produced.
                 produced[f"serialized_pooling_{stage_index}_{field}"] = getattr(meta, field)
             produced[f"pooling_cluster_{stage_index}"] = meta.cluster
         skip_stage = num_poolings - 1
@@ -181,14 +199,19 @@ def _encoder_stage(model: Any) -> GraphStage:
         # Every tensor here is indexed by a point count, so the axes belong to the graph
         # rather than to a configuration.
         onnx_dynamic_axes=build_ptv3_encoder_dynamic_axes(input_names, num_poolings + 1),
-        # The graph carries autoware:: plugin ops (sparse convolution, argsort,
-        # segment_csr). TensorRT executes them from deploy.tensorrt.plugin_libraries;
-        # ONNX Runtime has no implementation, so only that backend falls back to torch.
+        # The graph carries autoware:: plugin ops (sparse convolution, segment_csr). TensorRT
+        # executes them from deploy.tensorrt.plugin_libraries; ONNX Runtime has no
+        # implementation, so only that backend falls back to torch.
         torch_fallback_backends=(Backend.ONNX,),
         # A plugin node cannot absorb Q/DQ, so a quantized cpe convolution carries its
         # scales as node attributes and inputs instead. No-op when the encoder holds no
         # sparse quantizers, which is every recipe that leaves the cpe convs FP16.
-        onnx_transforms=(partial(sparse_int8_transform, encoder=model.encoder),),
+        onnx_transforms=(
+            partial(sparse_int8_transform, encoder=model.encoder),
+            # The runtime rebuilds every patch_order input from this window; it is a fact of
+            # the exported graph, so it travels inside the file.
+            partial(embed_patch_sizes_metadata, patch_sizes=export_patch_sizes(model)),
+        ),
     )
 
 
@@ -215,7 +238,10 @@ def build_ptv3_seg_stages(model: Any) -> tuple[Stage, ...]:
             onnx_dynamic_axes=head_dynamic_axes,
             # Same plugin ops as the encoder graph; see _encoder_stage.
             torch_fallback_backends=(Backend.ONNX,),
-            onnx_transforms=(partial(sparse_int8_transform, encoder=model.seg3d_head),),
+            onnx_transforms=(
+                partial(sparse_int8_transform, encoder=model.seg3d_head),
+                partial(embed_patch_sizes_metadata, patch_sizes=export_patch_sizes(model)),
+            ),
             # Field names are a draft until the outputs dataclass gains segmentation slots.
             output_fields=tuple((name, name) for name in output_names),
         ),

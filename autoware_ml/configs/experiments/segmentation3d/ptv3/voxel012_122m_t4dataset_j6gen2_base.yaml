@@ -50,11 +50,16 @@ deploy:
             opt_shape: [130565, 4]
             max_shape: [202619, 4]
             # measured [126052, 4] .. [135079, 4]
-          serialized_code:
+          serialized_inverse:
             min_shape: [2, 63026]
             opt_shape: [2, 130565]
             max_shape: [2, 202619]
             # measured [2, 126052] .. [2, 135079]
+          patch_order:
+            min_shape: [2, 63488]
+            opt_shape: [2, 131072]
+            max_shape: [2, 202752]
+            # the order padded to whole attention windows (patch_size 512); bounds are the voxel bounds rounded up
           serialized_pooling_0_indices:
             min_shape: [63026]
             opt_shape: [130565]
@@ -75,16 +80,16 @@ deploy:
             opt_shape: [63295, 3]
             max_shape: [99872, 3]
             # measured [60010, 3] .. [66581, 3]
-          serialized_pooling_0_serialized_order:
-            min_shape: [2, 30005]
-            opt_shape: [2, 63295]
-            max_shape: [2, 99872]
-            # measured [2, 60010] .. [2, 66581]
           serialized_pooling_0_serialized_inverse:
             min_shape: [2, 30005]
             opt_shape: [2, 63295]
             max_shape: [2, 99872]
             # measured [2, 60010] .. [2, 66581]
+          serialized_pooling_0_patch_order:
+            min_shape: [2, 30208]
+            opt_shape: [2, 63488]
+            max_shape: [2, 100352]
+            # padded to whole attention windows (patch_size 512)
           serialized_pooling_1_indices:
             min_shape: [30005]
             opt_shape: [63295]
@@ -105,16 +110,16 @@ deploy:
             opt_shape: [26218, 3]
             max_shape: [42071, 3]
             # measured [24389, 3] .. [28047, 3]
-          serialized_pooling_1_serialized_order:
-            min_shape: [2, 12194]
-            opt_shape: [2, 26218]
-            max_shape: [2, 42071]
-            # measured [2, 24389] .. [2, 28047]
           serialized_pooling_1_serialized_inverse:
             min_shape: [2, 12194]
             opt_shape: [2, 26218]
             max_shape: [2, 42071]
             # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_1_patch_order:
+            min_shape: [2, 12288]
+            opt_shape: [2, 26624]
+            max_shape: [2, 42496]
+            # padded to whole attention windows (patch_size 512)
           serialized_pooling_2_indices:
             min_shape: [12194]
             opt_shape: [26218]
@@ -135,16 +140,16 @@ deploy:
             opt_shape: [10189, 3]
             max_shape: [16562, 3]
             # measured [9337, 3] .. [11041, 3]
-          serialized_pooling_2_serialized_order:
-            min_shape: [2, 4668]
-            opt_shape: [2, 10189]
-            max_shape: [2, 16562]
-            # measured [2, 9337] .. [2, 11041]
           serialized_pooling_2_serialized_inverse:
             min_shape: [2, 4668]
             opt_shape: [2, 10189]
             max_shape: [2, 16562]
             # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_2_patch_order:
+            min_shape: [2, 5120]
+            opt_shape: [2, 10240]
+            max_shape: [2, 16896]
+            # padded to whole attention windows (patch_size 512)
           serialized_pooling_3_indices:
             min_shape: [4668]
             opt_shape: [10189]
@@ -165,16 +170,16 @@ deploy:
             opt_shape: [3846, 3]
             max_shape: [6340, 3]
             # measured [3467, 3] .. [4226, 3]
-          serialized_pooling_3_serialized_order:
-            min_shape: [2, 1733]
-            opt_shape: [2, 3846]
-            max_shape: [2, 6340]
-            # measured [2, 3467] .. [2, 4226]
           serialized_pooling_3_serialized_inverse:
             min_shape: [2, 1733]
             opt_shape: [2, 3846]
             max_shape: [2, 6340]
             # measured [2, 3467] .. [2, 4226]
+          serialized_pooling_3_patch_order:
+            min_shape: [2, 2048]
+            opt_shape: [2, 4096]
+            max_shape: [2, 6656]
+            # padded to whole attention windows (patch_size 512)
     seg3d_head:
       tensorrt:
         input_shapes:
@@ -223,31 +228,31 @@ deploy:
             opt_shape: [10189]
             max_shape: [16562]
             # measured [9337] .. [11041]
-          serialized_pooling_1_serialized_order:
-            min_shape: [2, 12194]
-            opt_shape: [2, 26218]
-            max_shape: [2, 42071]
-            # measured [2, 24389] .. [2, 28047]
           serialized_pooling_1_serialized_inverse:
             min_shape: [2, 12194]
             opt_shape: [2, 26218]
             max_shape: [2, 42071]
             # measured [2, 24389] .. [2, 28047]
+          serialized_pooling_1_patch_order:
+            min_shape: [2, 12288]
+            opt_shape: [2, 26624]
+            max_shape: [2, 42496]
+            # padded to whole attention windows (patch_size 512)
           serialized_pooling_1_grid_coord:
             min_shape: [12194, 3]
             opt_shape: [26218, 3]
             max_shape: [42071, 3]
             # measured [24389, 3] .. [28047, 3]
-          serialized_pooling_2_serialized_order:
-            min_shape: [2, 4668]
-            opt_shape: [2, 10189]
-            max_shape: [2, 16562]
-            # measured [2, 9337] .. [2, 11041]
           serialized_pooling_2_serialized_inverse:
             min_shape: [2, 4668]
             opt_shape: [2, 10189]
             max_shape: [2, 16562]
             # measured [2, 9337] .. [2, 11041]
+          serialized_pooling_2_patch_order:
+            min_shape: [2, 5120]
+            opt_shape: [2, 10240]
+            max_shape: [2, 16896]
+            # padded to whole attention windows (patch_size 512)
           serialized_pooling_2_grid_coord:
             min_shape: [4668, 3]
             opt_shape: [10189, 3]

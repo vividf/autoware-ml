@@ -225,10 +225,12 @@ def test_litept_split_export_declares_and_consumes_the_ptv3_contract() -> None:
     specs = model.build_export_specs(batch)
     encoder_spec = specs["encoder"]
 
-    assert "serialized_code" in encoder_spec.input_param_names
+    assert "serialized_inverse" in encoder_spec.input_param_names
+    assert "patch_order" in encoder_spec.input_param_names
+    assert "serialized_code" not in encoder_spec.input_param_names
     assert not any("_cluster" in name for name in encoder_spec.input_param_names)
-    assert "serialized_pooling_0_serialized_order" in encoder_spec.input_param_names
-    assert "serialized_pooling_1_serialized_order" in encoder_spec.input_param_names
+    assert "serialized_pooling_0_serialized_inverse" in encoder_spec.input_param_names
+    assert "serialized_pooling_1_serialized_inverse" in encoder_spec.input_param_names
     assert len(encoder_spec.args) == len(encoder_spec.input_param_names)
 
     with torch.no_grad():
@@ -258,9 +260,9 @@ def test_litept_monolithic_export_runs_on_its_declared_inputs() -> None:
 
     spec = model.build_export_spec(batch)
 
-    assert "serialized_code" in spec.input_param_names
+    assert "patch_order" in spec.input_param_names
     assert "serialized_pooling_0_cluster" in spec.input_param_names
-    assert "serialized_pooling_0_serialized_order" in spec.input_param_names
+    assert "serialized_pooling_0_serialized_inverse" in spec.input_param_names
     assert len(spec.args) == len(spec.input_param_names)
 
     with torch.no_grad():
@@ -280,14 +282,15 @@ def test_ptv3_monolithic_export_contract_still_lists_every_tensor() -> None:
     assert spec.input_param_names == [
         "grid_coord",
         "feat",
-        "serialized_code",
+        "serialized_inverse",
+        "patch_order",
         "serialized_pooling_0_indices",
         "serialized_pooling_0_indptr",
         "serialized_pooling_0_cluster",
         "serialized_pooling_0_head_indices",
         "serialized_pooling_0_grid_coord",
-        "serialized_pooling_0_serialized_order",
         "serialized_pooling_0_serialized_inverse",
+        "serialized_pooling_0_patch_order",
     ]
 
 
@@ -337,7 +340,7 @@ def test_litept_encoder_contract_matches_ptv3_field_for_field() -> None:
     """A gated model declares the same per-stage tensors PTv3 does, so it drops in.
 
     The deployed runtime declares its encoder IO statically - every pooling field for
-    every stage, plus ``serialized_code`` - and rejects an engine missing any of them.
+    every stage, plus the input level's serialization - and rejects an engine missing any.
     """
     batch = move_batch_to_device(build_inputs(), torch.device("cuda"))
     litept = build_litept_seg_model().cuda().eval().build_export_specs(batch)["encoder"]
@@ -347,5 +350,10 @@ def test_litept_encoder_contract_matches_ptv3_field_for_field() -> None:
         return {name.split("_", 3)[3] for name in names if name.startswith("serialized_pooling_")}
 
     # The fixtures differ in stage count, so compare the per-stage field structure.
-    assert litept.input_param_names[:3] == ["grid_coord", "feat", "serialized_code"]
+    assert litept.input_param_names[:5] == [
+        "grid_coord",
+        "feat",
+        "serialized_inverse",
+        "patch_order",
+    ]
     assert stage_fields(litept.input_param_names) == stage_fields(ptv3.input_param_names)

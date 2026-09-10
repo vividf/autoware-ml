@@ -26,6 +26,8 @@ from autoware_ml.utils.point_cloud.structures import (
 # the legacy ExportSpec path below builds on it through these re-imports until Q5.
 from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (  # noqa: F401
     ENCODER_EXPORT_POOLING_FIELDS,
+    GRAPH_POOLING_FIELDS,
+    INPUT_LEVEL_SERIALIZATION_INPUTS,
     SERIALIZED_POOLING_FIELDS,
     SERIALIZED_POOLING_INPUT_SIZED_FIELDS,
     SERIALIZED_POOLING_ORDER_FIELDS,
@@ -40,11 +42,13 @@ from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     build_point_feature_dynamic_axes,
     build_pooling_cluster_dynamic_axes,
     build_ptv3_encoder_dynamic_axes,
+    build_input_level_serialization,
     build_ptv3_input_dynamic_axes,
     build_seg_head_export_args,
     build_seg_head_input_dynamic_axes,
     build_serialized_pooling_metadata,
     build_stage_feature_dynamic_axes,
+    export_patch_sizes,
     flatten_serialized_pooling_inputs,
     link_stage_points,
     make_serialized_pooling_from_flat_inputs,
@@ -200,7 +204,8 @@ class PTv3ExportContext:
     serialization_depth: torch.Tensor
     grid_coord: torch.Tensor
     feat: torch.Tensor
-    serialized_code: torch.Tensor
+    #: The input level's serialization tensors keyed by INPUT_LEVEL_SERIALIZATION_INPUTS.
+    input_level: Mapping[str, torch.Tensor]
     strides: tuple[int, ...]
     pooling_metadata: tuple[SerializedPoolingMeta, ...]
     serialized_pooling_inputs: tuple[torch.Tensor, ...]
@@ -217,13 +222,18 @@ class PTv3ExportContext:
         return (
             self.grid_coord,
             self.feat,
-            self.serialized_code,
+            *(self.input_level[name] for name in INPUT_LEVEL_SERIALIZATION_INPUTS),
             *self.serialized_pooling_inputs,
         )
 
     @property
     def encoder_input_names(self) -> list[str]:
-        return ["grid_coord", "feat", "serialized_code", *self.serialized_pooling_input_names]
+        return [
+            "grid_coord",
+            "feat",
+            *INPUT_LEVEL_SERIALIZATION_INPUTS,
+            *self.serialized_pooling_input_names,
+        ]
 
 
 def build_ptv3_export_context(
@@ -232,12 +242,15 @@ def build_ptv3_export_context(
     """Serialize the batch, precompute pooling metadata, and run the encoder once."""
     sparse_shape, serialization_depth = model._compute_export_geometry(batch)
     point, input_args = serialize_point_cloud_batch(batch, model.EXPORT_ORDER, serialization_depth)
+    patch_sizes = export_patch_sizes(model)
     pooling_metadata = build_serialized_pooling_metadata(
         point["grid_coord"],
         point["serialized_code"],
         point["serialized_order"],
         model.encoder.stride,
+        patch_sizes,
     )
+    input_level = build_input_level_serialization(point, patch_sizes[0])
     serialized_pooling_inputs, serialized_pooling_input_names = flatten_serialized_pooling_inputs(
         pooling_metadata, ENCODER_EXPORT_POOLING_FIELDS
     )
@@ -249,14 +262,17 @@ def build_ptv3_export_context(
     ).eval()
     with torch.no_grad():
         stage_feats = encoder_module(
-            input_args[0], input_args[1], input_args[3], *serialized_pooling_inputs
+            input_args[0],
+            input_args[1],
+            *(input_level[name] for name in INPUT_LEVEL_SERIALIZATION_INPUTS),
+            *serialized_pooling_inputs,
         )
     return PTv3ExportContext(
         sparse_shape=sparse_shape,
         serialization_depth=serialization_depth,
         grid_coord=input_args[0],
         feat=input_args[1],
-        serialized_code=input_args[3],
+        input_level=input_level,
         strides=tuple(model.encoder.stride),
         pooling_metadata=tuple(pooling_metadata),
         serialized_pooling_inputs=tuple(serialized_pooling_inputs),
@@ -295,19 +311,32 @@ def build_monolithic_export_inputs(
     """
     sparse_shape, serialization_depth = model._compute_export_geometry(batch)
     point, input_args = serialize_point_cloud_batch(batch, model.EXPORT_ORDER, serialization_depth)
+    patch_sizes = export_patch_sizes(model)
     serialized_pooling_inputs, serialized_pooling_input_names = flatten_serialized_pooling_inputs(
         build_serialized_pooling_metadata(
             point["grid_coord"],
             point["serialized_code"],
             point["serialized_order"],
             model.encoder.stride,
+            patch_sizes,
         )
     )
+    input_level = build_input_level_serialization(point, patch_sizes[0])
     return MonolithicExportInputs(
         sparse_shape=sparse_shape,
         serialization_depth=serialization_depth,
-        args=(input_args[0], input_args[1], input_args[3], *serialized_pooling_inputs),
-        input_names=["grid_coord", "feat", "serialized_code", *serialized_pooling_input_names],
+        args=(
+            input_args[0],
+            input_args[1],
+            *(input_level[name] for name in INPUT_LEVEL_SERIALIZATION_INPUTS),
+            *serialized_pooling_inputs,
+        ),
+        input_names=[
+            "grid_coord",
+            "feat",
+            *INPUT_LEVEL_SERIALIZATION_INPUTS,
+            *serialized_pooling_input_names,
+        ],
     )
 
 
@@ -345,7 +374,7 @@ def build_seg_head_export_spec(
         args=build_seg_head_export_args(
             context.stage_feats,
             context.pooling_metadata,
-            context.serialized_code,
+            context.input_level,
             context.grid_coord,
             seg3d_head.dec_depths,
         ),

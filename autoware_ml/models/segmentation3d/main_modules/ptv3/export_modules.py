@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import fields
+import json
+import logging
+from pathlib import Path
+from typing import Any
 
+import onnx
 import torch
 import torch.nn as nn
 from torch.onnx.operators import shape_as_tensor
@@ -22,24 +27,52 @@ from autoware_ml.models.segmentation3d.encoders.ptv3 import (
     PointTransformerV3Encoder,
     SerializedPoolingMeta,
     _pooling_depth,
+    build_patch_order,
     build_serialized_pooling_meta,
     collect_encoder_stage_points,
+    collect_stage_patch_sizes,
 )
-from autoware_ml.ops.indexing.operators import argsort
-from autoware_ml.utils.point_cloud.structures import Point, invert_permutation
+from autoware_ml.utils.point_cloud.structures import Point
 
+logger = logging.getLogger(__name__)
 
-_BLOCK_STAGE_META_FIELDS = ("serialized_order", "serialized_inverse", "grid_coord")
+#: The input level's serialization tensors, the graph inputs that replace the in-graph
+#: Argsort of `serialized_code`: the serialize stage computes the order (and its inverse)
+#: anyway to derive the pooling metadata, so the graph reads them instead of sorting again.
+#: `patch_order` is the order padded to whole attention windows (build_patch_order); its
+#: first `count` entries are the order itself, which is why the bare order is not an input —
+#: the tracer would prune an input nothing reads, and the deployed runtime binds by name.
+INPUT_LEVEL_SERIALIZATION_INPUTS = ("serialized_inverse", "patch_order")
+#: ONNX `metadata_props` key under which the exporter records the per-level attention window,
+#: the one constant the deployed runtime needs to rebuild `patch_order`.
+PATCH_SIZES_METADATA_KEY = "patch_sizes"
+
+# The per-stage serialization tensors a decoder block stage reads: the same names, and the
+# same tensors, the encoder graph consumes for that stage.
+_BLOCK_STAGE_META_FIELDS = ("serialized_inverse", "grid_coord", "patch_order")
 
 SERIALIZED_POOLING_FIELDS = tuple(field.name for field in fields(SerializedPoolingMeta))
+# Fields no exported graph reads: `cluster` only drives the heads' unpooling (the joint
+# single-graph exports do consume it), and `serialized_order` is carried by `patch_order`
+# (its first `count` entries) — the blocks gather through the padded order and un-permute
+# through the inverse. A declared input the tracer prunes would break the deployed
+# runtime, which binds every declared name.
+GRAPH_UNREAD_POOLING_FIELDS = frozenset({"serialized_order"})
 # The encoder-only encoder graph never consumes `cluster` (it only drives the
 # heads' unpooling), so the split encoder export excludes it.
 ENCODER_EXPORT_POOLING_FIELDS = tuple(
-    name for name in SERIALIZED_POOLING_FIELDS if name != "cluster"
+    name
+    for name in SERIALIZED_POOLING_FIELDS
+    if name != "cluster" and name not in GRAPH_UNREAD_POOLING_FIELDS
+)
+# Every graph-facing field: what the joint single-graph exports declare.
+GRAPH_POOLING_FIELDS = tuple(
+    name for name in SERIALIZED_POOLING_FIELDS if name not in GRAPH_UNREAD_POOLING_FIELDS
 )
 SERIALIZED_POOLING_INPUT_SIZED_FIELDS = frozenset({"indices", "cluster"})
 SERIALIZED_POOLING_OUTPUT_PLUS_ONE_FIELDS = frozenset({"indptr"})
 SERIALIZED_POOLING_ORDER_FIELDS = frozenset({"serialized_order", "serialized_inverse"})
+SERIALIZED_POOLING_PADDED_FIELDS = frozenset({"patch_order"})
 
 
 def split_block_parameters(
@@ -78,12 +111,26 @@ def build_serialized_pooling_metadata(
     serialized_code: torch.Tensor,
     serialized_order: torch.Tensor,
     strides: Sequence[int],
+    patch_sizes: Sequence[int | None],
 ) -> list[SerializedPoolingMeta]:
-    """Build serialized-pooling metadata for every encoder pooling stage."""
+    """Build serialized-pooling metadata for every encoder pooling stage.
+
+    Args:
+        grid_coord: Input-level voxel coordinates.
+        serialized_code: Input-level codes, ``[num_orders, count]``.
+        serialized_order: Input-level orders, ``[num_orders, count]``.
+        strides: One pooling stride per stage.
+        patch_sizes: Attention window per *level* (``len(strides) + 1`` entries, the input
+            level first); pooling stage ``i`` produces level ``i + 1``.
+    """
+    if len(patch_sizes) != len(strides) + 1:
+        raise ValueError(
+            f"patch_sizes must have one entry per level ({len(strides) + 1}), got {len(patch_sizes)}."
+        )
     metadata = []
-    for stride in strides:
+    for stride, patch_size in zip(strides, patch_sizes[1:]):
         meta, serialized_code = build_serialized_pooling_meta(
-            grid_coord, serialized_code, serialized_order, stride
+            grid_coord, serialized_code, serialized_order, stride, patch_size
         )
         metadata.append(meta)
         grid_coord = meta.grid_coord
@@ -91,9 +138,61 @@ def build_serialized_pooling_metadata(
     return metadata
 
 
+def export_patch_sizes(model: Any) -> list[int | None]:
+    """The attention window of every hierarchy level, as the export graphs need it.
+
+    One ``patch_order`` per level is the graph contract, so a level's encoder blocks and its
+    decoder blocks (when the model has a segmentation head with blocks there) must agree on
+    the window; both PTv3 configurations do, and a disagreement is a config error reported
+    here rather than a silently mis-padded gather.
+    """
+    patch_sizes = collect_stage_patch_sizes(model.encoder.enc)
+    head = getattr(model, "seg3d_head", None)
+    if head is not None:
+        for stage, dec_patch_size in enumerate(collect_stage_patch_sizes(head.dec)):
+            if dec_patch_size is None:
+                continue
+            if patch_sizes[stage] is None:
+                patch_sizes[stage] = dec_patch_size
+            elif patch_sizes[stage] != dec_patch_size:
+                raise ValueError(
+                    f"Level {stage}: encoder patch_size {patch_sizes[stage]} != decoder "
+                    f"patch_size {dec_patch_size}; the deployed graphs share one patch_order per "
+                    "level, so enc_patch_size and dec_patch_size must match where both have "
+                    "attention blocks."
+                )
+    return patch_sizes
+
+
+def build_input_level_serialization(
+    point: Point, patch_size: int | None
+) -> dict[str, torch.Tensor]:
+    """The input level's serialization graph inputs from a serialized ``Point``."""
+    return {
+        "serialized_inverse": point["serialized_inverse"],
+        "patch_order": build_patch_order(point["serialized_order"], patch_size),
+    }
+
+
+def embed_patch_sizes_metadata(onnx_path: str | Path, *, patch_sizes: Sequence[int | None]) -> Path:
+    """Stage transform: record the per-level attention window in the exported graph.
+
+    The deployed runtime rebuilds every ``patch_order`` input from the frame's serialization
+    and this constant, so the graph carries it.
+    """
+    onnx_path = Path(onnx_path)
+    model = onnx.load(str(onnx_path))
+    props = {prop.key: prop.value for prop in model.metadata_props}
+    props[PATCH_SIZES_METADATA_KEY] = json.dumps(list(patch_sizes), separators=(",", ":"))
+    onnx.helper.set_model_props(model, props)
+    onnx.save(model, str(onnx_path))
+    logger.info("Patch sizes %s recorded in %s for the runtime.", list(patch_sizes), onnx_path.name)
+    return onnx_path
+
+
 def flatten_serialized_pooling_inputs(
     metadata: Sequence[SerializedPoolingMeta],
-    field_names: Sequence[str] = SERIALIZED_POOLING_FIELDS,
+    field_names: Sequence[str] = GRAPH_POOLING_FIELDS,
 ) -> tuple[tuple[torch.Tensor, ...], list[str]]:
     """Flatten per-stage metadata into ONNX args and input names.
 
@@ -121,6 +220,8 @@ def _serialized_pooling_dynamic_axis(input_name: str) -> dict[int, str]:
         return {0: f"{stage_prefix}_out_voxels_plus_one"}
     if field in SERIALIZED_POOLING_ORDER_FIELDS:
         return {1: f"{stage_prefix}_out_voxels"}
+    if field in SERIALIZED_POOLING_PADDED_FIELDS:
+        return {1: f"{stage_prefix}_padded_voxels"}
     return {0: f"{stage_prefix}_out_voxels"}
 
 
@@ -168,8 +269,10 @@ def build_ptv3_input_dynamic_axes(input_names: Sequence[str]) -> dict[str, dict[
     for input_name in input_names:
         if input_name in {"grid_coord", "feat"}:
             dynamic_axes[input_name] = {0: "num_voxels"}
-        elif input_name == "serialized_code":
+        elif input_name == "serialized_inverse":
             dynamic_axes[input_name] = {1: "num_voxels"}
+        elif input_name == "patch_order":
+            dynamic_axes[input_name] = {1: "padded_voxels"}
         elif input_name.startswith("serialized_pooling_"):
             dynamic_axes[input_name] = _serialized_pooling_dynamic_axis(input_name)
     return dynamic_axes
@@ -186,7 +289,7 @@ def build_ptv3_encoder_dynamic_axes(
 
 def make_serialized_pooling_from_flat_inputs(
     serialized_pooling_inputs: tuple[torch.Tensor, ...],
-    field_names: Sequence[str] = SERIALIZED_POOLING_FIELDS,
+    field_names: Sequence[str] = GRAPH_POOLING_FIELDS,
 ) -> list[SerializedPoolingMeta]:
     """Reconstruct per-stage metadata objects from flattened ONNX graph inputs.
 
@@ -219,7 +322,7 @@ class PTv3EncoderExportBase(nn.Module):
         encoder: PointTransformerV3Encoder,
         sparse_shape: torch.Tensor,
         serialized_depth: torch.Tensor,
-        pooling_field_names: Sequence[str] = SERIALIZED_POOLING_FIELDS,
+        pooling_field_names: Sequence[str] = GRAPH_POOLING_FIELDS,
     ) -> None:
         """Initialize the shared encoder export half.
 
@@ -240,7 +343,8 @@ class PTv3EncoderExportBase(nn.Module):
         self,
         grid_coord: torch.Tensor,
         feat: torch.Tensor,
-        serialized_code: torch.Tensor,
+        serialized_inverse: torch.Tensor,
+        patch_order: torch.Tensor,
         *serialized_pooling_inputs: torch.Tensor,
     ) -> Point:
         """Run the encoder over the declared inputs.
@@ -248,7 +352,9 @@ class PTv3EncoderExportBase(nn.Module):
         Args:
             grid_coord: Discretized grid coordinates.
             feat: Point features whose first three channels are xyz.
-            serialized_code: Base serialization codes.
+            serialized_inverse: Input-level inverse serialization orders,
+                ``[num_orders, count]``.
+            patch_order: The serialization orders padded to whole attention windows.
             serialized_pooling_inputs: Flattened per-stage pooling metadata.
 
         Returns:
@@ -259,7 +365,8 @@ class PTv3EncoderExportBase(nn.Module):
             grid_coord,
             feat,
             self._serialized_depth,
-            serialized_code,
+            serialized_inverse,
+            patch_order,
             self._sparse_shape,
             *serialized_pooling_inputs,
             pooling_field_names=self.pooling_field_names,
@@ -271,19 +378,25 @@ def _run_ptv3_encoder_export(
     grid_coord: torch.Tensor,
     feat: torch.Tensor,
     serialized_depth: torch.Tensor,
-    serialized_code: torch.Tensor,
+    serialized_inverse: torch.Tensor,
+    patch_order: torch.Tensor,
     sparse_shape: torch.Tensor,
     *serialized_pooling_inputs: torch.Tensor,
-    pooling_field_names: Sequence[str] = SERIALIZED_POOLING_FIELDS,
+    pooling_field_names: Sequence[str] = GRAPH_POOLING_FIELDS,
 ) -> Point:
     """Run the shared tensor-only PTv3 encoder export path.
+
+    The serialization arrives fully precomputed: the serialize stage sorts the input level
+    to derive the pooling metadata anyway, so the graph carries no Argsort of its own.
 
     Args:
         encoder: Export-prepared encoder.
         grid_coord: Discretized grid coordinates.
         feat: Point features whose first three channels are xyz.
         serialized_depth: Baked serialization depth.
-        serialized_code: Base serialization codes.
+        serialized_inverse: Input-level inverse serialization orders.
+        patch_order: The orders padded to whole attention windows (their first ``count``
+            entries are the orders themselves).
         sparse_shape: Baked sparse shape.
         serialized_pooling_inputs: Flattened per-stage pooling metadata.
         pooling_field_names: Metadata fields the flattened tensors carry.
@@ -292,8 +405,6 @@ def _run_ptv3_encoder_export(
         Deepest encoder point with the full pooling chain attached.
     """
     point_count = shape_as_tensor(grid_coord)[:1].to(grid_coord.device)
-    serialized_order = torch.stack([argsort(code) for code in serialized_code], dim=0)
-    serialized_inverse = invert_permutation(serialized_order)
     return encoder.export_forward(
         {
             "coord": feat[:, :3],
@@ -301,9 +412,8 @@ def _run_ptv3_encoder_export(
             "grid_coord": grid_coord,
             "offset": point_count,
             "serialized_depth": serialized_depth,
-            "serialized_code": serialized_code,
-            "serialized_order": serialized_order,
             "serialized_inverse": serialized_inverse,
+            "patch_order": patch_order,
             "serialized_pooling": make_serialized_pooling_from_flat_inputs(
                 serialized_pooling_inputs, pooling_field_names
             ),
@@ -319,11 +429,14 @@ class _PTv3EncoderExportModule(PTv3EncoderExportBase):
         self,
         grid_coord: torch.Tensor,
         feat: torch.Tensor,
-        serialized_code: torch.Tensor,
+        serialized_inverse: torch.Tensor,
+        patch_order: torch.Tensor,
         *serialized_pooling_inputs: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         """Run the encoder and return per-stage features, finest to deepest."""
-        point = self.run_encoder(grid_coord, feat, serialized_code, *serialized_pooling_inputs)
+        point = self.run_encoder(
+            grid_coord, feat, serialized_inverse, patch_order, *serialized_pooling_inputs
+        )
         return tuple(stage.feat for stage in collect_encoder_stage_points(point))
 
 
@@ -339,10 +452,10 @@ def link_stage_points(
         clusters: Per-pooling cluster tensors mapping each finer-stage voxel
             to its pooled voxel.
         block_stage_metadata: For every stage whose decoder has attention
-            blocks, ``(serialized_order, serialized_inverse, grid_coord,
+            blocks, ``(serialized_inverse, grid_coord, patch_order,
             sparse_shape)`` used to rebuild the serialization and sparse-conv
-            views the blocks read. Single-sample export is assumed for the
-            derived batch offsets.
+            views the blocks read. Single-sample export is assumed
+            for the derived batch offsets.
 
     Returns:
         Deepest point whose ``pooling_parent``/``pooling_inverse`` chain links
@@ -358,10 +471,10 @@ def link_stage_points(
         points[stage_index]["pooling_parent"] = points[stage_index - 1]
         points[stage_index]["pooling_inverse"] = clusters[stage_index - 1]
     for stage_index, metadata in (block_stage_metadata or {}).items():
-        serialized_order, serialized_inverse, grid_coord, sparse_shape = metadata
+        serialized_inverse, grid_coord, patch_order, sparse_shape = metadata
         point = points[stage_index]
-        point["serialized_order"] = serialized_order
         point["serialized_inverse"] = serialized_inverse
+        point["patch_order"] = patch_order
         point["grid_coord"] = grid_coord
         point["offset"] = shape_as_tensor(grid_coord)[:1].to(grid_coord.device)
         point["batch"] = torch.zeros_like(grid_coord[:, 0]).long()
@@ -438,8 +551,8 @@ def seg_head_export_input_names(stage_count: int, dec_depths: Sequence[int]) -> 
     The rule is the deployment contract: per-stage features and pooling
     clusters always; for every stage with decoder blocks, that stage's
     serialization metadata (the same tensors, under the same names, that the
-    encoder graph consumes - stage 0 uses the base ``serialized_code`` and
-    ``grid_coord`` inputs instead).
+    encoder graph consumes - stage 0 uses the base input-level tensors
+    ``serialized_inverse`` / ``patch_order`` and ``grid_coord`` instead).
 
     Args:
         stage_count: Number of encoder stages.
@@ -453,7 +566,7 @@ def seg_head_export_input_names(stage_count: int, dec_depths: Sequence[int]) -> 
     names = [*stage_feature_names(stage_count), *pooling_cluster_names(stage_count)]
     for stage in _block_stage_indices(dec_depths):
         if stage == 0:
-            names += ["serialized_code", "grid_coord"]
+            names += [*INPUT_LEVEL_SERIALIZATION_INPUTS, "grid_coord"]
         else:
             prefix = f"serialized_pooling_{stage - 1}_"
             names += [prefix + field for field in _BLOCK_STAGE_META_FIELDS]
@@ -463,15 +576,24 @@ def seg_head_export_input_names(stage_count: int, dec_depths: Sequence[int]) -> 
 def build_seg_head_export_args(
     stage_feats: Sequence[torch.Tensor],
     pooling_metadata: Sequence[SerializedPoolingMeta],
-    serialized_code: torch.Tensor,
+    input_level: Mapping[str, torch.Tensor],
     grid_coord: torch.Tensor,
     dec_depths: Sequence[int],
 ) -> tuple[torch.Tensor, ...]:
-    """Assemble the split seg-head export args matching the input-name rule."""
+    """Assemble the split seg-head export args matching the input-name rule.
+
+    Args:
+        stage_feats: Per-stage encoder features.
+        pooling_metadata: Per-pooling-stage metadata.
+        input_level: The input level's serialization tensors keyed by their input names
+            (:func:`build_input_level_serialization`).
+        grid_coord: Input-level voxel coordinates.
+        dec_depths: Decoder block counts per stage.
+    """
     args = [*stage_feats, *(meta.cluster for meta in pooling_metadata)]
     for stage in _block_stage_indices(dec_depths):
         if stage == 0:
-            args += [serialized_code, grid_coord]
+            args += [*(input_level[name] for name in INPUT_LEVEL_SERIALIZATION_INPUTS), grid_coord]
         else:
             meta = pooling_metadata[stage - 1]
             args += [getattr(meta, field) for field in _BLOCK_STAGE_META_FIELDS]
@@ -486,8 +608,9 @@ def build_seg_head_input_dynamic_axes(
     dynamic_axes.update(build_pooling_cluster_dynamic_axes(stage_count))
     for stage in _block_stage_indices(dec_depths):
         if stage == 0:
-            dynamic_axes["serialized_code"] = {1: "num_voxels"}
-            dynamic_axes["grid_coord"] = {0: "num_voxels"}
+            dynamic_axes.update(
+                build_ptv3_input_dynamic_axes([*INPUT_LEVEL_SERIALIZATION_INPUTS, "grid_coord"])
+            )
         else:
             prefix = f"serialized_pooling_{stage - 1}_"
             for field in _BLOCK_STAGE_META_FIELDS:
@@ -547,10 +670,9 @@ class _PTv3SegHeadExportModule(nn.Module):
         block_stage_metadata: dict[int, tuple[torch.Tensor, ...]] = {}
         for stage in _block_stage_indices(self.dec_depths):
             if stage == 0:
-                serialized_code = extras.pop(0)
+                serialized_inverse = extras.pop(0)
+                patch_order = extras.pop(0)
                 grid_coord = extras.pop(0)
-                serialized_order = torch.stack([argsort(code) for code in serialized_code], dim=0)
-                serialized_inverse = invert_permutation(serialized_order)
             else:
                 # Unpack through the same field tuple the input names and the export args
                 # are built from. `serialized_order` and `serialized_inverse` have identical
@@ -563,13 +685,13 @@ class _PTv3SegHeadExportModule(nn.Module):
                         [extras.pop(0) for _ in _BLOCK_STAGE_META_FIELDS],
                     )
                 )
-                serialized_order = by_field["serialized_order"]
                 serialized_inverse = by_field["serialized_inverse"]
                 grid_coord = by_field["grid_coord"]
+                patch_order = by_field["patch_order"]
             block_stage_metadata[stage] = (
-                serialized_order,
                 serialized_inverse,
                 grid_coord,
+                patch_order,
                 getattr(self, f"_sparse_shape_{stage}"),
             )
 
