@@ -158,6 +158,10 @@ def stamp_onnx_meta(
                 f"reserved keys: {sorted(RESERVED_META_KEYS)}."
             )
         props[key] = meta_value_to_str(value)
-    onnx.helper.set_model_props(model, props)
+    # Stage transforms run before this stamp and may have written their own properties
+    # (the sparse rulebook geometry, for one); set_model_props replaces the whole set, so
+    # they are carried over explicitly rather than erased by the provenance stamp.
+    existing = {prop.key: prop.value for prop in model.metadata_props}
+    onnx.helper.set_model_props(model, {**existing, **props})
 
     onnx.save(model, str(onnx_path))
