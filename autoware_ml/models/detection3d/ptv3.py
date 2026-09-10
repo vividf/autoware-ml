@@ -374,11 +374,14 @@ class _PTv3DetectionExportModule(PTv3EncoderExportBase):
         self,
         grid_coord: torch.Tensor,
         feat: torch.Tensor,
-        serialized_code: torch.Tensor,
+        serialized_inverse: torch.Tensor,
+        patch_order: torch.Tensor,
         *serialized_pooling_inputs: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         """Run export-time inference on serialized point inputs."""
-        point = self.run_encoder(grid_coord, feat, serialized_code, *serialized_pooling_inputs)
+        point = self.run_encoder(
+            grid_coord, feat, serialized_inverse, patch_order, *serialized_pooling_inputs
+        )
         bev_features = self.bev_neck(point)
         outputs = self.bbox_head(bev_features)
         return tuple(outputs[name] for name in self.output_names)

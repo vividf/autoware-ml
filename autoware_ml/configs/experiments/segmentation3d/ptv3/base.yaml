@@ -42,8 +42,8 @@ deploy:
   # TensorRT build, verification, and evaluation are heavyweight and stay opt-in here.
   tensorrt:
     enabled: false
-    # PTv3's graphs carry autoware:: plugin ops (sparse convolution, argsort,
-    # segment_csr); the engines need the runtime library that implements them, built
+    # PTv3's graphs carry autoware:: plugin ops (sparse convolution, segment_csr);
+    # the engines need the runtime library that implements them, built
     # into the image (docker/tensorrt_plugins).
     plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   verification:
