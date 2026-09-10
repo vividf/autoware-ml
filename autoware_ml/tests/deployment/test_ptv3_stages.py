@@ -37,8 +37,9 @@ from autoware_ml.models.segmentation3d.main_modules.ptv3.stages import (
     encoder_input_names,
     serialize_output_names,
 )
-from autoware_ml.models.segmentation3d.encoders.ptv3 import SerializedPoolingMeta
+from autoware_ml.models.segmentation3d.encoders.ptv3 import PointSequential, SerializedPoolingMeta
 from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
+    INPUT_LEVEL_SERIALIZATION_INPUTS,
     build_seg_head_export_args,
     seg_head_export_input_names,
 )
@@ -50,6 +51,7 @@ class _StubHead(nn.Module):
     def __init__(self, dec_depths: tuple[int, ...]) -> None:
         super().__init__()
         self.dec_depths = dec_depths
+        self.dec = PointSequential()  # no blocks: export_patch_sizes finds no windows here
 
     def prepare_for_export(self, order=None):  # noqa: ANN001 - mirrors the model API
         return self
@@ -62,7 +64,7 @@ class _StubBBoxHead(nn.Module):
 
 def _stub_model(task: str) -> SimpleNamespace:
     model = SimpleNamespace(
-        encoder=SimpleNamespace(stride=(2,) * _NUM_POOLINGS),
+        encoder=SimpleNamespace(stride=(2,) * _NUM_POOLINGS, enc=PointSequential()),
         point_cloud_range=[-10.0, -10.0, -3.0, 10.0, 10.0, 5.0],
         grid_size=0.5,
         EXPORT_ORDER=("z", "z-trans"),
@@ -100,8 +102,16 @@ def test_det_declaration_is_valid_and_name_covered() -> None:
 
 def test_encoder_inputs_follow_the_legacy_name_rule() -> None:
     names = encoder_input_names(_NUM_POOLINGS)
-    assert names[:3] == ["grid_coord", "feat", "serialized_code"]
-    assert all(name.startswith("serialized_pooling_") for name in names[3:])
+    # The input level arrives serialized: no codes to sort in-graph, the order padded to
+    # attention windows ready for the blocks' gather.
+    assert names[:4] == ["grid_coord", "feat", "serialized_inverse", "patch_order"]
+    assert names[2:4] == list(INPUT_LEVEL_SERIALIZATION_INPUTS)
+    assert "serialized_code" not in names
+    assert all(name.startswith("serialized_pooling_") for name in names[4:])
+    assert "serialized_pooling_0_patch_order" in names
+    # The bare order is carried by patch_order; declaring it would only get it pruned.
+    assert "serialized_order" not in names
+    assert "serialized_pooling_0_serialized_order" not in names
     # cluster is head-side only and must NOT be an encoder input.
     assert not any(name.endswith("_cluster") for name in names)
 
@@ -131,6 +141,7 @@ def test_seg_head_export_names_and_args_stay_in_lockstep() -> None:
             grid_coord=marker(f"serialized_pooling_{i}_grid_coord"),
             serialized_order=marker(f"serialized_pooling_{i}_serialized_order"),
             serialized_inverse=marker(f"serialized_pooling_{i}_serialized_inverse"),
+            patch_order=marker(f"serialized_pooling_{i}_patch_order"),
         )
         for i in range(stage_count - 1)
     ]
@@ -140,7 +151,7 @@ def test_seg_head_export_names_and_args_stay_in_lockstep() -> None:
     args = build_seg_head_export_args(
         stage_feats,
         metas,
-        serialized_code=marker("serialized_code"),
+        input_level={name: marker(name) for name in INPUT_LEVEL_SERIALIZATION_INPUTS},
         grid_coord=marker("grid_coord"),
         dec_depths=dec_depths,
     )
@@ -150,7 +161,10 @@ def test_seg_head_export_names_and_args_stay_in_lockstep() -> None:
         assert tensor == marker(name), f"{name} is not the tensor at its own position"
     # Stage 1 declares no decoder blocks, so the metadata it would have read
     # (serialized_pooling_0_*, one index below the stage) is not an input at all; the
-    # block stages 0 and 2 contribute serialized_code/grid_coord and serialized_pooling_1_*.
-    assert "serialized_pooling_0_serialized_order" not in names
-    assert "serialized_pooling_1_serialized_order" in names
-    assert "serialized_code" in names and "grid_coord" in names
+    # block stages 0 and 2 contribute the input-level serialization/grid_coord and
+    # serialized_pooling_1_*.
+    assert "serialized_pooling_0_serialized_inverse" not in names
+    assert "serialized_pooling_1_serialized_inverse" in names
+    assert "serialized_pooling_1_patch_order" in names
+    assert "patch_order" in names and "grid_coord" in names
+    assert "serialized_code" not in names
