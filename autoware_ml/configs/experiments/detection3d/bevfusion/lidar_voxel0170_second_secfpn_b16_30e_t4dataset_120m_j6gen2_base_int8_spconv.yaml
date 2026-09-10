@@ -1,0 +1,42 @@
+# @package _global_
+# INT8 everywhere the engine can take it: the dense graph (Q/DQ) *and* the sparse tower
+# (ImplicitGemm plugin INT8), on the j6gen2_base BEVFusion-lidar experiment.
+#
+#   autoware-ml quantize \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8_spconv \
+#     --weights <FP checkpoint>
+#   autoware-ml deploy \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8_spconv \
+#     --weights <ptq.ckpt produced by the quantize run>
+#
+# The sparse tower deploys through libautoware_tensorrt_plugins.so built from a source tree
+# whose ImplicitGemmPlugin has the INT8 path (`precision` / `input_scale` attributes); an
+# older plugin rejects the graph at engine build.
+defaults:
+  - lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8
+  - _self_
+
+experiment_name: lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_int8_spconv
+
+quantization:
+  # Same dense recipe as the parent, minus the parent's `pts_middle_encoder` skip; hydra
+  # replaces the whole list, so the dense entries are repeated here.
+  skip_quantize:
+    - bbox_head.decoder
+    - pts_neck.blocks.0
+    - pts_backbone.blocks.0
+    # Sparse tower, stages 1-3.0 kept FP16. Two independent reasons point at the same cut:
+    #  * speed - measured per-layer GEMM speedup is *below* 1.0 for conv_input (0.45x) and
+    #    all of stage 1 (0.77-0.82x) and only pays from stage 3 on (1.4-1.55x): these layers
+    #    hold the most active voxels with the fewest channels, so the INT8 GEMM saves less
+    #    than the FP16->INT8 feature conversion costs.
+    #  * accuracy - the sparse tower is where BEVFusion's INT8 mAP loss came from (AWML
+    #    measured -5.6% with the whole tower quantized).
+    # Skipping a layer here removes its quantizer at PTQ, so the *next* layer's input scale
+    # is calibrated against the genuine FP16 distribution the engine will feed it. Skipping
+    # only in the exported graph would leave that scale calibrated for a fake-quantized
+    # input, which is how this recipe used to collapse.
+    - pts_middle_encoder.conv_input
+    - pts_middle_encoder.encoder_layers.encoder_layer1
+    - pts_middle_encoder.encoder_layers.encoder_layer2
+    - pts_middle_encoder.encoder_layers.encoder_layer3.0

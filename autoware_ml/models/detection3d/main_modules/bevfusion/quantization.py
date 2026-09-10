@@ -17,10 +17,17 @@
 Quantization covers the dense deployment graph only: ``pts_backbone`` /
 ``pts_neck`` (Conv2d) and the head's Conv2d layers (shared conv, heatmap head),
 plus the decoder FFN's Linear layers — pinned FP8, never INT8 (INT8 linears cost
-PTv3 6 mIoU for nothing; E4M3 held accuracy). The sparse side
-(``pts_voxel_encoder`` / ``pts_middle_encoder``) is deliberately absent — its
-INT8 form is the libspconv engine produced by the dedicated sparse exporter,
-not Q/DQ replacement.
+PTv3 6 mIoU for nothing; E4M3 held accuracy). ``pts_middle_encoder`` quantizes
+too, but as the ``spconv`` kind: its layers deploy as ``autoware::ImplicitGemm``
+plugin nodes carrying per-layer scales rather than Q/DQ (see
+:mod:`autoware_ml.ops.spconv.onnx_int8`), so the quantizers here exist to
+calibrate those scales. ``pts_voxel_encoder`` has no weights to quantize.
+
+Sparse INT8 is not a free win and the config decides how much of the tower takes
+it: the early, high-resolution layers are both the least accurate in INT8 and the
+*slowest* (measured per-layer GEMM speedups of 0.45-0.82x below stage 3 against
+1.4-1.55x in stage 4), so the production recipe keeps them FP16 through
+``skip_quantize`` and quantizes stage 3.1 onwards.
 
 The attention projections are *structurally* out of reach at calibration time:
 the trained head holds ``nn.MultiheadAttention`` (packed ``in_proj_weight``
@@ -46,6 +53,7 @@ from autoware_ml.quantization.plan import QuantizationPlan, QuantRules
 #: BEVFusion lidar quantization declaration (dense graph only; see module docstring).
 BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
     quantize_submodules={
+        "pts_middle_encoder": ("spconv",),
         "pts_backbone": ("conv",),
         "pts_neck": ("conv",),
         "bbox_head": {"conv": None, "linear": "fp8"},

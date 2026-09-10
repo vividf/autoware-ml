@@ -106,6 +106,18 @@ add_library(cuda_ops SHARED
   "${PLUGIN_SRC_DIR}/src/rotate_ops/rotate_kernel.cu"
   "${PLUGIN_SRC_DIR}/src/select_and_pad_ops/select_and_pad_kernel.cu"
 )
+
+# The INT8 path of ImplicitGemmPlugin (feature/weight quantization kernels) exists only on
+# plugin sources that carry it; keep this build usable against a tree without it.
+if(EXISTS "${PLUGIN_SRC_DIR}/src/quantize_ops/quantize_features.cu")
+  message(STATUS "Plugin source has the ImplicitGemm INT8 kernels; building them in.")
+  target_sources(cuda_ops PRIVATE "${PLUGIN_SRC_DIR}/src/quantize_ops/quantize_features.cu")
+else()
+  message(WARNING
+    "Plugin source has no src/quantize_ops/quantize_features.cu: the built plugin will "
+    "reject ImplicitGemm nodes with precision=1, so a sparse-INT8 engine build fails.")
+endif()
+
 set_target_properties(cuda_ops PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   CUDA_SEPARABLE_COMPILATION ON

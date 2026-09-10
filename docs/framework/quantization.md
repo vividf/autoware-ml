@@ -211,6 +211,48 @@ trains at the experiment config's training batch size. Deploy evaluation follows
 dataloader batch size on the PyTorch backend; the TensorRT backend is bound by the
 engine's shape profiles (the shipped CenterPoint engines are built for batch 1).
 
+### Sparse convolutions (the `spconv` kind)
+
+A sparse convolution quantizes like any other GEMM on the PyTorch side — modelopt
+`input_quantizer` (per tensor) + `weight_quantizer` (per output channel, axis 0 of
+`[C_out, k1, k2, k3, C_in]`) — but it does **not** deploy as Q/DQ. Its deployed form is an
+`autoware::ImplicitGemm` plugin node, and TensorRT cannot fuse Q/DQ into a plugin, so the
+calibrated scales are written into the exported graph as plugin attributes and inputs
+instead (`autoware_ml.ops.spconv.onnx_int8`):
+
+| Calibrated value | Travels as |
+| --- | --- |
+| `input_amax / 127` | `input_scale` attribute + `precision = 1` |
+| `input_scale * weight_amax / 127` | `channel_scale`, the node's 6th input (FP32, per output channel) |
+| the BN-folded bias | `bias_scaled`, the node's 7th input (FP32) |
+
+`output_scale` stays 1.0: the plugin folds it into the GEMM scale/bias *and* divides it back
+out of the weight scale, so it cancels — the graph needs no activation-chain output scale.
+
+Two consequences worth knowing:
+
+- **`skip_quantize` is the only precision control**, and it acts at PTQ time. A skipped
+  sparse layer never gets a quantizer, so its successor's `input_scale` is calibrated
+  against the genuine FP16 activation the engine will feed it. Excluding a layer only in
+  the exported graph would leave that scale calibrated for a fake-quantized input — the
+  classic way this recipe collapses.
+- **The engine needs a plugin built with the INT8 path** (`precision` / `input_scale`
+  attributes). See `docker/tensorrt_plugins/README.md`.
+
+Whether sparse INT8 pays depends on the shape of the convolutions, and the two models that
+use it answer differently (measured 2026-09-10, `work_dirs/reviews/`):
+
+| | BEVFusion sparse tower | PTv3 `cpe` convolutions |
+| --- | --- | --- |
+| shape | 16-128 channels, k=3, most of the voxels in the early stages | 32-512 channels, k=3, one per block |
+| accuracy | −1.2% mAP with 8 of 21 layers INT8 | flat: every block within 0.0001 mIoU, LOO and ONLY |
+| latency | inside noise (−0.03 ms of a 4.0 ms stage) | −0.49 ms of a 5.6 ms encoder (−8.7%) |
+| recipe | stage 3.1 onwards; earlier layers measured *slower* in INT8 (0.45-0.82x GEMM speedup) | all 12 convolutions; keeping the shallow ones FP16 changed nothing |
+
+The rule of thumb the two agree on: the INT8 GEMM has to save more than quantizing the
+features costs, so it pays where channels are wide and loses where they are narrow and the
+voxel count is high.
+
 ### Self-describing checkpoints
 
 A quantized checkpoint is `{"state_dict": ..., "quantization": {config, placement_record}}`

@@ -41,11 +41,23 @@ from torch import nn
 
 from autoware_ml.quantization.config import Precision
 
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+
+if IS_SPCONV_AVAILABLE:
+    # spconv is the framework's one genuinely optional dependency, so its imports carry the
+    # availability guard rather than sitting inside a function. Importing
+    # ``autoware_ml.quantization.core.spconv`` is what registers the quantized sparse
+    # convolution in modelopt's registry — the side effect *is* the registration.
+    from spconv.pytorch.conv import SparseConvolution
+
+    from autoware_ml.quantization.core import spconv as _spconv_quant_registration  # noqa: F401
+
 from .descriptors import (
     conv2d_weight_desc,
     conv_transpose2d_weight_desc,
     input_desc,
     linear_weight_desc,
+    spconv_weight_desc,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,6 +145,11 @@ _REPLACEMENT_KINDS: dict[str, tuple[tuple[type[nn.Module], WeightDesc], ...]] = 
     "linear": ((nn.Linear, linear_weight_desc),),
 }
 
+if IS_SPCONV_AVAILABLE:
+    #: Every spconv layer subclasses ``SparseConvolution`` (``SubMConv3d``, ``SparseConv3d``),
+    #: so the one rule covers the whole sparse tower.
+    _REPLACEMENT_KINDS["spconv"] = ((SparseConvolution, spconv_weight_desc),)
+
 #: Module types the walker must never convert, whatever the kind rules say.
 #: ``nn.MultiheadAttention.out_proj`` is a ``NonDynamicallyQuantizableLinear`` whose
 #: forward the attention fast path bypasses (``F.multi_head_attention_forward`` reads
@@ -198,7 +215,16 @@ def replace_quantizable_modules(
 
     Raises:
         KeyError: On an unknown kind name (kind vocabulary lives in the table).
+        RuntimeError: When ``"spconv"`` is requested in an environment without spconv —
+            the quantized tree would silently come out un-quantized otherwise.
     """
+    missing = [kind for kind in kinds if kind not in _REPLACEMENT_KINDS]
+    if missing == ["spconv"]:
+        raise RuntimeError(
+            "The model declares the 'spconv' module kind but spconv is not installed, so its "
+            "sparse layers cannot be quantized. Run in the deployment image, or drop the "
+            "sparse submodule from the model's QuantRules."
+        )
     rules = tuple(rule for kind in kinds for rule in _REPLACEMENT_KINDS[kind])
     _replace_walk(model, rules, skip_names or set(), prefix, on_replace, precision, calibrator)
 

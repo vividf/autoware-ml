@@ -160,6 +160,12 @@ class SparseBasicBlock(SparseModule):
     full ``SparseConvTensor`` (not just its ``.features``).
     """
 
+    #: The block registers ``conv1, bn1, conv2, bn2`` but its ``forward`` puts a ReLU between
+    #: the first pair's neighbours and a residual add after the second, so adjacency alone
+    #: does not prove the dataflow — the block states which pairs are ``bn(conv(x))`` so BN
+    #: fusion (quantization's step 1, and the export fold) can fold them.
+    bn_fusion_pairs = (("conv1", "bn1"), ("conv2", "bn2"))
+
     def __init__(self, channels: int, indice_key: str, eps: float, momentum: float) -> None:
         super().__init__()
         self.conv1 = SubMConv3d(

@@ -165,6 +165,14 @@ else
     log "         graphs exported by autoware_ml.ops.spconv."
 fi
 
+# Sparse INT8 (deploy configs whose sparse tower is quantized) needs the ImplicitGemm
+# plugin's INT8 path; without it the engine build fails on precision=1 nodes.
+if grep -q '"precision"' "$PLUGIN_SRC_DIR/src/implicit_gemm_plugin_creator.cpp" 2>/dev/null; then
+    log "Source exposes the ImplicitGemm INT8 path (precision attribute)"
+else
+    log "WARNING: source has no ImplicitGemm INT8 path — sparse-INT8 graphs will fail to build."
+fi
+
 # --- build ----------------------------------------------------------------------------
 mkdir -p "$BUILD_DIR"
 cp "$SCRIPT_DIR/CMakeLists.txt" "$BUILD_DIR/CMakeLists.txt"

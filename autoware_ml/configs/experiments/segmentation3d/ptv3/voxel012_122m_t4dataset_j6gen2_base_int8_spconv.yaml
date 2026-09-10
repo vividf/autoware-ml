@@ -1,0 +1,29 @@
+# @package _global_
+# INT8 Linear tree (SmoothQuant) *plus* INT8 cpe sparse convolutions, on the j6gen2 PTv3
+# segmentation experiment.
+#
+#   autoware-ml quantize \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_int8_spconv \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy \
+#     --config-name experiments/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_base_int8_spconv \
+#     --weights <ptq.ckpt produced by the quantize run>
+#
+# The 12 cpe convolutions (10 encoder + 2 decoder) are `SubMConv3d(C, C, k=3)` with C up to
+# 512, so each is 27*C^2 MACs per active voxel — implicit-GEMM work, not glue. They deploy
+# through libautoware_tensorrt_plugins.so built from a source tree whose ImplicitGemmPlugin
+# has the INT8 path; an older plugin rejects the graph at engine build.
+#
+# SmoothQuant only smooths Linear layers (modelopt gates on `is_quantized_linear`), so the
+# sparse convolutions take plain max-calibrated amax from the same pass.
+defaults:
+  - voxel012_122m_t4dataset_j6gen2_base_int8
+  - _self_
+
+experiment_name: voxel012_122m_t4dataset_int8_spconv
+
+quantization:
+  # Drop the parent's "*cpe.0" skip: the whole cpe set is INT8 here. Narrow this list to
+  # keep individual stages FP16 (see the sensitivity table in
+  # work_dirs/reviews/ptv3-spconv-int8-README.md).
+  skip_quantize: []

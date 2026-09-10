@@ -41,6 +41,10 @@ quantization:
   # activation outliers into the weights, which is the direction PTv3 needs (74 Linears,
   # activation-dominated). The 0.0006 mIoU it wins over 0.5 is inside run-to-run noise —
   # the number is not the argument, the direction is; both sit in the FP16 band.
+  # The cpe sparse convolutions stay FP16 here: this recipe measures the Linear tree.
+  # Their INT8 form (ImplicitGemm plugin scales) is the *_int8_spconv variant.
+  skip_quantize:
+    - "*cpe.0"
   calibration:
     method: smoothquant
     smoothquant_alpha: 0.8

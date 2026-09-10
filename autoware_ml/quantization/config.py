@@ -44,7 +44,7 @@ from autoware_ml.utils.config_parsing import reject_unknown_keys
 logger = logging.getLogger(__name__)
 
 #: Module kinds a submodule rule may request.
-VALID_MODULE_KINDS = ("conv", "linear")
+VALID_MODULE_KINDS = ("conv", "linear", "spconv")
 #: Architecture recipes, in the canonical order they are applied. Must stay in sync with
 #: ``recipes.attach.RECIPE_ATTACHERS`` (``plan.py`` checks that at import time).
 VALID_RECIPES = ("residual_add", "ese", "maxpool")

@@ -43,11 +43,13 @@ Contract with the interface migration:
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from typing import Any, Mapping
 
 import torch
 
 from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.models.segmentation3d.main_modules.ptv3.export_modules import (
     ENCODER_EXPORT_POOLING_FIELDS,
     _PTv3DetHeadExportModule,
@@ -183,6 +185,10 @@ def _encoder_stage(model: Any) -> GraphStage:
         # segment_csr). TensorRT executes them from deploy.tensorrt.plugin_libraries;
         # ONNX Runtime has no implementation, so only that backend falls back to torch.
         torch_fallback_backends=(Backend.ONNX,),
+        # A plugin node cannot absorb Q/DQ, so a quantized cpe convolution carries its
+        # scales as node attributes and inputs instead. No-op when the encoder holds no
+        # sparse quantizers, which is every recipe that leaves the cpe convs FP16.
+        onnx_transforms=(partial(sparse_int8_transform, encoder=model.encoder),),
     )
 
 
@@ -209,6 +215,7 @@ def build_ptv3_seg_stages(model: Any) -> tuple[Stage, ...]:
             onnx_dynamic_axes=head_dynamic_axes,
             # Same plugin ops as the encoder graph; see _encoder_stage.
             torch_fallback_backends=(Backend.ONNX,),
+            onnx_transforms=(partial(sparse_int8_transform, encoder=model.seg3d_head),),
             # Field names are a draft until the outputs dataclass gains segmentation slots.
             output_fields=tuple((name, name) for name in output_names),
         ),
