@@ -17,7 +17,8 @@
 Split form (the INT8 deployment line, mirroring AWML's
 ``bevfusion_split_int8_deployment`` artifacts):
 
-    fetch_voxels (torch) -> bevfusion_sparse (graph) -> bevfusion_dense (graph)
+    fetch_voxels (torch) -> precompute_rulebooks (torch) -> bevfusion_sparse (graph)
+                                                          -> bevfusion_dense (graph)
 
 Runtime ABI carried over from the AWML split artifacts:
 
@@ -45,6 +46,14 @@ Contract with the interface migration:
   detections rather than head outputs, so the model implements ``assemble_predictions``
   (not ``assemble_outputs``) and reaches it through :func:`decode_packed_detections`.
 
+``precompute_rulebooks`` generates the rulebooks of the encoder's four down-sampling
+convolutions from the frame's voxel coordinates and hands them to the sparse graph as
+inputs (``rulebook/<indice_key>/<slot>``), so the graph carries no
+``GetIndicePairsImplicitGemm`` node with a data-dependent output shape — the
+``[trainStation]`` host synchronizations TensorRT inserted for them are gone
+(:mod:`autoware_ml.ops.spconv.rulebook`). The submanifold layers still generate theirs
+in-graph; they have no dynamic shape to remove.
+
 The sparse stage deploys in INT8 when the checkpoint carries calibrated sparse quantizers:
 :func:`~autoware_ml.ops.spconv.onnx_int8.sparse_int8_transform` writes their scales into the
 exported graph as plugin attributes and inputs (``precision=1`` + ``channel_scale`` /
@@ -66,10 +75,18 @@ from autoware_ml.models.detection3d.feature_extractors import LidarBEVFeatureExt
 from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
+from autoware_ml.ops.spconv.rulebook import (
+    embed_rulebook_metadata,
+    precompute_rulebooks,
+    rulebook_dynamic_axes,
+    rulebook_indice_data,
+    rulebook_input_names,
+)
 from autoware_ml.types.backend import Backend
 
 # Stage / artifact names (AWML split-deployment ABI: <name>.onnx / .engine).
 FETCH_VOXELS_STAGE = "fetch_voxels"
+PRECOMPUTE_RULEBOOKS_STAGE = "precompute_rulebooks"
 SPARSE_STAGE = "bevfusion_sparse"
 DENSE_STAGE = "bevfusion_dense"
 
@@ -78,6 +95,8 @@ VOXELS = "voxels"
 COORS = "coors"
 NUM_POINTS_PER_VOXEL = "num_points_per_voxel"
 LIDAR_BEV = "lidar_bev"
+#: Dynamic-axis name shared by every per-voxel graph input.
+VOXELS_NUM = "voxels_num"
 BBOX_PRED = "bbox_pred"
 SCORE = "score"
 LABEL_PRED = "label_pred"
@@ -114,16 +133,36 @@ class BEVFusionSparseExportWrapper(nn.Module):
             pts_backbone=None,
             pts_neck=None,
         )
+        # The down-sampling layers whose rulebooks arrive as graph inputs, in the order the
+        # inputs are declared (rulebook_input_names). Read off the export copy so the two
+        # agree by construction.
+        self.rulebook_stages = self.extractor.pts_middle_encoder.downsample_stages()
 
     def forward(
         self,
         voxels: torch.Tensor,
         coors: torch.Tensor,
         num_points_per_voxel: torch.Tensor,
+        *rulebooks: torch.Tensor,
     ) -> torch.Tensor:
-        batch_column = torch.zeros((coors.shape[0], 1), dtype=coors.dtype, device=coors.device)
-        voxel_coords = torch.cat((batch_column, coors), dim=1)
-        return self.extractor(voxels, num_points_per_voxel, voxel_coords, batch_size=1)
+        names = rulebook_input_names(self.rulebook_stages)
+        if len(rulebooks) != len(names):
+            raise ValueError(
+                f"BEVFusion sparse graph expects {len(names)} rulebook input(s) "
+                f"({len(self.rulebook_stages)} down-sampling stage(s) x {len(names) // max(len(self.rulebook_stages), 1)}), "
+                f"got {len(rulebooks)}."
+            )
+        tensors = dict(zip(names, rulebooks))
+        precomputed = {
+            stage.indice_key: rulebook_indice_data(stage, tensors) for stage in self.rulebook_stages
+        }
+        return self.extractor(
+            voxels,
+            num_points_per_voxel,
+            _with_batch_column(coors),
+            batch_size=1,
+            precomputed_rulebooks=precomputed,
+        )
 
 
 class BEVFusionDenseExportWrapper(nn.Module):
@@ -170,8 +209,21 @@ class BEVFusionDenseExportWrapper(nn.Module):
         return bbox_pred, score, query_labels[0]
 
 
+def _with_batch_column(coors: torch.Tensor) -> torch.Tensor:
+    """``[z, y, x]`` graph coordinates -> the ``[batch, z, y, x]`` the encoder takes (batch 0).
+
+    The graph is single-sample and its ``coors`` input carries no batch column (the runtime
+    voxelizes with spconv's Point2Voxel); the encoder and the rulebook precompute have to
+    prepend the same column, so it lives in one place.
+    """
+    batch_column = torch.zeros((coors.shape[0], 1), dtype=coors.dtype, device=coors.device)
+    return torch.cat((batch_column, coors), dim=1)
+
+
 def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
     """Declare the lidar-only BEVFusion split stage graph over ``model``'s submodules."""
+    encoder = model.pts_middle_encoder
+    rulebook_stages = encoder.downsample_stages()
 
     def fetch_voxels(context: StageContext) -> Mapping[str, torch.Tensor]:
         voxels_data = context.batch_inputs.voxels_data
@@ -194,13 +246,29 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             NUM_POINTS_PER_VOXEL: voxels_data.num_points[first_sample].int(),
         }
 
+    def precompute_rulebooks_stage(context: StageContext) -> Mapping[str, torch.Tensor]:
+        # The same coordinates the graph's convolutions will see, so the rulebooks are the
+        # ones its ImplicitGemm nodes were exported against; sorting follows the encoder's
+        # export setting for the same reason.
+        coords = encoder.conv_coords(_with_batch_column(context[COORS]))
+        return precompute_rulebooks(coords, 1, rulebook_stages, do_sort=encoder.export_do_sort)
+
     return (
         TorchStage(FETCH_VOXELS_STAGE, run=fetch_voxels),
+        TorchStage(PRECOMPUTE_RULEBOOKS_STAGE, run=precompute_rulebooks_stage),
         GraphStage(
             SPARSE_STAGE,
             module=BEVFusionSparseExportWrapper(model.pts_voxel_encoder, model.pts_middle_encoder),
-            inputs=(VOXELS, COORS, NUM_POINTS_PER_VOXEL),
+            inputs=(VOXELS, COORS, NUM_POINTS_PER_VOXEL, *rulebook_input_names(rulebook_stages)),
             outputs=(LIDAR_BEV,),
+            # Every input is indexed by a voxel count that varies per frame, so the axes
+            # belong to the graph rather than to a configuration.
+            onnx_dynamic_axes={
+                VOXELS: {0: VOXELS_NUM},
+                COORS: {0: VOXELS_NUM},
+                NUM_POINTS_PER_VOXEL: {0: VOXELS_NUM},
+                **rulebook_dynamic_axes(rulebook_stages),
+            },
             # The exported graph carries autoware::GetIndicePairsImplicitGemm /
             # autoware::ImplicitGemm custom ops. TensorRT executes them through
             # libautoware_tensorrt_plugins.so (deploy.tensorrt.plugin_libraries); ONNX
@@ -215,7 +283,14 @@ def build_bevfusion_lidar_stages(model: Any) -> tuple[Stage, ...]:
             # while the filters and features are already FP16 — the plugin's INT8 contract.
             onnx_transforms=(
                 fuse_sparse_graph,
-                partial(sparse_int8_transform, encoder=model.pts_middle_encoder),
+                partial(sparse_int8_transform, encoder=encoder),
+                # The runtime regenerates the rulebooks from this geometry; it is a fact of
+                # the exported graph, so it travels inside the file.
+                partial(
+                    embed_rulebook_metadata,
+                    stages=rulebook_stages,
+                    coors_permutation=encoder.coors_permutation,
+                ),
             ),
         ),
         GraphStage(
