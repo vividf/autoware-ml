@@ -49,6 +49,79 @@ deploy:
             min_shape: [1000]
             opt_shape: [80000]
             max_shape: [160000]
+          # Precomputed rulebooks of the four down-sampling convolutions
+          # (autoware_ml.ops.spconv.rulebook; names are rulebook/<indice_key>/<slot>).
+          # The dynamic dim is the stage's active-voxel count: never above the voxel
+          # budget, and shrinking with every stride-2 stage. opt = the mean count measured
+          # on j6gen2_base val frames (96k / 45k / 17k / 12k).
+          # spconv1: kernel volume 27
+          "rulebook/spconv1/out_indices":
+            min_shape: [1, 4]
+            opt_shape: [96000, 4]
+            max_shape: [160000, 4]
+          "rulebook/spconv1/pair_fwd":
+            min_shape: [27, 1]
+            opt_shape: [27, 96000]
+            max_shape: [27, 160000]
+          "rulebook/spconv1/pair_mask":
+            min_shape: [1, 1]
+            opt_shape: [96000, 1]
+            max_shape: [160000, 1]
+          "rulebook/spconv1/mask_argsort":
+            min_shape: [1]
+            opt_shape: [96000]
+            max_shape: [160000]
+          # spconv2: kernel volume 27
+          "rulebook/spconv2/out_indices":
+            min_shape: [1, 4]
+            opt_shape: [45000, 4]
+            max_shape: [160000, 4]
+          "rulebook/spconv2/pair_fwd":
+            min_shape: [27, 1]
+            opt_shape: [27, 45000]
+            max_shape: [27, 160000]
+          "rulebook/spconv2/pair_mask":
+            min_shape: [1, 1]
+            opt_shape: [45000, 1]
+            max_shape: [160000, 1]
+          "rulebook/spconv2/mask_argsort":
+            min_shape: [1]
+            opt_shape: [45000]
+            max_shape: [160000]
+          # spconv3: kernel volume 27
+          "rulebook/spconv3/out_indices":
+            min_shape: [1, 4]
+            opt_shape: [17000, 4]
+            max_shape: [160000, 4]
+          "rulebook/spconv3/pair_fwd":
+            min_shape: [27, 1]
+            opt_shape: [27, 17000]
+            max_shape: [27, 160000]
+          "rulebook/spconv3/pair_mask":
+            min_shape: [1, 1]
+            opt_shape: [17000, 1]
+            max_shape: [160000, 1]
+          "rulebook/spconv3/mask_argsort":
+            min_shape: [1]
+            opt_shape: [17000]
+            max_shape: [160000]
+          # spconv_down2: kernel volume 3
+          "rulebook/spconv_down2/out_indices":
+            min_shape: [1, 4]
+            opt_shape: [12000, 4]
+            max_shape: [160000, 4]
+          "rulebook/spconv_down2/pair_fwd":
+            min_shape: [3, 1]
+            opt_shape: [3, 12000]
+            max_shape: [3, 160000]
+          "rulebook/spconv_down2/pair_mask":
+            min_shape: [1, 1]
+            opt_shape: [12000, 1]
+            max_shape: [160000, 1]
+          "rulebook/spconv_down2/mask_argsort":
+            min_shape: [1]
+            opt_shape: [12000]
+            max_shape: [160000]
     bevfusion_dense:
       tensorrt:
         input_shapes:

@@ -20,7 +20,8 @@ encoding paths reused across lidar, camera, and fusion detectors.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -56,12 +57,33 @@ class LidarBEVFeatureExtractor(nn.Module):
         num_points: torch.Tensor,
         voxel_coords: torch.Tensor,
         batch_size: int | None = None,
+        precomputed_rulebooks: Mapping[str, Any] | None = None,
     ) -> torch.Tensor:
-        """Encode voxelized lidar inputs into BEV features."""
+        """Encode voxelized lidar inputs into BEV features.
+
+        Args:
+            voxels: Per-voxel point features.
+            num_points: Points per voxel.
+            voxel_coords: ``[batch, z, y, x]`` voxel coordinates.
+            batch_size: Number of samples; inferred from the coordinates when omitted.
+            precomputed_rulebooks: Rulebooks of the middle encoder's down-sampling layers
+                generated outside the graph (deployment only; see
+                :mod:`autoware_ml.ops.spconv.rulebook`). Passed through untouched.
+        """
         if batch_size is None:
             batch_size = infer_batch_size_from_voxel_coords(voxel_coords)
         pillar_features = self.pts_voxel_encoder(voxels, num_points, voxel_coords)
-        bev_features = self.pts_middle_encoder(pillar_features, voxel_coords, batch_size=batch_size)
+        middle_encoder_kwargs = (
+            {}
+            if precomputed_rulebooks is None
+            else {"precomputed_rulebooks": precomputed_rulebooks}
+        )
+        bev_features = self.pts_middle_encoder(
+            pillar_features,
+            voxel_coords,
+            batch_size=batch_size,
+            **middle_encoder_kwargs,
+        )
         if self.pts_backbone is not None:
             bev_features = self.pts_backbone(bev_features)
         if self.pts_neck is not None:

@@ -31,9 +31,12 @@ from autoware_ml.deployment.config import DeployConfig
 from autoware_ml.deployment.export import available_backends
 from autoware_ml.deployment.pipeline import StagedPipeline, _ModuleRunner
 from autoware_ml.deployment.stages import GraphStage, TorchStage, validate_stages
+from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
+from autoware_ml.ops.spconv.rulebook import rulebook_input_names
 from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
     DENSE_STAGE,
     LIDAR_BEV,
+    PRECOMPUTE_RULEBOOKS_STAGE,
     SPARSE_STAGE,
     build_bevfusion_lidar_stages,
     decode_packed_detections,
@@ -45,9 +48,19 @@ from autoware_ml.deployment import export as export_module
 
 
 def _stub_model() -> SimpleNamespace:
+    # The stage graph reads the sparse encoder's geometry (its down-sampling layers become
+    # precomputed-rulebook graph inputs), so that one submodule has to be the real class.
     return SimpleNamespace(
         pts_voxel_encoder=nn.Identity(),
-        pts_middle_encoder=nn.Identity(),
+        pts_middle_encoder=SparseEncoder(
+            in_channels=4,
+            sparse_shape=(16, 16, 8),
+            base_channels=4,
+            encoder_channels=((4, 4, 8), (8, 8)),
+            encoder_paddings=((1, 1, 1), (1, 1)),
+            output_channels=8,
+            dense_output_shapes=(16, 16, 1),
+        ).eval(),
         pts_backbone=nn.Identity(),
         pts_neck=nn.Identity(),
         bbox_head=nn.Identity(),
@@ -55,10 +68,16 @@ def _stub_model() -> SimpleNamespace:
 
 
 def test_declaration_is_valid_with_the_awml_split_abi() -> None:
-    stages = validate_stages(build_bevfusion_lidar_stages(_stub_model()))
-    sparse, dense = stages[1], stages[2]
+    model = _stub_model()
+    stages = validate_stages(build_bevfusion_lidar_stages(model))
+    sparse, dense = stages[2], stages[3]
+    assert stages[1].name == PRECOMPUTE_RULEBOOKS_STAGE
     assert sparse.name == SPARSE_STAGE and dense.name == DENSE_STAGE
-    assert sparse.inputs == ("voxels", "coors", "num_points_per_voxel")
+    # The voxel inputs first, then one rulebook (four tensors) per down-sampling layer,
+    # produced by the precompute stage — the graph has no data-dependent shape left.
+    assert sparse.inputs[:3] == ("voxels", "coors", "num_points_per_voxel")
+    assert sparse.inputs[3:] == rulebook_input_names(model.pts_middle_encoder.downsample_stages())
+    assert set(sparse.onnx_dynamic_axes) == set(sparse.inputs)
     assert sparse.outputs == (LIDAR_BEV,) and dense.inputs == (LIDAR_BEV,)
     assert dense.outputs == ("bbox_pred", "score", "label_pred")
     # TensorRT executes the sparse graph's plugin ops (deploy.tensorrt.plugin_libraries);

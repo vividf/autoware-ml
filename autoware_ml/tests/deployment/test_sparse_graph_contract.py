@@ -31,6 +31,7 @@ import inspect
 
 from torch import nn
 from autoware_ml.ops.spconv import sparse_functional
+from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
 from autoware_ml.models.detection3d.main_modules.bevfusion.stages import (
     SPARSE_STAGE,
     build_bevfusion_lidar_stages,
@@ -86,12 +87,22 @@ def test_implicit_gemm_emits_the_plugin_field_set() -> None:
 def test_the_sparse_stage_wires_the_bias_activation_fusion() -> None:
     """The fusion is only useful if the stage declaration actually runs it."""
 
+    # The stage graph reads the sparse encoder's down-sampling geometry (precomputed
+    # rulebooks are graph inputs), so that submodule is the real class; the rest are stubs.
     model = type(
         "Stub",
         (),
         {
             "pts_voxel_encoder": nn.Identity(),
-            "pts_middle_encoder": nn.Identity(),
+            "pts_middle_encoder": SparseEncoder(
+                in_channels=4,
+                sparse_shape=(16, 16, 8),
+                base_channels=4,
+                encoder_channels=((4, 4, 8), (8, 8)),
+                encoder_paddings=((1, 1, 1), (1, 1)),
+                output_channels=8,
+                dense_output_shapes=(16, 16, 1),
+            ).eval(),
             "pts_backbone": nn.Identity(),
             "pts_neck": nn.Identity(),
             "bbox_head": nn.Identity(),
