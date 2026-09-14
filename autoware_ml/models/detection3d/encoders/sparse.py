@@ -27,12 +27,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
+import logging
 
 import spconv.pytorch as spconv
 import torch
 import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential
+from spconv.pytorch.conv import SparseConvolution as SparseConvolutionBase
 from spconv.pytorch.modules import SparseModule
+from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
 
 from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
 from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
@@ -42,6 +45,8 @@ from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3
 # would be swapped in at ONNX-export time.
 SubMConv3d = spconv.SubMConv3d
 SparseConv3d = spconv.SparseConv3d
+
+logger = logging.getLogger(__name__)
 
 
 def _copy_sparse_convolution_weights(
@@ -56,7 +61,7 @@ def _copy_sparse_convolution_weights(
         target.bias.data.copy_(source.bias.data)
 
 
-def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
+def _convert_sparse_convolution(module: nn.Module, do_sort: bool) -> nn.Module:
     """Convert one native spconv layer into the export-aware equivalent."""
     if isinstance(module, SubMConv3d):
         converted = ExportableSubMConv3d(
@@ -74,6 +79,7 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     if isinstance(module, SparseConv3d):
@@ -97,19 +103,49 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     return module
 
 
-def _replace_sparse_convolutions(module: nn.Module) -> None:
+def _fuse_sparse_convolution_bn(module: nn.Module) -> int:
+    """Fold every adjacent (sparse convolution, BatchNorm1d) pair on an export copy.
+
+    Inference-identity rewrite: the deployed sparse graph carries no
+    BatchNormalization node, the same invariant the dense stages hold, and the
+    fold has to happen before the export wrappers are built so the wrapper is
+    constructed with the bias the fold introduces.
+
+    Args:
+        module: Export copy of the encoder, already in eval mode.
+
+    Returns:
+        Number of fused pairs.
+    """
+    fused = 0
+    for parent in list(module.modules()):
+        # `children` is a snapshot, so replacing a pair's members while scanning is safe:
+        # the folded convolution takes the left slot and an Identity the right one, and a
+        # folded convolution is never followed by another BatchNorm, so the overlapping
+        # pairs this walk produces cannot fold anything twice.
+        children = list(parent.named_children())
+        for (left_name, left), (right_name, right) in zip(children, children[1:]):
+            if isinstance(left, SparseConvolutionBase) and isinstance(right, nn.BatchNorm1d):
+                parent.add_module(left_name, fuse_spconv_bn_eval(left, right))
+                parent.add_module(right_name, nn.Identity())
+                fused += 1
+    return fused
+
+
+def _replace_sparse_convolutions(module: nn.Module, do_sort: bool) -> None:
     """Replace native sparse convolution children in-place on an export copy."""
     for name, child in list(module.named_children()):
-        converted = _convert_sparse_convolution(child)
+        converted = _convert_sparse_convolution(child, do_sort)
         if converted is not child:
             module.add_module(name, converted)
         else:
-            _replace_sparse_convolutions(child)
+            _replace_sparse_convolutions(child, do_sort)
 
 
 def _norm(channels: int, eps: float, momentum: float) -> nn.BatchNorm1d:
@@ -169,6 +205,15 @@ class SparseEncoder(nn.Module):
         dense_output_shapes: Dense output shape ``(Y, X, Z)`` after ``conv_out``.
         norm_eps: BatchNorm epsilon.
         norm_momentum: BatchNorm momentum.
+        export_do_sort: Whether the deployed graph's pair-mask generation argsorts its
+            result. Sorting improves memory locality without changing the pairing math,
+            so it is purely a latency trade-off and the answer is hardware-specific:
+            measured on this project's Blackwell workstation (BEVFusion j6gen2, 100
+            frames, FP16 dense + FP32 sparse), sorting is 0.44 ms/frame FASTER
+            (6.70 vs 7.13 ms), which is why it defaults on. Turning it off pays on other
+            targets — the reference deployment does exactly that — so measure before
+            changing it. Applies only to the export copy
+            (:meth:`prepare_for_export`); training always uses spconv's own default.
     """
 
     def __init__(
@@ -187,9 +232,11 @@ class SparseEncoder(nn.Module):
         dense_output_shapes: Sequence[int] = (180, 180, 2),
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
+        export_do_sort: bool = True,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
+        self.export_do_sort = export_do_sort
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
@@ -293,15 +340,34 @@ class SparseEncoder(nn.Module):
         dense = dense.permute(0, 4, 3, 1, 2).contiguous()
         return dense.view(batch_size, channels * depth, height, width)
 
-    def prepare_for_export(self) -> "SparseEncoder":
-        """Return an export-ready copy with sparse convolution wrappers.
+    def prepare_for_export(self) -> SparseEncoder:
+        """Return an export-ready copy with folded BN and sparse convolution wrappers.
 
         Returns:
-            Deep copy of the encoder with native spconv layers replaced by the
-            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`.
+            Deep copy of the encoder whose Conv-BN pairs are folded (inference
+            identity, so the exported graph is BatchNorm-free) and whose native
+            spconv layers are replaced by the deployment-aware wrappers from
+            :mod:`autoware_ml.ops.spconv`.
         """
-        encoder = deepcopy(self)
-        _replace_sparse_convolutions(encoder)
-        # eval() last: the freshly constructed export wrappers start in train
+        encoder = deepcopy(self).eval()
+        # Fold first: the fold gives each convolution a bias, which the wrapper
+        # below has to be constructed with.
+        fused = _fuse_sparse_convolution_bn(encoder)
+        # The fold pairs a convolution with the BatchNorm declared *next to* it. Insert
+        # anything between the two — or hang the norm one container deeper — and the pair
+        # stops matching, the fold silently skips it, and the exported graph keeps a
+        # BatchNormalization node no plugin will absorb. The invariant is cheap to state
+        # here, so state it here rather than only in the test.
+        remaining = [name for name, m in encoder.named_modules() if isinstance(m, nn.BatchNorm1d)]
+        if remaining:
+            raise RuntimeError(
+                f"{len(remaining)} BatchNorm1d layer(s) survived the export fold "
+                f"({fused} pair(s) folded): {remaining[:5]}. The deployed sparse graph must "
+                "carry no BatchNormalization node — a convolution and its norm must be "
+                "adjacent children of the same module for the fold to pair them."
+            )
+        logger.info("Folded %d sparse Conv-BN pair(s) into the export copy.", fused)
+        _replace_sparse_convolutions(encoder, self.export_do_sort)
+        # eval() again: the freshly constructed export wrappers start in train
         # mode and are inference-only.
         return encoder.eval()
