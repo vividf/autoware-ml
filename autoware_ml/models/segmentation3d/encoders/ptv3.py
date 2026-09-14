@@ -216,6 +216,10 @@ class PointSequential(PointModule):
     :class:`Point`, a sparse-convolution tensor, or a dense tensor.
     """
 
+    #: forward runs the registered children in order, so adjacent Conv+BN children are
+    #: a real pair (read by autoware_ml.quantization BN folding).
+    applies_children_in_order = True
+
     def __init__(self, *modules: nn.Module) -> None:
         """Initialize the sequential point-module container.
 

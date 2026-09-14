@@ -15,12 +15,35 @@ from torch import Tensor
 from autoware_ml.datamodule.multi_task.dataclasses.multi_task_samples import (
     MultiTaskGTSample,
 )
+from autoware_ml.datamodule.multi_task.dataclasses.segmentation3d import Segmentation3DGTSample
 from autoware_ml.datamodule.multi_task.dataclasses.transformation import LiDARTransformationSample
 from autoware_ml.geometry.points.base_points import BasePoints
 from autoware_ml.transforms.multi_task.base import MultiTaskBaseTransform
 from autoware_ml.transforms.geometry3d import rotation_matrix
 from autoware_ml.types.spatial import RotationAxis, BEVDirection
 from autoware_ml.types.geometry import TransformationName
+
+
+def _select_semantic_labels(
+    segmentation3d_gt_sample: Segmentation3DGTSample | None,
+    selection: torch.Tensor,
+) -> Segmentation3DGTSample | None:
+    """Apply a point selection (mask or permutation) to the point-wise targets.
+
+    Any transform that drops or reorders points must run its selection through here:
+    the labels are per point, so a selection applied to one and not the other silently
+    trains on mismatched targets.
+    """
+    if segmentation3d_gt_sample is None:
+        return None
+    labels = np.asarray(segmentation3d_gt_sample.gt_semantic_mask).reshape(-1)
+    index = selection.cpu().numpy()
+    if index.dtype == np.bool_ and index.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"Point selection covers {index.shape[0]} point(s) but there are "
+            f"{labels.shape[0]} label(s); targets are no longer aligned with the cloud."
+        )
+    return segmentation3d_gt_sample._replace(gt_semantic_mask=labels[index])
 
 
 class RotationScaleTranslationData(BaseModel):
@@ -281,12 +304,16 @@ class PointsRangeFilter(MultiTaskBaseTransform):
             return multi_task_gt_sample
 
         point_cloud_range_mask = point_cloud_data.in_range_3d(self.points_range)
+        segmentation3d_gt_sample = _select_semantic_labels(
+            multi_task_gt_sample.segmentation3d_gt_sample, point_cloud_range_mask
+        )
 
         # TODO(Kok Seang): Consider to make it immutable and return a new instance
         # instead of modifying in place.
-        # TODO(Kok Seang): Need to remove labels outside of range for 3D semantic segmentation.
         point_cloud_data.remove_points(point_cloud_range_mask)
-        return multi_task_gt_sample
+        return multi_task_gt_sample._replace(
+            segmentation3d_gt_sample=segmentation3d_gt_sample
+        )
 
 
 class PointsRandomShuffle(MultiTaskBaseTransform):
@@ -310,6 +337,9 @@ class PointsRandomShuffle(MultiTaskBaseTransform):
 
         # TODO(Kok Seang): Consider to make it immutable and return a new instance
         # instead of modifying in place.
-        # TODO(Kok Seang): Need to maintain the same order for 3D semantic segmentation.
-        point_cloud_data.shuffle()
-        return multi_task_gt_sample
+        shuffled_index = point_cloud_data.shuffle()
+        return multi_task_gt_sample._replace(
+            segmentation3d_gt_sample=_select_semantic_labels(
+                multi_task_gt_sample.segmentation3d_gt_sample, shuffled_index
+            )
+        )

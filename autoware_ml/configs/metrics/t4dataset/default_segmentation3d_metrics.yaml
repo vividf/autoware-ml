@@ -1,0 +1,9 @@
+- _target_: autoware_ml.metrics.segmentation3d.suite.Segmentation3DMetricSuite
+  components:
+    - { _target_: autoware_ml.metrics.segmentation3d.iou.IoU, stages: [val, test] }
+    - { _target_: autoware_ml.metrics.segmentation3d.accuracy.Accuracy, stages: [val, test] }
+    - { _target_: autoware_ml.metrics.segmentation3d.precision_recall_f1.PrecisionRecallF1, stages: [val, test] }
+  num_classes: ${segmentation3d.num_classes}
+  ignore_index: ${segmentation3d.ignore_index}
+  class_names: ${segmentation3d.class_names}
+  ranges: ${metric_ranges}
