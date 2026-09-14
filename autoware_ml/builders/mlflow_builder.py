@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 import os
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Iterator
 
 from hydra.core.hydra_config import HydraConfig
+from mlflow.entities import RunStatus
+from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig
 
 from autoware_ml.utils.mlflow_helpers import (
@@ -86,3 +89,31 @@ def build_mlflow_run_context(
 
     logger.info(f"MLflow run context built successfully with run context: {run_context}.")
     return run_context
+
+
+@contextmanager
+def mlflow_run_scope(run_context: MlflowRunContext | None) -> Iterator[MlflowClient | None]:
+    """Terminate the MLflow run FINISHED/FAILED around a stage body.
+
+    The one spelling of the run-termination boilerplate shared by the deploy and
+    quantize entrypoints: yields an ``MlflowClient`` bound to ``run_context``
+    (``None`` when logging is disabled), marks the run FAILED when the body raises,
+    FINISHED otherwise. Python-level interrupts (Ctrl+C, ``SystemExit``) terminate the
+    run KILLED — deploy and quantize are long jobs and are interrupted routinely, and a
+    run left RUNNING forever is indistinguishable on the tracking server from one still
+    working. An OS signal without a Python handler (plain SIGTERM) ends the process
+    before this branch runs, so it is not covered here.
+    """
+    if run_context is None:
+        yield None
+        return
+    client = MlflowClient(tracking_uri=run_context.tracking_uri)
+    try:
+        yield client
+    except Exception:
+        client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.FAILED))
+        raise
+    except BaseException:
+        client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.KILLED))
+        raise
+    client.set_terminated(run_context.run_id, status=RunStatus.to_string(RunStatus.FINISHED))

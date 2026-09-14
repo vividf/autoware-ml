@@ -77,6 +77,12 @@ def restrict_console_logging_to_rank_zero() -> None:
             handler.addFilter(RankZeroConsoleFilter())
 
 
+#: Hydra config-name prefix of the experiments config family. The experiment
+#: entrypoints (train/test/deploy/quantize) strip it from the Hydra config name to
+#: get the MLflow-facing experiment name.
+EXPERIMENT_CONFIG_NAME_PREFIX = "experiments/"
+
+
 def get_config_path() -> str:
     """Return the bundled Hydra config root path.
 
@@ -108,6 +114,15 @@ def resolve_work_dir() -> Path:
         Output directory assigned to the current Hydra job.
     """
     return Path(HydraConfig.get().runtime.output_dir)
+
+
+def validate_cuda_available() -> None:
+    """Ensure CUDA is available (deploy / quantize entrypoints require a GPU)."""
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. TensorRT requires CUDA. "
+            "Please run on a machine with CUDA support."
+        )
 
 
 def configure_torch_runtime() -> None:
