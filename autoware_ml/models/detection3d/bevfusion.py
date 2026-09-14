@@ -694,7 +694,7 @@ class BEVFusionDetectionModel(BaseModel):
         num_points_per_voxel = batch_inputs_dict["num_points"][first_sample].int()
         return voxels, coors, num_points_per_voxel
 
-    def _prepare_export_model(self) -> "BEVFusionDetectionModel":
+    def _prepare_export_model(self) -> BEVFusionDetectionModel:
         """Return an export-ready model copy with exportable submodules.
 
         Returns:
@@ -710,6 +710,7 @@ class BEVFusionDetectionModel(BaseModel):
             model.bbox_head = model.bbox_head.prepare_for_export()
         return model
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_specs(self, batch_inputs_dict: dict[str, Any]) -> dict[str, ExportSpec]:
         """Build the ONNX export specifications for the runtime-compatible ABI.
 
