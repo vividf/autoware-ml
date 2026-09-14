@@ -98,6 +98,11 @@ model:
     drop_path: 0.3
     pre_norm: true
     shuffle_orders: true
+    # Pair-mask sorting in the deployed graph: identical predictions either way, so this is
+    # a per-target latency choice. Measured here (300 frames, TensorRT): see
+    # work_dirs/reviews/spconv-int8-README.md — sorting costs a kernel inside
+    # GetIndicePairsImplicitGemm and buys the convolutions better gather locality.
+    export_do_sort: true
     enable_rpe: false
     enable_flash: true
     upcast_attention: false
@@ -122,6 +127,7 @@ model:
     pre_norm: ${model.encoder.pre_norm}
     enable_rpe: ${model.encoder.enable_rpe}
     enable_flash: ${model.encoder.enable_flash}
+    export_do_sort: ${model.encoder.export_do_sort}
     upcast_attention: ${model.encoder.upcast_attention}
     upcast_softmax: ${model.encoder.upcast_softmax}
     lovasz_weight: 1.0

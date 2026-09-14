@@ -81,6 +81,7 @@ class PTv3SegDecoderHead(nn.Module):
         dec_conv: Sequence[bool] | bool = True,
         dec_attn: Sequence[bool] | bool = True,
         dec_rope_base: Sequence[float | None] | float | None = None,
+        export_do_sort: bool = True,
     ) -> None:
         """Initialize the PTv3 segmentation decoder head.
 
@@ -111,12 +112,15 @@ class PTv3SegDecoderHead(nn.Module):
                 blocks, or one flag for every stage.
             dec_rope_base: Rotary-embedding frequency base, either one value for
                 every stage or one per stage. ``None`` disables RoPE.
+            export_do_sort: Pair-mask sorting of the deployed sparse convolutions; keep
+                it in step with the encoder's setting (the head's config mirrors it).
         """
         super().__init__()
         self.order = list(order)
         self.num_classes = int(num_classes)
         self.ignore_index = int(ignore_index)
         self.dec_depths = list(dec_depths)
+        self.export_do_sort = export_do_sort
         stage_count = len(enc_channels)
         decoder_stage_count = stage_count - 1
         self.dec_conv = expand_stage_flags(dec_conv, decoder_stage_count, True, "dec_conv")
@@ -231,7 +235,7 @@ class PTv3SegDecoderHead(nn.Module):
         """
         export_head = deepcopy_without_flash(self)
         export_head.set_serialization_order(order)
-        prepare_point_module_for_export(export_head)
+        prepare_point_module_for_export(export_head, self.export_do_sort)
         return export_head
 
 

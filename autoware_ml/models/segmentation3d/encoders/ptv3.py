@@ -62,11 +62,14 @@ def is_sparse_conv_module(module: nn.Module) -> bool:
     return spconv.modules.is_spconv_module(module) or isinstance(module, ExportableSubMConv3d)
 
 
-def replace_submconv3d_for_export(module: nn.Module) -> None:
+def replace_submconv3d_for_export(module: nn.Module, do_sort: bool = True) -> None:
     """Replace native ``spconv.SubMConv3d`` layers with exportable wrappers.
 
     Args:
         module: Module hierarchy traversed in-place.
+        do_sort: Whether the exported pair generation argsorts its pair masks. Sorting
+            costs a kernel in ``GetIndicePairsImplicitGemm`` and buys the convolution
+            better gather locality, so which side wins is a per-target measurement.
     """
     for name, child in list(module.named_children()):
         if isinstance(child, ExportableSubMConv3d):
@@ -99,9 +102,10 @@ def replace_submconv3d_for_export(module: nn.Module) -> None:
                 if key in exportable_child.state_dict()
             }
             exportable_child.load_state_dict(weights)
+            exportable_child.export_do_sort = do_sort
             module._modules[name] = exportable_child
             continue
-        replace_submconv3d_for_export(child)
+        replace_submconv3d_for_export(child, do_sort)
 
 
 class PointModule(nn.Module):
@@ -1130,14 +1134,16 @@ def set_block_serialization_order(stages: PointSequential, order_count: int) -> 
                 block_index += 1
 
 
-def prepare_point_module_for_export(module: nn.Module) -> None:
+def prepare_point_module_for_export(module: nn.Module, do_sort: bool = True) -> None:
     """Switch a PTv3 point-module hierarchy into export mode in place.
 
     Args:
         module: Module hierarchy whose attention, pooling, and sparse-conv
             children are reconfigured for ONNX export.
+        do_sort: Pair-mask sorting of the exported sparse convolutions
+            (see :func:`replace_submconv3d_for_export`).
     """
-    replace_submconv3d_for_export(module)
+    replace_submconv3d_for_export(module, do_sort)
     pooling_stage_index = 0
     for child in module.modules():
         if isinstance(child, SerializedAttention):
@@ -1207,6 +1213,7 @@ class PointTransformerV3Encoder(PointModule):
         enc_conv: Sequence[bool] | bool = True,
         enc_attn: Sequence[bool] | bool = True,
         enc_rope_base: Sequence[float | None] | float | None = None,
+        export_do_sort: bool = True,
     ) -> None:
         """Initialize the PTv3 encoder.
 
@@ -1226,6 +1233,9 @@ class PointTransformerV3Encoder(PointModule):
             drop_path: Stochastic-depth probability.
             pre_norm: Whether to apply pre-normalization.
             shuffle_orders: Whether to shuffle serialization orders.
+            export_do_sort: Whether the deployed graph's pair generation argsorts its
+                pair masks. Latency only — the detections are identical either way — and
+                which side wins is hardware-dependent, so re-measure per target.
             enable_rpe: Whether to use relative positional encoding.
             enable_flash: Whether to use flash attention.
             upcast_attention: Whether to upcast Q/K before attention.
@@ -1244,6 +1254,7 @@ class PointTransformerV3Encoder(PointModule):
         self.order = list(order)
         self.stride = list(stride)
         self.shuffle_orders = shuffle_orders
+        self.export_do_sort = export_do_sort
         self.enc_channels = list(enc_channels)
         stage_count = len(enc_depths)
         self.enc_conv = expand_stage_flags(enc_conv, stage_count, True, "enc_conv")
@@ -1331,7 +1342,7 @@ class PointTransformerV3Encoder(PointModule):
         export_encoder = deepcopy_without_flash(self)
         export_encoder.set_serialization_order(order)
         export_encoder.shuffle_orders = False
-        prepare_point_module_for_export(export_encoder)
+        prepare_point_module_for_export(export_encoder, self.export_do_sort)
         return export_encoder
 
     def export_forward(self, data_dict: dict[str, torch.Tensor]) -> Point:

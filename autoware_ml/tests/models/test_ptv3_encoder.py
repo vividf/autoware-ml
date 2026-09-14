@@ -131,6 +131,8 @@ def test_build_export_module_disables_flash_attention_without_mutating_live_enco
             super().__init__()
             self.order = ["hilbert"]
             self.shuffle_orders = True
+            # The borrowed prepare_for_export reads it, like shuffle_orders above.
+            self.export_do_sort = True
             self.attention = attention_module
 
         def set_serialization_order(self, order: tuple[str, ...]) -> None:
@@ -184,6 +186,8 @@ def test_prepare_for_export_handles_loaded_flash_attention_module() -> None:
             super().__init__()
             self.order = ["hilbert"]
             self.shuffle_orders = True
+            # The borrowed prepare_for_export reads it, like shuffle_orders above.
+            self.export_do_sort = True
             self.attention = attention_module
 
         def set_serialization_order(self, order: tuple[str, ...]) -> None:
