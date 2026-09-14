@@ -394,10 +394,11 @@ my_task/my_model/my_variant_my_dataset
 # Train
 autoware-ml train --config-name my_task/my_model/my_config
 
-# Deploy
+# Deploy (experiments/ configs only — the model must declare its stage graph, see
+# docs/user-guide/deployment.md)
 autoware-ml deploy \
-    --config-name my_task/my_model/my_config \
-    --weights mlruns/my_task/my_model/my_config/<run_id>/artifacts/checkpoints/last.ckpt
+    --config-name experiments/my_task/my_model/my_config \
+    --weights mlruns/<...>/artifacts/checkpoints/last.ckpt
 ```
 
 ## Common Patterns
