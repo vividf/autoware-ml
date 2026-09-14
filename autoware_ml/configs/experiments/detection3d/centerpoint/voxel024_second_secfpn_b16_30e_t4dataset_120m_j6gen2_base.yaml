@@ -3,7 +3,7 @@ defaults:
   - base
   - /database@database: t4dataset/t4dataset_j6gen2_base
   - /datamodule@datamodule: t4dataset/default_detection3d_datamodule
-  - /metrics/t4dataset@metric_ranges: default_detection3d_120m_metric_ranges
+  - /metrics/t4dataset@metric_ranges: default_120m_metric_ranges
   - _self_
 
 batch_size: 16
@@ -27,6 +27,17 @@ eval_class_range:
 trainer:
   max_epochs: 30
   check_val_every_n_epoch: 5
+
+deploy:
+  stages:
+    pts_backbone_neck_head:
+      tensorrt:
+        input_shapes:
+          # Static BEV canvas: (batch, pfn_channels, *pts_middle_encoder.output_shape).
+          spatial_features:
+            min_shape: [1, 32, 1020, 1020]
+            opt_shape: [1, 32, 1020, 1020]
+            max_shape: [1, 32, 1020, 1020]
 
 model:
   pts_middle_encoder:

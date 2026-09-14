@@ -106,6 +106,7 @@ class CalibrationStatusClassifier(BaseModel):
         """
         return self.head.loss(outputs, batch_inputs_dict["gt_calibration_status"])
 
+    # TODO(vividf): legacy ExportSpec export path — migrate this model to MultiTaskBaseModel.build_stages() (stage-graph export).
     def build_export_spec(self, batch_inputs_dict: Mapping[str, Any]) -> ExportSpec:
         """Build a calibration-status-specific export specification.
 

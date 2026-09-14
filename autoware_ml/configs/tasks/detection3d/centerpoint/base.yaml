@@ -77,7 +77,7 @@ trainer:
 deploy:
   onnx:
     dynamo: false
-    opset_version: 17
+    opset_version: 19
     do_constant_folding: false
     modules:
       pts_voxel_encoder_centerpoint:
