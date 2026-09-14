@@ -1,0 +1,56 @@
+# @package _global_
+# INT8 (Q/DQ explicit quantization) variant of the j6gen2_base BEVFusion-lidar experiment.
+#
+# Produce the quantized checkpoint, then deploy it (export + evaluate). The checkpoint
+# describes its own quantization, so deploy/test read no quantization config:
+#
+#   autoware-ml quantize \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8 \
+#     --weights <FP checkpoint>
+#   autoware-ml deploy \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_int8 \
+#     --weights <ptq.ckpt produced by the quantize run>
+#
+# Only the dense graph quantizes (backbone / neck / head Conv2d); the sparse stage's
+# INT8 form is the libspconv engine from the dedicated exporter (module TODO in
+# main_modules/bevfusion/stages.py). Engines build strongly typed; the non-quantized
+# graph regions inherit deploy.onnx.precision: fp16 from base.yaml (AutoCast).
+defaults:
+  - lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base
+  - _self_
+
+experiment_name: lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_int8
+
+# The INT8 variants exist to produce deployment artifacts and numbers: build the
+# engine and evaluate by default. Verification stays disabled — BEVFusion's packed
+# outputs are proposal-selection variant (see base.yaml); mAP equality is the gate.
+deploy:
+  tensorrt:
+    enabled: true
+  evaluation:
+    enabled: true
+
+quantization:
+  enabled: true
+  mode: ptq
+  fuse_bn: true
+  default_precision: int8
+  # Keep the validated conv-only INT8 tree: the model rules also pin the decoder FFN
+  # linears to FP8 (see the *_fp8 experiment); this recipe measures INT8 convolutions.
+  # The two input-side blocks stay FP16: the per-block sensitivity sweep (2026-09-04,
+  # work_dirs/reviews/quant-sensitivity-bevfusion.md) charges them -2.2 / -1.8 mAP alone
+  # while every other block is within +-0.1; with both skipped the 100-frame TRT mAP is
+  # 0.4513 (FP16 0.4512, all-conv INT8 0.4217) and the dense stage runs 1.60 ms
+  # (FP16 1.77, all-conv INT8 1.44).
+  skip_quantize:
+    - bbox_head.decoder
+    - pts_neck.blocks.0
+    - pts_backbone.blocks.0
+  # Reference recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+  # `calibration: {method: mse|entropy|percentile|max|smoothquant}` picks the amax
+  # algorithm (default mse); see CalibrationConfig.
+  ptq:
+    calibrate_samples: 400
+    batch_size: 1
+    calib_seed: 0
+    calib_shuffle: false

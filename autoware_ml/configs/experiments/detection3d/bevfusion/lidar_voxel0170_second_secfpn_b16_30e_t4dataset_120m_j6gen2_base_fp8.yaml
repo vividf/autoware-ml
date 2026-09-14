@@ -1,0 +1,51 @@
+# @package _global_
+# FP8 (E4M3 Q/DQ) variant: decoder FFN Linear layers only, everything else FP16.
+#
+# Positioning is accuracy, not latency (see the PTv3 FP8 experiment: INT8 PTQ cost
+# 6.4 mIoU on linears, FP8 PTQ held within 0.4). This isolates the FP8-linear effect on
+# a detection head: every conv subtree is skipped, so the only quantized modules are
+# the decoder FFN's two Linears — the head's attention projections are structurally
+# unreachable at calibration time (packed nn.MultiheadAttention parameters; the
+# export-form q/k/v/out_proj Linears exist only after prepare_for_export).
+#
+#   autoware-ml quantize \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_fp8 \
+#     --weights <FP checkpoint>
+#   autoware-ml deploy \
+#     --config-name experiments/detection3d/bevfusion/lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base_fp8 \
+#     --weights <ptq.ckpt produced by the quantize run>
+defaults:
+  - lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_j6gen2_base
+  - _self_
+
+experiment_name: lidar_voxel0170_second_secfpn_b16_30e_t4dataset_120m_fp8
+
+deploy:
+  tensorrt:
+    enabled: true
+  evaluation:
+    enabled: true
+    backends:
+      # ONNX Runtime has no implementation of modelopt's FP8 spelling (trt-domain
+      # TRT_FP8QuantizeLinear custom ops) and fails to even load the graph.
+      onnx: { enabled: false, device: cuda }
+
+quantization:
+  enabled: true
+  mode: ptq
+  fuse_bn: true
+  # The FFN linears are pinned fp8 by the model rules regardless; the default only
+  # governs the conv kinds, all of which this experiment skips.
+  default_precision: fp8
+  skip_quantize:
+    - pts_backbone
+    - pts_neck
+    - bbox_head.shared_conv
+    - bbox_head.heatmap_head
+  # Same calibration set as the INT8 reference recipe; FP8 amax comes from the max
+  # calibrator (E4M3 convention), not histogram+MSE.
+  ptq:
+    calibrate_samples: 400
+    batch_size: 1
+    calib_seed: 0
+    calib_shuffle: false
