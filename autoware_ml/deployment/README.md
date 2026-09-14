@@ -39,7 +39,10 @@ evaluate    三個 backend 各跑一次完整 metric(mAP/mIoU)+ 每 stage latenc
   `name / module / inputs / outputs`,inputs/outputs 的名字**就是** ONNX 的 IO 名,
   值從 `StageContext`(一個跨 stage 的 name→tensor 字典)取放。
 - **`TorchStage`**:不可匯出的膠水(前處理、voxelize、scatter……),永遠跑 PyTorch,
-  簽名 `fn(context) -> {name: value}`。
+  簽名 `fn(context) -> {name: value}`。它也是把 **data-dependent shape 移出圖外**的工具:
+  BEVFusion 的 `precompute_rulebooks` stage 先算好四個下採樣 sparse conv 的 rulebook 當
+  graph input 餵進去,圖裡就沒有 TensorRT 需要 host 同步的 `[trainStation]` 區段
+  (`autoware_ml/ops/spconv/rulebook.py`)。
 
 為什麼要拆:因為真實模型不是一張圖——中間有 sparse conv(需要 plugin)、有動態
 shape 的索引計算、有根本不該進圖的預處理。stage graph 把「哪裡可以是圖、哪裡必須是

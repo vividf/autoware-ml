@@ -53,15 +53,10 @@ deploy:
   # falls back to torch) and bevfusion_dense.
   stages:
     bevfusion_sparse:
-      onnx:
-        # The runtime voxelizes each frame independently, so the voxel count is a
-        # runtime property and must stay dynamic in the artifact.
-        dynamic_axes:
-          voxels: { 0: voxels_num }
-          coors: { 0: voxels_num }
-          num_points_per_voxel: { 0: voxels_num }
-      # The sparse stage's TensorRT profile also depends on the voxel budget and on
-      # the rulebook inputs the spconv plugin adds, so it is configured per variant.
+      # Dynamic axes are declared by the stage graph (main_modules/bevfusion/stages.py):
+      # every input — the voxels and the precomputed rulebooks alike — is indexed by a
+      # per-frame count, which is a fact of the graph, not a configuration choice.
+      # The TensorRT profile depends on the voxel budget and is configured per variant.
     bevfusion_dense:
       onnx:
         # Single-sample static graph: lidar_bev in, packed detections out.
