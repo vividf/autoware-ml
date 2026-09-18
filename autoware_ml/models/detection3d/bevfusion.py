@@ -21,14 +21,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
+from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, TorchStage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.base import BaseModel
@@ -36,6 +38,17 @@ from autoware_ml.models.detection3d.feature_extractors import (
     LidarBEVFeatureExtractor,
     MultiviewImageFeatureExtractor,
 )
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
+from autoware_ml.ops.spconv.rulebook import (
+    embed_rulebook_metadata,
+    precompute_rulebooks,
+    rulebook_dynamic_axes,
+    rulebook_indice_data,
+    rulebook_input_names,
+)
+from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
 
@@ -91,6 +104,56 @@ def _export_detection_outputs(
         dim=0,
     )
     return bbox_pred, score, query_labels[0]
+
+
+def decode_packed_detections(
+    bbox_head: Any, outputs: Mapping[str, torch.Tensor]
+) -> list[dict[str, torch.Tensor]]:
+    """Turn the deployed graph's packed tensors into the head's detection dicts.
+
+    Only the unpacking is deployment-specific. The graph already fused the per-proposal
+    score and picked the winning label (:func:`_export_detection_outputs`), so the class
+    scores are re-scattered into the per-class layout the head's post-processing expects,
+    and that post-processing — metric-space decoding, score and range filtering, NMS — is
+    the head's own :meth:`TransFusionHead.decode_detections`, not a copy of it.
+
+    Args:
+        bbox_head: The model's detection head, providing the post-processing.
+        outputs: ``bbox_pred`` / ``score`` / ``label_pred`` of one sample.
+
+    Returns:
+        One ``{bboxes_3d, scores_3d, labels_3d}`` dict, matching the head's own return.
+    """
+    bbox_pred = outputs["bbox_pred"]
+    scores = outputs["score"]
+    labels = outputs["label_pred"].long()
+    num_proposals = scores.shape[0]
+    score_matrix = bbox_pred.new_zeros((1, bbox_head.num_classes, num_proposals))
+    score_matrix[0, labels, torch.arange(num_proposals, device=bbox_pred.device)] = scores
+    return bbox_head.decode_detections(
+        score_matrix,
+        bbox_pred[6:8].unsqueeze(0),
+        bbox_pred[3:6].unsqueeze(0),
+        bbox_pred[0:2].unsqueeze(0),
+        bbox_pred[2:3].unsqueeze(0),
+        bbox_pred[8:10].unsqueeze(0),
+    )
+
+
+#: BEVFusion's quantization declaration. The dense towers quantize with Q/DQ; the sparse
+#: middle encoder quantizes as the ``spconv`` kind — its layers deploy as
+#: ``autoware::ImplicitGemm`` plugin nodes carrying per-layer INT8 scales rather than Q/DQ
+#: (the plugin has no FP8 path, so the kind is pinned INT8 rather than following
+#: ``default_precision``). The decoder's Linear layers are pinned FP8: INT8 linears cost
+#: accuracy for nothing while E4M3 held it. The pillar encoder has no weights to quantize.
+BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "pts_middle_encoder": {"spconv": "int8"},
+        "pts_backbone": ("conv",),
+        "pts_neck": ("conv",),
+        "bbox_head": {"conv": None, "linear": "fp8"},
+    },
+)
 
 
 class _BEVFusionExportWrapper(nn.Module):
@@ -209,6 +272,7 @@ class _BEVFusionLidarExportWrapper(nn.Module):
         voxels: torch.Tensor,
         coors: torch.Tensor,
         num_points_per_voxel: torch.Tensor,
+        *rulebooks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run export-time inference on lidar voxel inputs.
 
@@ -220,11 +284,28 @@ class _BEVFusionLidarExportWrapper(nn.Module):
         Returns:
             Tuple of ``bbox_pred``, ``score``, and ``label_pred``.
         """
+        precomputed = None
+        if rulebooks:
+            # Rulebooks of the down-sampling layers, computed by the glue stage from the
+            # same coordinates (autoware_ml.ops.spconv.rulebook); their order is the
+            # encoder's down-sampling order.
+            stages = self.model.pts_middle_encoder.downsample_stages()
+            names = rulebook_input_names(stages)
+            if len(rulebooks) != len(names):
+                raise ValueError(
+                    f"BEVFusion lidar graph expects {len(names)} rulebook input(s), "
+                    f"got {len(rulebooks)}."
+                )
+            tensors = dict(zip(names, rulebooks))
+            precomputed = {
+                stage.indice_key: rulebook_indice_data(stage, tensors) for stage in stages
+            }
         outputs = self.model._forward_with_batch_size(
             voxels=voxels,
             num_points=num_points_per_voxel,
             voxel_coords=_runtime_coors_to_voxel_coords(coors),
             batch_size=1,
+            precomputed_rulebooks=precomputed,
         )
         return _export_detection_outputs(self.model.bbox_head, outputs)
 
@@ -235,6 +316,16 @@ class BEVFusionDetectionModel(BaseModel):
     The model fuses image and lidar features in BEV space and exposes the
     shared Autoware-ML training, prediction, and export interfaces.
     """
+
+    #: Cross-backend comparison of the packed graph outputs is meaningless by construction:
+    #: the graph selects the top-num_proposals queries, and the zero-padded heatmap borders
+    #: produce mass ties, so backends legitimately pick different near-zero-score proposals
+    #: (high-score proposals align to 0.038 while the positional bbox_pred diff is 159).
+    #: Per-backend evaluation (deploy.evaluation) is the gate.
+    verification_caveat = (
+        "the graph's top-k proposal selection makes the packed outputs positionally "
+        "incomparable across backends; compare per-backend metrics instead."
+    )
 
     def __init__(
         self,
@@ -342,6 +433,7 @@ class BEVFusionDetectionModel(BaseModel):
         num_points: torch.Tensor,
         voxel_coords: torch.Tensor,
         batch_size: int | None = None,
+        precomputed_rulebooks: Mapping[str, Any] | None = None,
     ) -> torch.Tensor:
         """Encode lidar voxels into a BEV feature map.
 
@@ -356,7 +448,13 @@ class BEVFusionDetectionModel(BaseModel):
         """
         if self.lidar_feature_extractor is None:
             raise ValueError("Lidar branch is not configured.")
-        return self.lidar_feature_extractor(voxels, num_points, voxel_coords, batch_size=batch_size)
+        return self.lidar_feature_extractor(
+            voxels,
+            num_points,
+            voxel_coords,
+            batch_size=batch_size,
+            precomputed_rulebooks=precomputed_rulebooks,
+        )
 
     def _build_image_bev(
         self,
@@ -522,6 +620,7 @@ class BEVFusionDetectionModel(BaseModel):
         lidar2cam: Sequence[torch.Tensor] | None = None,
         batch_size: int | None = None,
         image_bev: torch.Tensor | None = None,
+        precomputed_rulebooks: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, torch.Tensor]:
         """Run the configured BEV branches and dense head.
@@ -549,7 +648,13 @@ class BEVFusionDetectionModel(BaseModel):
             if batch_size is None:
                 batch_size = infer_batch_size_from_voxel_coords(voxel_coords)
             bev_features.append(
-                self._build_lidar_bev(voxels, num_points, voxel_coords, batch_size=batch_size)
+                self._build_lidar_bev(
+                    voxels,
+                    num_points,
+                    voxel_coords,
+                    batch_size=batch_size,
+                    precomputed_rulebooks=precomputed_rulebooks,
+                )
             )
 
         if image_bev is not None:
@@ -656,8 +761,104 @@ class BEVFusionDetectionModel(BaseModel):
         return self.bbox_head.predict(outputs)
 
     def build_eval_output(self, batch: Mapping[str, Any], outputs: Any) -> dict[str, Any]:
-        """Decode detections and pair them with ground truth for metrics."""
+        """Decode detections and pair them with ground truth for metrics.
+
+        ``outputs`` is the head's dict from ``forward()``, or — on a deployment backend —
+        the packed ``bbox_pred`` / ``score`` / ``label_pred`` the exported graph emits,
+        which decode through the same head post-processing.
+        """
+        if "bbox_pred" in outputs and "heatmap" not in outputs:
+            return detection_eval_output(decode_packed_detections(self.bbox_head, outputs), batch)
         return detection_eval_output(self.bbox_head.predict(outputs), batch)
+
+    def build_quantization_rules(self) -> QuantRules:
+        """BEVFusion's quantizable towers (see :data:`BEVFUSION_LIDAR_QUANT_RULES`)."""
+        return BEVFUSION_LIDAR_QUANT_RULES
+
+    def build_stages(self) -> Sequence[Stage] | None:
+        """Declare the deployed lidar-only BEVFusion; camera-lidar keeps its export specs.
+
+        ::
+
+            fetch_voxels (torch) [-> precompute_rulebooks (torch)] -> bevfusion_lidar (graph)
+
+        The single ``bevfusion_lidar`` graph is the module the runtime loads, unchanged
+        in name and I/O. Its ONNX carries ``autoware::`` plugin ops (the sparse encoder),
+        which TensorRT executes through ``deploy.tensorrt.plugin_libraries`` and ONNX
+        Runtime cannot run, so only that backend falls back to PyTorch. The graph is
+        single-sample. When the middle encoder sets ``export_precompute_rulebooks``, the
+        rulebooks of its down-sampling layers become extra graph inputs computed by a
+        glue stage from the frame's voxel coordinates, so the graph carries no
+        data-dependent shape (:mod:`autoware_ml.ops.spconv.rulebook`).
+
+        Returns:
+            The stages for a lidar-only model, ``None`` for camera-lidar (its two-graph
+            export keeps the hand-written :meth:`build_export_specs`).
+        """
+        if self.view_transform is not None:
+            return None
+        encoder = self.pts_middle_encoder
+        precompute = bool(getattr(encoder, "export_precompute_rulebooks", False))
+        rulebook_stages = encoder.downsample_stages() if precompute else ()
+
+        def fetch_voxels(context: StageContext) -> Mapping[str, torch.Tensor]:
+            batch = context.batch
+            batch_size = infer_batch_size_from_voxel_coords(batch["voxel_coords"])
+            if batch_size != 1:
+                raise ValueError(
+                    "BEVFusion's deployed graph is single-sample, but the batch holds "
+                    f"{batch_size} samples. Deploy with batch_size=1."
+                )
+            voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(batch)
+            return {"voxels": voxels, "coors": coors, "num_points_per_voxel": num_points_per_voxel}
+
+        def precompute_rulebooks_stage(context: StageContext) -> Mapping[str, torch.Tensor]:
+            coords = encoder.conv_coords(_runtime_coors_to_voxel_coords(context["coors"]))
+            return precompute_rulebooks(coords, 1, rulebook_stages, do_sort=encoder.export_do_sort)
+
+        transforms: list = [
+            fuse_sparse_graph,
+            # No-op unless the checkpoint carries calibrated sparse quantizers.
+            partial(sparse_int8_transform, module=encoder),
+        ]
+        if precompute:
+            transforms.append(
+                partial(
+                    embed_rulebook_metadata,
+                    stages=rulebook_stages,
+                    coors_permutation=encoder.coors_permutation,
+                )
+            )
+        stages: list[Stage] = [TorchStage("fetch_voxels", run=fetch_voxels)]
+        if precompute:
+            stages.append(TorchStage("precompute_rulebooks", run=precompute_rulebooks_stage))
+        stages.append(
+            GraphStage(
+                "bevfusion_lidar",
+                module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
+                inputs=(
+                    "voxels",
+                    "coors",
+                    "num_points_per_voxel",
+                    *rulebook_input_names(rulebook_stages),
+                ),
+                outputs=("bbox_pred", "score", "label_pred"),
+                output_fields=(
+                    ("bbox_pred", "bbox_pred"),
+                    ("score", "score"),
+                    ("label_pred", "label_pred"),
+                ),
+                onnx_dynamic_axes={
+                    "voxels": {0: "voxels_num"},
+                    "coors": {0: "voxels_num"},
+                    "num_points_per_voxel": {0: "voxels_num"},
+                    **rulebook_dynamic_axes(rulebook_stages),
+                },
+                torch_fallback_backends=(Backend.ONNX,),
+                onnx_transforms=tuple(transforms),
+            )
+        )
+        return tuple(stages)
 
     def get_log_batch_size(self, batch_inputs_dict: dict[str, Any]) -> int | None:
         """Log the sample count for fusion detection batches."""
@@ -694,7 +895,7 @@ class BEVFusionDetectionModel(BaseModel):
         num_points_per_voxel = batch_inputs_dict["num_points"][first_sample].int()
         return voxels, coors, num_points_per_voxel
 
-    def _prepare_export_model(self) -> "BEVFusionDetectionModel":
+    def _prepare_export_model(self) -> BEVFusionDetectionModel:
         """Return an export-ready model copy with exportable submodules.
 
         Returns:
@@ -724,17 +925,12 @@ class BEVFusionDetectionModel(BaseModel):
         Returns:
             Ordered mapping of module name to export specification.
         """
+        if self.view_transform is None:
+            # The lidar-only export is derived from the stage graph (BaseModel default).
+            return super().build_export_specs(batch_inputs_dict)
+
         voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(batch_inputs_dict)
         export_model = self._prepare_export_model()
-
-        if self.view_transform is None:
-            return {
-                "bevfusion_lidar": ExportSpec(
-                    module=_BEVFusionLidarExportWrapper(export_model),
-                    args=(voxels, coors, num_points_per_voxel),
-                    input_param_names=["voxels", "coors", "num_points_per_voxel"],
-                )
-            }
 
         img = torch.stack(batch_inputs_dict["img"], dim=0).float()[:1]
         camera_intrinsics = torch.stack(batch_inputs_dict["camera_intrinsics"], dim=0).float()[:1]
