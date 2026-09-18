@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import inspect
 import logging
 from pathlib import Path
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import lightning as L
@@ -49,6 +50,11 @@ class ExportSpec:
         dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
             the export arguments. Used only when exporting with ``dynamo=False``.
         supported_stages: Export stages supported by this specification.
+        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
+            after the export and before any config-driven graph modifier or precision
+            cast (each takes the path and returns the path it wrote). A stage graph
+            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`
+            (fusing sparse-conv plugin nodes, stamping INT8 plugin scales).
     """
 
     module: torch.nn.Module
@@ -57,6 +63,27 @@ class ExportSpec:
     output_names: list[str] | None = None
     dynamic_axes: dict[str, dict[int, str]] | None = None
     supported_stages: frozenset[str] = frozenset({"onnx", "tensorrt"})
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
+
+    Args:
+        onnx_path: The freshly exported ``.onnx``.
+        transforms: Callables taking the current path and returning the path they wrote
+            (usually the same file, rewritten in place).
+
+    Returns:
+        The path the last transform returned (``onnx_path`` when there is none).
+    """
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
 
 def validate_cuda_available() -> None:
@@ -341,6 +368,13 @@ def export_to_onnx(
         raise ValueError("Model forward signature has no parameters.")
 
     dynamo = onnx_cfg.get("dynamo", True)
+    if dynamo and dynamic_axes_override:
+        raise ValueError(
+            "The export spec declares dynamic_axes (a stage graph's onnx_dynamic_axes or a "
+            "hand-written spec) but deploy.onnx.dynamo=true ignores them and would export a "
+            "static graph. Set deploy.onnx.dynamo=false for this module, or express the axes "
+            "as deploy.onnx.dynamic_shapes."
+        )
     dynamic_shapes = build_dynamic_shapes(onnx_cfg, input_param_names) if dynamo else None
     dynamic_shapes = normalize_dynamic_shapes_for_model(model, dynamic_shapes) if dynamo else None
     dynamic_axes = None
