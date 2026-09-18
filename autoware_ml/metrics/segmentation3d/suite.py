@@ -28,6 +28,7 @@ class Segmentation3DConfusionMatrixMetricSuite(MetricSuite[ConfusionState]):
 
     prefix = "seg3d"
     _required_keys = ("seg_frames",)
+    headline_metrics = ("mIoU", "fwIoU")
 
     def __init__(
         self,

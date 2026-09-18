@@ -22,7 +22,7 @@ and only for models that declare a stage graph:
 
     deploy:
       verification: { enabled, tolerance, num_verify_batches, scenarios }
-      evaluation:   { enabled, split, num_samples, num_warmup,
+      evaluation:   { enabled, split, num_samples, num_warmup, cpu_threads,
                       backends: { <backend>: { enabled, device } } }
 
 Every mapping rejects unknown keys: a misspelled option would otherwise silently fall
@@ -104,9 +104,21 @@ class EvaluationConfig:
     num_samples: int = -1
     #: Extra re-runs of the first batch that prime the GPU / TensorRT (discarded).
     num_warmup: int = 2
+    #: CPU worker threads the process may use while a backend is evaluated: PyTorch's
+    #: intra-op pool and the BLAS / OpenMP pools threadpoolctl knows (numpy's OpenBLAS).
+    #: 0 keeps the process defaults. The graph latency of a TensorRT engine with
+    #: data-dependent shapes (sparse convolutions) is host-sensitive: its shape-sync points
+    #: wait on the host thread, and the ~30 OpenBLAS workers a preceding numpy op
+    #: (preprocessing, metrics) leaves busy-waiting double the measured engine time
+    #: (BEVFusion j6gen2, 2026-09-24: 10-13 ms with the defaults vs 5.5 ms with one
+    #: thread, the standalone engine figure). One thread makes CPU metrics slower and
+    #: the latency numbers right.
+    cpu_threads: int = 1
     backends: Mapping[Backend, BackendEvaluationConfig] = field(default_factory=dict)
 
-    KNOWN_KEYS = frozenset({"enabled", "split", "num_samples", "num_warmup", "backends"})
+    KNOWN_KEYS = frozenset(
+        {"enabled", "split", "num_samples", "num_warmup", "cpu_threads", "backends"}
+    )
 
     @classmethod
     def from_dict(cls, raw: Any) -> EvaluationConfig:
@@ -121,6 +133,7 @@ class EvaluationConfig:
             split=split,
             num_samples=int(raw.get("num_samples", -1)),
             num_warmup=int(raw.get("num_warmup", 2)),
+            cpu_threads=int(raw.get("cpu_threads", 1)),
             backends={
                 Backend.parse(name): BackendEvaluationConfig.from_dict(cfg, name)
                 for name, cfg in backends.items()

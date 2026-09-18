@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.metrics.base import EvalStage, MetricSuite
 
@@ -88,6 +88,24 @@ class MetricEvalMixin:
 
     def _stage_metrics(self, stage: EvalStage) -> nn.ModuleList:
         return self._metrics_by_stage[stage.value]
+
+    def clone_metrics(self, stage: EvalStage) -> list[MetricSuite]:
+        """Fresh, reset clones of the suites that report at ``stage``.
+
+        Deployment evaluation scores several backends on the same split and needs one
+        independent accumulator per backend; the model's own per-stage suites keep
+        serving the Lightning lifecycle untouched.
+
+        Args:
+            stage: Evaluation stage whose suites to clone.
+
+        Returns:
+            Suites bound to ``stage`` with empty state.
+        """
+        clones = [self._stage_clone(metric, stage) for metric in self._stage_metrics(stage)]
+        for clone in clones:
+            clone.reset()
+        return clones
 
     def on_validation_epoch_start(self) -> None:
         """Reset the validation metric state for a fresh epoch."""

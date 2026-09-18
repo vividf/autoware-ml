@@ -24,3 +24,20 @@ deploy:
     num_verify_batches: 1
     # - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda } }
     scenarios: []
+  # Per-backend ground-truth metrics + latency on the test split. PyTorch is a backend
+  # like the others; keys land under {split}/{backend}/{prefix}/{metric}.
+  evaluation:
+    enabled: false
+    # test (default) or val — for when the test split is unavailable or held back.
+    split: test
+    num_samples: -1
+    num_warmup: 2
+    # CPU worker threads (torch intra-op + BLAS / OpenMP pools) during evaluation; 0 keeps
+    # the process defaults. Kept at 1 so busy-waiting OpenBLAS workers from numpy
+    # preprocessing / metrics do not inflate the measured TensorRT time of graphs with
+    # data-dependent shapes (see EvaluationConfig.cpu_threads).
+    cpu_threads: 1
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
