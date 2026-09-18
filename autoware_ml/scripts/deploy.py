@@ -18,6 +18,7 @@ This script wires Hydra configuration, Lightning runtime setup, MLflow
 integration, and model deployment execution.
 """
 
+from collections.abc import Callable
 import logging
 from types import MappingProxyType
 
@@ -75,6 +76,7 @@ def deploy(
     release: str | None,
     tracker: str | None = None,
     run_id: str | None = None,
+    log_metric: Callable[[str, float], None] | None = None,
 ) -> None:
     """Deploy the trained model for inference.
 
@@ -88,6 +90,8 @@ def deploy(
             for an unversioned export.
         tracker: Active experiment tracker name recorded in the stamp, if any.
         run_id: Deploy run id recorded in the stamp, if any.
+        log_metric: Receives every post-export evaluation metric and mean latency
+            (``key``, ``value``), for the deploy run's tracker; ``None`` logs nothing.
     """
     deployment_exporter = DeploymentExport(
         deploy_cfg=deploy_cfg,
@@ -101,8 +105,8 @@ def deploy(
     )
     export_outputs = deployment_exporter.export()
 
-    # Post-export steps (opt-in, stage-graph models only): cross-backend
-    # verification of the exported artifacts against the PyTorch reference.
+    # Post-export steps (opt-in, stage-graph models only): cross-backend verification
+    # of the exported artifacts and per-backend evaluation against ground truth.
     run_post_export(
         deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
         model=model,
@@ -110,6 +114,7 @@ def deploy(
         output_dir=output_dir,
         device=deployment_exporter.device,
         onnx_paths=export_outputs.onnx_paths_by_module,
+        log_metric=log_metric,
     )
     logger.info("Deployment completed successfully.")
     for path in export_outputs.onnx_exported_paths:
@@ -304,6 +309,9 @@ def _export(
         enforce_full_coverage=True,
     )
 
+    mlflow_client = (
+        MlflowClient(tracking_uri=run_context.tracking_uri) if run_context is not None else None
+    )
     deploy(
         deploy_cfg=cfg.deploy,
         output_dir=output_dir,
@@ -313,6 +321,11 @@ def _export(
         release=release,
         tracker="mlflow" if run_context is not None else None,
         run_id=run_context.run_id if run_context is not None else None,
+        log_metric=(
+            (lambda key, value: mlflow_client.log_metric(run_context.run_id, key, value))
+            if mlflow_client is not None and run_context is not None
+            else None
+        ),
     )
 
 

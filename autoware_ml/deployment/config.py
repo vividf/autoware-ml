@@ -22,7 +22,7 @@ and only for models that declare a stage graph:
 
     deploy:
       verification: { enabled, tolerance, num_verify_batches, scenarios }
-      evaluation:   { enabled, split, num_samples, num_warmup,
+      evaluation:   { enabled, split, num_samples, num_warmup, batch_size, cpu_threads,
                       backends: { <backend>: { enabled, device } } }
 
 Every mapping rejects unknown keys: a misspelled option would otherwise silently fall
@@ -104,9 +104,26 @@ class EvaluationConfig:
     num_samples: int = -1
     #: Extra re-runs of the first batch that prime the GPU / TensorRT (discarded).
     num_warmup: int = 2
+    #: Frames per batch the split is scored with. The split's own dataloader setting is
+    #: the training-time one; the deployed graphs are single-frame by contract (a model's
+    #: glue rejects a larger batch) and the latency is per batch, so evaluation builds
+    #: the loader itself: 1 = per-frame latency, what the runtime sees.
+    batch_size: int = 1
+    #: CPU worker threads the process may use while a backend is evaluated: PyTorch's
+    #: intra-op pool and the BLAS / OpenMP pools threadpoolctl knows (numpy's OpenBLAS).
+    #: 0 keeps the process defaults. The graph latency of a TensorRT engine with
+    #: data-dependent shapes (sparse convolutions) is host-sensitive: its shape-sync points
+    #: wait on the host thread, and the ~30 OpenBLAS workers a preceding numpy op
+    #: (preprocessing, metrics) leaves busy-waiting double the measured engine time
+    #: (BEVFusion j6gen2, 2026-09-24: 10-13 ms with the defaults vs 5.5 ms with one
+    #: thread, the standalone engine figure). One thread makes CPU metrics slower and
+    #: the latency numbers right.
+    cpu_threads: int = 1
     backends: Mapping[Backend, BackendEvaluationConfig] = field(default_factory=dict)
 
-    KNOWN_KEYS = frozenset({"enabled", "split", "num_samples", "num_warmup", "backends"})
+    KNOWN_KEYS = frozenset(
+        {"enabled", "split", "num_samples", "num_warmup", "batch_size", "cpu_threads", "backends"}
+    )
 
     @classmethod
     def from_dict(cls, raw: Any) -> EvaluationConfig:
@@ -116,11 +133,16 @@ class EvaluationConfig:
         split = str(raw.get("split", "test"))
         if split not in ("test", "val"):
             raise ValueError(f"deploy.evaluation.split={split!r} — valid values: 'test', 'val'.")
+        batch_size = int(raw.get("batch_size", 1))
+        if batch_size < 1:
+            raise ValueError(f"deploy.evaluation.batch_size={batch_size} — must be at least 1.")
         return cls(
             enabled=bool(raw.get("enabled", False)),
             split=split,
             num_samples=int(raw.get("num_samples", -1)),
             num_warmup=int(raw.get("num_warmup", 2)),
+            batch_size=batch_size,
+            cpu_threads=int(raw.get("cpu_threads", 1)),
             backends={
                 Backend(name): BackendEvaluationConfig.from_dict(cfg, name)
                 for name, cfg in backends.items()
