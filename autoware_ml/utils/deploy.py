@@ -33,6 +33,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.export import Dim
 
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
 from autoware_ml.ops.segment.scatter_reduce import register_scatter_reduce_onnx_symbolic
 
 logger = logging.getLogger(__name__)
@@ -411,6 +412,11 @@ def export_to_onnx(
     torch.onnx.export(**export_kwargs)
 
     logger.info("Successfully exported ONNX model to %s", output_path)
+    # Quantized exports spell each Q/DQ scale / zero point as Constant (-> Cast) helper
+    # chains; fold them into initializers so the parameters are readable on the node.
+    # A no-op (the file is left untouched) for graphs without Q/DQ.
+    if output_path.exists():
+        fold_qdq_params(output_path)
 
     data_path = output_path.with_suffix(output_path.suffix + ".data")
     if data_path.exists():
