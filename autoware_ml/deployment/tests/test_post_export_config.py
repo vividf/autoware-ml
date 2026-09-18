@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from autoware_ml.deployment.config import PostExportConfig
+from autoware_ml.deployment.config import EvaluationConfig, PostExportConfig
 from autoware_ml.types.backend import Backend
 
 _RAW = {
@@ -72,6 +72,12 @@ def test_absent_sections_are_all_defaults_and_nothing_is_enabled() -> None:
 def test_unknown_keys_are_rejected_with_the_config_path(raw, where) -> None:
     with pytest.raises(ValueError, match=where):
         PostExportConfig.from_deploy_cfg(raw)
+
+
+def test_evaluation_thread_count_defaults_to_one_and_parses() -> None:
+    assert EvaluationConfig.from_dict({}).cpu_threads == 1
+    assert EvaluationConfig.from_dict({"cpu_threads": 0}).cpu_threads == 0
+    assert EvaluationConfig.from_dict({"cpu_threads": 8}).cpu_threads == 8
 
 
 def test_unknown_evaluation_backend_and_split_are_rejected() -> None:
