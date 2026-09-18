@@ -203,6 +203,30 @@ Engines are always built strongly typed: the builder uses exactly the precisions
 the ONNX carries and never picks its own. Choose the engine's numerics with
 `deploy.onnx.precision`.
 
+## Plugin graphs (sparse convolutions)
+
+Graphs with sparse convolutions — BEVFusion's lidar encoder, PTv3's cpe convs — export
+them as ONNX nodes in the `autoware` domain (`autoware::GetIndicePairsImplicitGemm`,
+`autoware::ImplicitGemm`), the operators `autoware_universe`'s `autoware_tensorrt_plugins`
+implements. TensorRT loads the library before parsing the ONNX:
+
+```yaml
+deploy:
+  tensorrt:
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
+```
+
+The Docker image builds the plugin (`docker/tensorrt_plugins/`, see its README for a
+rebuild against another `autoware_universe` branch). ONNX Runtime cannot run plugin
+nodes, so such stages declare `torch_fallback_backends=(Backend.ONNX,)`: the `onnx`
+backend runs them in PyTorch (starred in the evaluation table) while `tensorrt` runs the
+engine. The exported graph is ready for the runtime as it is.
+
+The FP16 cast of a plugin or Q/DQ graph is island-aware
+(`autoware_ml/deployment/onnx/precision.py`): plugin nodes, integer index paths and
+`Range` stay fp32, Linear Q/DQ regions keep fp32 mini-islands, and the graph I/O stays fp32.
+Plain graphs go through the upstream `onnxconverter_common` cast unchanged.
+
 ## Model-Owned Export Wrappers
 
 The preferred deployment path is to keep export logic inside the model. Models
@@ -247,7 +271,7 @@ shipped file reflects them.
 Export alone produces artifacts; it does not prove they compute what the PyTorch
 model computes. A model can opt into that proof by declaring its deployment as a
 *stage graph* — an ordered list of exportable graphs (`GraphStage`) and the PyTorch
-glue between them (`TorchStage`) — through `BaseModel.build_stages()`:
+glue between them (`TorchStage`) — through `ModuleBaseModel.build_stages()`:
 
 ```python
 def build_stages(self):
@@ -270,7 +294,8 @@ a stage graph keep their existing `build_export_specs()`; nothing below applies 
 The same declaration runs on three backends — `pytorch` (the modules), `onnx` (ONNX
 Runtime sessions) and `tensorrt` (the engines) — with identical glue, so two backends
 differ only by what executed the exported graphs. Two post-export steps use this, both
-disabled by default:
+disabled by default (quantized checkpoints go through the same path, see
+[Quantization](quantization.md)):
 
 ### Verification
 
@@ -291,6 +316,11 @@ explicit per-scenario `tolerance`, and a failing tensor's message suggests the g
 would have passed so the observed value can be recorded in the config comment. Raw-logit
 differences under fp16 are expected while the metrics below stay equal — the metrics are
 the real gate; verification catches wiring and dtype mistakes.
+
+Integer-typed outputs (class labels, indices) are decisions over the float outputs, so
+they are gated on their mismatch *ratio* (5 %) rather than element-wise: a label flips
+wherever two logits sit within backend noise of each other while the probabilities agree,
+but a swapped or mis-wired integer output still fails.
 
 Verification only makes sense for outputs whose positions mean the same thing on every
 backend (a BEV cell, a point). A graph that selects proposals with a top-k inside the
@@ -327,7 +357,7 @@ preceding numpy or CPU-torch op leaves busy-waiting double its measured time (BE
 Set it to 0 to keep the process default when only the metrics matter. Metric keys carry
 the backend, `{split}/{backend}/{suite}/{metric}` (`test/tensorrt/det3d/mAP_0m_121m`),
 latencies land under `latency/{backend}/{stage}_mean_ms`, and everything is logged to the
-deploy run and written to `<output_dir>/evaluation.json` (every metric and latency of every
+deploy run and written to `evaluation.json` next to the exports (every metric and latency of every
 backend, with or without a tracker). The log ends with a cross-backend table of the suites'
 headline metrics (det3d: `mAP` and NDS, reported as `map_based_nds`; seg3d: `mIoU` and
 `fwIoU`); a backend column whose stages ran in PyTorch (a declared fallback, e.g. a plugin
