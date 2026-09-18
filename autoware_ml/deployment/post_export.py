@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export steps over a model's stage graph: verification (and, next, evaluation).
+"""Post-export steps over a model's stage graph: verification and per-backend evaluation.
 
 Both need the same things — the exported artifacts, pipelines per backend, batches from
 the datamodule preprocessed the way the model's ``on_after_batch_transfer`` does — so
@@ -23,17 +23,28 @@ call in.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import lightning as L
 import torch
 
-from autoware_ml.deployment.config import PostExportConfig, VerificationConfig
+from autoware_ml.deployment.config import (
+    EvaluationConfig,
+    PostExportConfig,
+    VerificationConfig,
+)
 from autoware_ml.deployment.pipeline import PipelineCache, available_backends
 from autoware_ml.deployment.stages import Stage
 from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
+from autoware_ml.evaluation.evaluator import (
+    EvaluationResult,
+    evaluate_backend,
+    flatten_results,
+    log_comparison,
+)
+from autoware_ml.metrics.base import EvalStage
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import move_to_device
 
@@ -107,14 +118,70 @@ def run_verification(
     logger.info("Backend verification passed.")
 
 
+def run_evaluation(
+    cfg: EvaluationConfig,
+    model: L.LightningModule,
+    pipelines: PipelineCache,
+    available: set[Backend],
+    datamodule: L.LightningDataModule,
+    device: torch.device,
+) -> list[EvaluationResult]:
+    """Score every enabled backend with artifacts against ground truth; log the comparison.
+
+    The ``test`` split scores the test dataloader (with ground truth); ``val`` scores the
+    validation dataloader and reports under ``val/...``.
+    """
+    if cfg.split == "val":
+        datamodule.setup("validate")
+        make_dataloader, stage = datamodule.val_dataloader, EvalStage.VAL
+        logger.info("Evaluation split: val (metric keys report under val/...).")
+    else:
+        datamodule.setup("test")
+        make_dataloader, stage = datamodule.test_dataloader, EvalStage.TEST
+
+    results: list[EvaluationResult] = []
+    for backend, backend_cfg in cfg.enabled_backends():
+        if backend not in available:
+            logger.warning(
+                "Skipping evaluation of backend '%s': artifacts not available in this run.",
+                backend.value,
+            )
+            continue
+        logger.info("=" * 70)
+        logger.info(
+            "Evaluating backend '%s' on %s (num_samples=%d, num_warmup=%d)",
+            backend.value,
+            backend_cfg.device,
+            cfg.num_samples,
+            cfg.num_warmup,
+        )
+        results.append(
+            evaluate_backend(
+                model,
+                make_dataloader(),
+                pipelines.get(backend, backend_cfg.device),
+                device,
+                num_samples=cfg.num_samples,
+                num_warmup=cfg.num_warmup,
+                stage=stage,
+            )
+        )
+    log_comparison(results)
+    return results
+
+
 def run_post_export(
     deploy_cfg: Any,
     model: L.LightningModule,
     datamodule: L.LightningDataModule,
     output_dir: str | Path,
     device: torch.device,
-) -> None:
+    log_metric: Callable[[str, float], None] | None = None,
+) -> list[EvaluationResult]:
     """Run the enabled post-export steps of ``deploy_cfg`` over the artifacts in ``output_dir``.
+
+    ``log_metric(key, value)`` receives every evaluation metric and mean latency (the
+    deploy run's MLflow client, say).
 
     Nothing runs when both ``deploy.verification`` and ``deploy.evaluation`` are disabled
     (the default). Enabling either on a model without ``build_stages()`` is an error: the
@@ -123,7 +190,7 @@ def run_post_export(
     """
     cfg = PostExportConfig.from_deploy_cfg(deploy_cfg)
     if not cfg.any_enabled:
-        return
+        return []
     stages = model.build_stages()
     if stages is None:
         raise ValueError(
@@ -138,3 +205,10 @@ def run_post_export(
         run_verification(
             cfg.verification, model, stages, pipelines, available, datamodule, device, output_dir
         )
+    results: list[EvaluationResult] = []
+    if cfg.evaluation.enabled:
+        results = run_evaluation(cfg.evaluation, model, pipelines, available, datamodule, device)
+        if log_metric is not None:
+            for key, value in flatten_results(results).items():
+                log_metric(key, value)
+    return results

@@ -24,3 +24,15 @@ deploy:
     num_verify_batches: 1
     # - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda } }
     scenarios: []
+  # Per-backend ground-truth metrics + latency on the test split. PyTorch is a backend
+  # like the others; keys land under {split}/{backend}/{prefix}/{metric}.
+  evaluation:
+    enabled: false
+    # test (default) or val — for when the test split is unavailable or held back.
+    split: test
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }

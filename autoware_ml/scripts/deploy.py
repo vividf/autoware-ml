@@ -295,14 +295,19 @@ def main(cfg: DictConfig) -> None:
                     build_tensorrt_engine(module_onnx_path, deploy_cfg, module_engine_path)
                     tensorrt_exported_paths.append(module_engine_path)
 
-        # Post-export steps (opt-in, stage-graph models only): cross-backend
-        # verification of the exported artifacts against the PyTorch reference.
+        # Post-export steps (opt-in, stage-graph models only): cross-backend verification
+        # of the exported artifacts and per-backend evaluation against ground truth.
         run_post_export(
             deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
             model=model,
             datamodule=datamodule,
             output_dir=output_dir,
             device=device,
+            log_metric=(
+                (lambda key, value: mlflow_client.log_metric(deploy_run_id, key, value))
+                if mlflow_client is not None and deploy_run_id is not None
+                else None
+            ),
         )
 
     except Exception:

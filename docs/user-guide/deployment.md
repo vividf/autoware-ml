@@ -228,6 +228,83 @@ Use for operator replacement, shape inference fixes, or custom plugin insertion.
 Modifiers run before the precision conversion and the metadata stamp, so the
 shipped file reflects them.
 
+## Stage graph: verification and evaluation
+
+Export alone produces artifacts; it does not prove they compute what the PyTorch
+model computes. A model can opt into that proof by declaring its deployment as a
+*stage graph* — an ordered list of exportable graphs (`GraphStage`) and the PyTorch
+glue between them (`TorchStage`) — through `BaseModel.build_stages()`:
+
+```python
+def build_stages(self):
+    return (
+        TorchStage("decorate", run=lambda ctx: {"input_features": self.encoder.decorate(...)}),
+        GraphStage("pts_voxel_encoder_centerpoint", module=..., inputs=("input_features",),
+                   outputs=("pillar_features",)),
+        TorchStage("scatter", run=...),
+        GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
+                   outputs=("heatmap", "reg", ...), output_fields=(("heatmap", "heatmap"), ...)),
+    )
+```
+
+Every `GraphStage` is one `deploy.onnx.modules.<name>` entry and one `<name>.onnx` /
+`<name>.engine`; the export specs are derived from the declaration (the graph runs once
+in PyTorch on the example batch and each stage is traced with the tensors the glue
+produced), so `build_export_specs()` needs no hand-written counterpart. Models without
+a stage graph keep their existing `build_export_specs()`; nothing below applies to them.
+
+The same declaration runs on three backends — `pytorch` (the modules), `onnx` (ONNX
+Runtime sessions) and `tensorrt` (the engines) — with identical glue, so two backends
+differ only by what executed the exported graphs. Two post-export steps use this, both
+disabled by default:
+
+### Verification
+
+```yaml
+deploy:
+  verification:
+    enabled: true
+    num_verify_batches: 1
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 0.01 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.5 }
+```
+
+Each scenario runs the reference and test pipelines on the first predict batches and
+compares the final raw graph outputs element wise; a failing scenario fails the deploy.
+Tolerances are calibrated, not guessed: lossy backends (fp16 engines, int8) set an
+explicit per-scenario `tolerance`, and a failing tensor's message suggests the gate that
+would have passed so the observed value can be recorded in the config comment. Raw-logit
+differences under fp16 are expected while the metrics below stay equal — the metrics are
+the real gate; verification catches wiring and dtype mistakes.
+
+A model whose raw outputs are incomparable across backends by construction (stochastic
+ordering, backend-specific proposal selection) sets `verification_caveat` to one sentence
+saying why; verification then skips loudly.
+
+### Evaluation
+
+```yaml
+deploy:
+  evaluation:
+    enabled: true
+    split: test          # or val
+    num_samples: -1      # whole split; a positive number for a quick check
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
+```
+
+Every enabled backend with artifacts is scored on the split with the model's own metric
+suites and the same `build_eval_output`, and its per-stage latency is collected
+(`model_graphs` sums the exported stages: pure GPU time for TensorRT). Metric keys carry
+the backend, `{split}/{backend}/{suite}/{metric}` (`test/tensorrt/det3d/mAP_0m_121m`),
+latencies land under `latency/{backend}/{stage}_mean_ms`, and everything is logged to the
+deploy run. The log ends with a cross-backend table of the suites' headline metrics; a
+backend column whose stages ran in PyTorch (a declared fallback, e.g. a plugin graph on
+ONNX Runtime) is starred.
+
 ## Overriding at Runtime
 
 Override deployment settings from CLI:
