@@ -26,7 +26,7 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
 from autoware_ml.deployment.post_export import run_post_export
-from autoware_ml.utils.checkpoints import apply_matching_weights
+from autoware_ml.quantization.loader import load_model_weights
 from autoware_ml.utils.deploy import (
     apply_onnx_transforms,
     build_tensorrt_engine,
@@ -209,15 +209,10 @@ def main(cfg: DictConfig) -> None:
         logger.info(
             "Loading matching weights from %d checkpoint(s): %s", len(weight_paths), weight_paths
         )
-        apply_matching_weights(
-            model,
-            weight_paths,
-            map_location=device,
-            device=device,
-            set_eval=True,
-            enforce_full_coverage=True,
-            logger=logger,
-        )
+        # A quantized checkpoint describes itself: the identical quantized module tree is
+        # rebuilt from its embedded description before the weights load. Nothing here
+        # reads a `quantization` config section.
+        load_model_weights(model, weight_paths, device, set_eval=True, enforce_full_coverage=True)
 
         export_git_sha = get_git_sha()
         logger.info("Preparing export inputs...")
@@ -304,8 +299,8 @@ def main(cfg: DictConfig) -> None:
                     build_tensorrt_engine(module_onnx_path, deploy_cfg, module_engine_path)
                     tensorrt_exported_paths.append(module_engine_path)
 
-        # Post-export steps (opt-in, stage-graph models only): cross-backend
-        # verification of the exported artifacts against the PyTorch reference.
+        # Post-export steps (opt-in, stage-graph models only): cross-backend verification
+        # of the exported artifacts and per-backend evaluation against ground truth.
         run_post_export(
             deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
             model=model,
@@ -313,6 +308,11 @@ def main(cfg: DictConfig) -> None:
             output_dir=output_dir,
             device=device,
             onnx_paths=shipped_onnx_paths,
+            log_metric=(
+                (lambda key, value: mlflow_client.log_metric(deploy_run_id, key, value))
+                if mlflow_client is not None and deploy_run_id is not None
+                else None
+            ),
         )
 
     except Exception:

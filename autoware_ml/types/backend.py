@@ -17,7 +17,7 @@
 A *backend* is whatever runs the model's forward: the PyTorch modules themselves,
 an ONNX Runtime session, or a TensorRT engine. PyTorch is a backend like any other
 so that ``trainer.test`` and deployment evaluation report under the same metric
-keys (``{split}/{backend}/{metric}``).
+keys (``{split}/{backend}/{prefix}/{metric}``).
 """
 
 from __future__ import annotations
