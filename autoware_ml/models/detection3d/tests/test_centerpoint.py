@@ -22,6 +22,7 @@ import torch
 
 from autoware_ml.dataclasses.models.detection3d.head_outputs import CenterHeadOutputs
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
+from autoware_ml.deployment.stages import GraphStage, run_stages_in_torch
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.centerpoint import CenterPointDetectionModel
 from autoware_ml.models.detection3d.encoders.pillar import PillarFeatureNet, PointPillarsScatter
@@ -321,3 +322,32 @@ def test_centerhead_uses_natural_dimension_order() -> None:
         predictions[0].bboxes_3d[0, 3:6],
         torch.tensor([4.0, 1.6, 1.5]),
     )
+
+
+def test_stage_graph_reproduces_forward_and_names_the_deployed_modules() -> None:
+    """The declared stages are the deployed split of forward(): same outputs, same names."""
+    torch.manual_seed(0)
+    model = _build_model().eval()
+    voxels = torch.randn(12, 5, 5)
+    num_points = torch.randint(1, 5, (12,), dtype=torch.int32)
+    voxel_coords = torch.randint(0, 8, (12, 4), dtype=torch.int32)
+    voxel_coords[:, 0] = 0
+    batch = build_batch_inputs(voxels=voxels_data_from_zyx(voxels, num_points, voxel_coords))
+
+    stages = model.build_stages()
+    graph = [stage for stage in stages if isinstance(stage, GraphStage)]
+    assert [stage.name for stage in stages] == [
+        "decorate",
+        "pts_voxel_encoder_centerpoint",
+        "scatter",
+        "pts_backbone_neck_head_centerpoint",
+    ]
+    assert graph[-1].output_fields == tuple(
+        (name, name) for name in ["heatmap", "reg", "height", "dim", "rot", "vel"]
+    )
+
+    with torch.no_grad():
+        expected = model(**model.forward_inputs(batch)).detection3d().center_head()
+    state = run_stages_in_torch(stages, batch, torch.device("cpu"))
+    for name in ["heatmap", "reg", "height", "dim", "rot", "vel"]:
+        torch.testing.assert_close(state[name], getattr(expected, name))
