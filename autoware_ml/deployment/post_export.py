@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export steps over a model's stage graph: cross-backend verification.
+"""Post-export steps over a model's stage graph: verification and per-backend evaluation.
 
 Both need the same things — the exported artifacts, pipelines per backend, batches from
 the datamodule preprocessed the way the model's ``on_after_batch_transfer`` does — so
@@ -23,7 +23,7 @@ call in.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -31,9 +31,20 @@ from typing import Any
 import lightning as L
 import torch
 
-from autoware_ml.deployment.config import PostExportConfig, VerificationConfig
+from autoware_ml.deployment.config import (
+    EvaluationConfig,
+    PostExportConfig,
+    VerificationConfig,
+)
 from autoware_ml.deployment.pipeline import PipelineCache, available_backends
 from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
+from autoware_ml.evaluation.evaluator import (
+    EvaluationResult,
+    evaluate_backend,
+    flatten_results,
+    log_comparison,
+)
+from autoware_ml.metrics.base import EvalStage
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import move_to_device
 
@@ -104,27 +115,134 @@ def run_verification(
     logger.info("Backend verification passed.")
 
 
+def run_evaluation(
+    cfg: EvaluationConfig,
+    model: L.LightningModule,
+    pipelines: PipelineCache,
+    available: set[Backend],
+    datamodule: L.LightningDataModule,
+    device: torch.device,
+) -> list[EvaluationResult]:
+    """Score every enabled backend with artifacts against ground truth; log the comparison.
+
+    The ``test`` split scores the test dataloader (with ground truth); ``val`` scores the
+    validation dataloader and reports under ``val/...``.
+    """
+    if cfg.split == "val":
+        datamodule.setup("validate")
+        make_dataloader, stage = datamodule.val_dataloader, EvalStage.VAL
+        logger.info("Evaluation split: val (metric keys report under val/...).")
+    else:
+        datamodule.setup("test")
+        make_dataloader, stage = datamodule.test_dataloader, EvalStage.TEST
+
+    results: list[EvaluationResult] = []
+    with _limited_cpu_threads(cfg.cpu_threads):
+        results = _evaluate_enabled_backends(
+            cfg, model, pipelines, available, make_dataloader, stage, device
+        )
+    log_comparison(results)
+    return results
+
+
+@contextmanager
+def _limited_cpu_threads(count: int) -> Iterator[None]:
+    """Cap the process's CPU worker pools while backends are timed.
+
+    See ``EvaluationConfig.cpu_threads``: busy-waiting BLAS / OpenMP workers left behind by
+    a CPU op inflate the measured time of engines with host-side shape syncs. Covers
+    PyTorch's intra-op pool and every pool threadpoolctl finds (numpy's OpenBLAS above
+    all); ``count <= 0`` changes nothing.
+    """
+    if count <= 0:
+        yield
+        return
+    previous = torch.get_num_threads()
+    torch.set_num_threads(count)
+    logger.info(
+        "Evaluation caps CPU worker threads at %d (torch intra-op was %d) so host threads "
+        "do not distort the graph latency.",
+        count,
+        previous,
+    )
+    try:
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError:  # pragma: no cover - threadpoolctl ships with the environment
+            logger.warning("threadpoolctl unavailable: BLAS worker pools stay at their defaults.")
+            yield
+        else:
+            with threadpool_limits(limits=count):
+                yield
+    finally:
+        torch.set_num_threads(previous)
+
+
+def _evaluate_enabled_backends(
+    cfg: EvaluationConfig,
+    model: L.LightningModule,
+    pipelines: PipelineCache,
+    available: set[Backend],
+    make_dataloader: Callable[[], Any],
+    stage: EvalStage,
+    device: torch.device,
+) -> list[EvaluationResult]:
+    results: list[EvaluationResult] = []
+    for backend, backend_cfg in cfg.enabled_backends():
+        if backend not in available:
+            logger.warning(
+                "Skipping evaluation of backend '%s': artifacts not available in this run.",
+                backend.value,
+            )
+            continue
+        logger.info("=" * 70)
+        logger.info(
+            "Evaluating backend '%s' on %s (num_samples=%d, num_warmup=%d)",
+            backend.value,
+            backend_cfg.device,
+            cfg.num_samples,
+            cfg.num_warmup,
+        )
+        results.append(
+            evaluate_backend(
+                model,
+                make_dataloader(),
+                pipelines.get(backend, backend_cfg.device),
+                device,
+                num_samples=cfg.num_samples,
+                num_warmup=cfg.num_warmup,
+                stage=stage,
+            )
+        )
+    return results
+
+
 def run_post_export(
     deploy_cfg: Any,
     model: L.LightningModule,
     datamodule: L.LightningDataModule,
     output_dir: str | Path,
     device: torch.device,
+    log_metric: Callable[[str, float], None] | None = None,
     onnx_paths: Mapping[str, Path] | None = None,
-) -> None:
+) -> list[EvaluationResult]:
     """Run the enabled post-export steps of ``deploy_cfg`` over the artifacts in ``output_dir``.
 
-    Nothing runs when ``deploy.verification`` is disabled (the default). Enabling it on a
-    model without ``build_stages()`` is an error: the step executes the stage graph, there
-    is nothing else that could run the artifacts together with the model's glue.
+    ``log_metric(key, value)`` receives every evaluation metric and mean latency (the
+    deploy run's MLflow client, say).
+
+    Nothing runs when both ``deploy.verification`` and ``deploy.evaluation`` are disabled
+    (the default). Enabling either on a model without ``build_stages()`` is an error: the
+    steps execute the stage graph, there is nothing else that could run the artifacts
+    together with the model's glue.
     """
     cfg = PostExportConfig.from_deploy_cfg(deploy_cfg)
     if not cfg.any_enabled:
-        return
+        return []
     stages = model.build_stages()
     if stages is None:
         raise ValueError(
-            "deploy.verification needs a stage graph, but "
+            "deploy.verification / deploy.evaluation need a stage graph, but "
             f"{type(model).__name__} does not implement build_stages(). Declare the stage "
             "graph (see autoware_ml.deployment.stages) or disable these sections."
         )
@@ -139,3 +257,10 @@ def run_post_export(
     available = available_backends(stages, output_dir, onnx_paths)
     if cfg.verification.enabled:
         run_verification(cfg.verification, model, pipelines, available, datamodule, device)
+    results: list[EvaluationResult] = []
+    if cfg.evaluation.enabled:
+        results = run_evaluation(cfg.evaluation, model, pipelines, available, datamodule, device)
+        if log_metric is not None:
+            for key, value in flatten_results(results).items():
+                log_metric(key, value)
+    return results
