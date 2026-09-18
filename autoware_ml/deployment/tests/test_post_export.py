@@ -59,6 +59,15 @@ class _StagedModel(BaseModel):
         del batch_inputs_dict
         return {"loss": outputs["plus"].sum()}
 
+    def build_eval_output(self, batch: Mapping[str, Any], outputs: Any) -> dict[str, Any]:
+        return {"plus": outputs["plus"], "target": batch["target"]}
+
+    def get_log_batch_size(self, batch_inputs_dict):
+        return batch_inputs_dict["points"].shape[0]
+
+    def clone_metrics(self, stage):
+        return [_ErrorSuite()]
+
     def build_stages(self) -> Sequence[Stage]:
         return (
             TorchStage("prep", run=lambda ctx: {"features": ctx.batch["points"].float()}),
@@ -92,6 +101,38 @@ class _DataModule(L.LightningDataModule):
 
     def predict_dataloader(self):
         return DataLoader([{"points": p} for p in self.points], batch_size=None)
+
+    def test_dataloader(self):
+        return DataLoader(
+            [{"points": p, "target": p.sum(dim=1, keepdim=True)} for p in self.points],
+            batch_size=None,
+        )
+
+
+class _ErrorSuite:
+    """Duck-typed suite: mean absolute error of ``plus`` against the batch target."""
+
+    prefix = "toy"
+    headline_metrics = ("error",)
+
+    def __init__(self) -> None:
+        self.total, self.count = 0.0, 0
+
+    def to(self, device):
+        return self
+
+    def reset(self) -> None:
+        self.total, self.count = 0.0, 0
+
+    def required_keys(self):
+        return ("plus", "target")
+
+    def update(self, eval_out) -> None:
+        self.total += float((eval_out["plus"] - eval_out["target"]).abs().mean())
+        self.count += 1
+
+    def result(self, stage) -> dict[str, float]:
+        return {"error": self.total / max(self.count, 1)}
 
 
 def _export_stage_artifacts(model: _StagedModel, tmp_path) -> None:
@@ -170,3 +211,35 @@ def test_a_declared_caveat_skips_verification_before_touching_data(tmp_path, cap
         run_post_export(_cfg(), model, _Exploding(), tmp_path, torch.device("cpu"))
     assert "Verification SKIPPED" in caplog.text and "stochastic" in caplog.text
     assert BaseModel.verification_caveat is None
+
+
+def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) -> None:
+    torch.manual_seed(0)
+    model = _StagedModel().eval()
+    _export_stage_artifacts(model, tmp_path)
+    logged: dict[str, float] = {}
+    cfg = {
+        "onnx": {"enabled": True},
+        "tensorrt": {"enabled": False},
+        "evaluation": {
+            "enabled": True,
+            "num_samples": -1,
+            "num_warmup": 1,
+            "backends": {
+                "pytorch": {"enabled": True, "device": "cpu"},
+                "onnx": {"enabled": True, "device": "cpu"},
+                "tensorrt": {"enabled": True, "device": "cuda"},
+            },
+        },
+    }
+    results = run_post_export(
+        cfg, model, _DataModule(), tmp_path, torch.device("cpu"), log_metric=logged.__setitem__
+    )
+    # tensorrt has no artifacts in this run and is skipped; the other two are scored.
+    assert [r.backend.value for r in results] == ["pytorch", "onnx"]
+    assert results[0].num_samples == 12
+    assert results[0].metrics["test/pytorch/toy/error"] == pytest.approx(
+        results[1].metrics["test/onnx/toy/error"], abs=1e-5
+    )
+    assert "latency/onnx/model_graphs_mean_ms" in logged
+    assert "test/pytorch/toy/error" in logged
