@@ -38,6 +38,14 @@ quantization:
   # governs the conv kinds, all of which this experiment skips.
   default_precision: fp8
   skip_quantize:
+    # The sparse tower belongs on this list for the same reason as every other conv
+    # subtree: it is not what this experiment isolates. It only became quantizable when
+    # `pts_middle_encoder` gained the `spconv` kind, and without the entry an fp8 default
+    # first failed at plan time (no fp8 sparse descriptor — the plugin has no FP8 path)
+    # and then, once the kind was pinned to INT8, silently put the whole tower in INT8:
+    # measured sparse 2.40 vs 2.10 ms and mAP 0.4465 vs 0.4511, i.e. it inherited the
+    # sparse-INT8 regression this experiment never asked for.
+    - pts_middle_encoder
     - pts_backbone
     - pts_neck
     - bbox_head.shared_conv

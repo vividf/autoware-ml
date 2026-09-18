@@ -42,6 +42,7 @@ import torch
 from onnx.external_data_helper import convert_model_from_external_data
 from torch.export import Dim
 
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
 from autoware_ml.ops.segment.scatter_reduce import register_scatter_reduce_onnx_symbolic
 
 logger = logging.getLogger(__name__)
@@ -250,3 +251,10 @@ def export_to_onnx(
         _merge_onnx_external_data(output_path)
         data_path.unlink()
         logger.info("Successfully merged external data into the ONNX file")
+
+    # A quantized graph leaves the tracer with its scales and zero points spelled as
+    # constant helper sub-graphs (and ``do_constant_folding`` is off for these models, so
+    # nothing collapses them). Fold them into initializers so the artifact carries each
+    # Q/DQ node's parameters on the node itself -- readable in Netron, and typed for the
+    # passes that read them. Numerically a no-op; see :mod:`autoware_ml.deployment.onnx.qdq`.
+    fold_qdq_params(output_path)

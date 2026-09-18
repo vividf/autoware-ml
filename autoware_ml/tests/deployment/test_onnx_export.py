@@ -34,6 +34,7 @@ from autoware_ml.deployment.onnx.modify import should_modify_graph
 from autoware_ml.deployment.onnx.precision import onnx_has_qdq
 from autoware_ml.deployment.onnx.autocast import keep_topk_in_fp16
 from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
 
 
 def producer_named(model, tensor_name):
@@ -997,3 +998,122 @@ def test_cast_graph_to_fp16_refuses_an_island_edge_the_graph_does_not_type(tmp_p
     gemm = next(node for node in converted.graph.node if node.name == "gemm_plugin")
     assert gemm.input[1] == "pairs__fp32", "the declared FP32 plugin edge gets its boundary cast"
     assert gemm.input[0] == "dq", "the DQ edge stays castless"
+
+
+def _qdq_graph_with_helper_params(tmp_path, name="qdq_helpers"):
+    """A quantized graph spelled the way modelopt's symbolics spell one.
+
+    The scale is a ``Constant`` shared by the Q and its DQ; the zero point is a
+    ``Constant`` in the quantizer's compute dtype behind a ``Cast`` to int8 -- so neither
+    value sits on the Q/DQ node, which is what :func:`fold_qdq_params` repairs.
+    """
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    nodes = [
+        helper.make_node(
+            "Constant",
+            [],
+            ["scale"],
+            name="scale_const",
+            value=numpy_helper.from_array(np.float32(0.25), "scale_value"),
+        ),
+        helper.make_node(
+            "Constant",
+            [],
+            ["zp_float"],
+            name="zp_const",
+            value=numpy_helper.from_array(np.float32(0.0), "zp_value"),
+        ),
+        helper.make_node("Cast", ["zp_float"], ["zp"], name="zp_cast", to=TensorProto.INT8),
+        helper.make_node("QuantizeLinear", ["x", "scale", "zp"], ["q"], name="q"),
+        helper.make_node("DequantizeLinear", ["q", "scale", "zp"], ["y"], name="dq"),
+    ]
+    model = helper.make_model(
+        helper.make_graph(nodes, name, [x], [y]),
+        opset_imports=[helper.make_operatorsetid("", 19)],
+    )
+    path = tmp_path / f"{name}.onnx"
+    onnx.save(model, str(path))
+    return path
+
+
+def test_fold_qdq_params_moves_scale_and_zero_point_onto_the_nodes(tmp_path) -> None:
+    """Q/DQ parameters become initializers, exactly valued, and the helper nodes go.
+
+    Netron inlines a ``Constant`` only when its output feeds a single node input, so a
+    scale shared by a Q/DQ pair -- and a zero point one ``Cast`` away -- render as
+    unreadable edges. As initializers both print on the node itself.
+    """
+    path = _qdq_graph_with_helper_params(tmp_path)
+    fold_qdq_params(path)
+
+    model = onnx.load(str(path))
+    initializers = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
+    assert set(initializers) == {"scale", "zp"}
+    assert initializers["scale"].dtype == np.float32 and initializers["scale"] == np.float32(0.25)
+    # The Cast is applied, not dropped: the zero point keeps its int8 spelling.
+    assert initializers["zp"].dtype == np.int8 and initializers["zp"] == 0
+    # Only the Q/DQ pair is left; the Constant/Cast helpers are gone.
+    assert [node.op_type for node in model.graph.node] == ["QuantizeLinear", "DequantizeLinear"]
+    assert [node.input for node in model.graph.node] == [["x", "scale", "zp"], ["q", "scale", "zp"]]
+    onnx.checker.check_model(model, full_check=True)
+
+
+def test_fold_qdq_params_is_idempotent_and_leaves_plain_graphs_alone(tmp_path) -> None:
+    path = _qdq_graph_with_helper_params(tmp_path)
+    fold_qdq_params(path)
+    once = onnx.load(str(path)).SerializeToString()
+    fold_qdq_params(path)
+    assert onnx.load(str(path)).SerializeToString() == once
+
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+    plain = helper.make_model(
+        helper.make_graph([helper.make_node("Relu", ["x"], ["y"])], "plain", [x], [y])
+    )
+    plain_path = tmp_path / "plain.onnx"
+    onnx.save(plain, str(plain_path))
+    before = plain_path.read_bytes()
+    fold_qdq_params(plain_path)
+    assert plain_path.read_bytes() == before
+
+
+def test_fold_qdq_params_keeps_computed_params_and_shared_helper_nodes(tmp_path) -> None:
+    """Only exactly-evaluable constant chains fold, and a helper still read stays.
+
+    A scale that a graph computes (here from a graph input) is not a constant, so it is
+    left connected; a ``Constant`` a non-Q/DQ node also consumes survives the cleanup
+    even though the Q/DQ side of it folded.
+    """
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])
+    dynamic_scale = helper.make_tensor_value_info("dynamic_scale", TensorProto.FLOAT, [])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])
+    shared = helper.make_tensor_value_info("shared_out", TensorProto.INT8, [])
+    nodes = [
+        helper.make_node(
+            "Constant",
+            [],
+            ["zp_float"],
+            name="zp_const",
+            value=numpy_helper.from_array(np.float32(0.0), "zp_value"),
+        ),
+        helper.make_node("Cast", ["zp_float"], ["zp"], name="zp_cast", to=TensorProto.INT8),
+        # A second consumer of the folded zero point, outside the Q/DQ pair.
+        helper.make_node("Identity", ["zp"], ["shared_out"], name="shared"),
+        helper.make_node("QuantizeLinear", ["x", "dynamic_scale", "zp"], ["q"], name="q"),
+        helper.make_node("DequantizeLinear", ["q", "dynamic_scale", "zp"], ["y"], name="dq"),
+    ]
+    model = helper.make_model(
+        helper.make_graph(nodes, "mixed", [x, dynamic_scale], [y, shared]),
+        opset_imports=[helper.make_operatorsetid("", 19)],
+    )
+    path = tmp_path / "mixed.onnx"
+    onnx.save(model, str(path))
+    fold_qdq_params(path)
+
+    folded = onnx.load(str(path))
+    # The graph input stays the scale; only the constant zero point became a tensor.
+    assert [init.name for init in folded.graph.initializer] == ["zp"]
+    assert folded.graph.node[0].input == ["zp"] and folded.graph.node[0].name == "shared"
+    assert [node.name for node in folded.graph.node] == ["shared", "q", "dq"]
+    onnx.checker.check_model(folded, full_check=True)

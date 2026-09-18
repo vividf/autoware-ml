@@ -85,7 +85,14 @@ artifact 命名規則:`artifact_path(output_dir, stage_name, backend)` →
 1. **build_stages()**:載入 ckpt(量化 ckpt 會先按 placement record 重建量化結構),
    模型回傳 stage 序列;`validate_stages` 檢查名字唯一、宣告完整。
 2. **export**:每個 GraphStage `torch.onnx.export`(opset 由 `deploy.onnx.opset_version`
-   決定——框架預設 21,現行三個 experiment 都 pin 17),IO 名即宣告名。
+   決定——框架預設 21,現行三個 experiment 都 pin 17),IO 名即宣告名。匯出後緊接著
+   `onnx/qdq.py` 的 `fold_qdq_params`:modelopt 的 symbolic 把 scale 寫成 `Constant`、
+   zero point 寫成 `Constant -> Cast`,而這三個 experiment 都 `do_constant_folding: false`,
+   所以那些 helper node 會留在 artifact 裡——量化參數因此不在 Q/DQ node 上(Netron 只
+   inline 「只被一個 node input 用到」的 `Constant`,而 scale 是 Q 與 DQ 共用的)。這一步把
+   常數鏈算完寫回成 initializer(`Cast` 是照算不是丟掉,數值 bit-identical),Q/DQ node
+   從此自己帶著 `y_scale` / `y_zero_point`(值與 dtype 都看得到),圖也少掉整批 helper
+   node(CenterPoint head 346 → 178)。
 3. **precision pass**(`onnx/precision.py`,自動路由,模型端零程式碼):
 
    | 圖的事實 | 走哪條 | 原因 |
@@ -187,6 +194,7 @@ deployment/
   onnx/
     export.py      torch.onnx.export 包裝
     precision.py   路由判定函式(custom domain / Q-DQ)、線性島 fp16 cast(§3)
+    qdq.py         把 Q/DQ 的 scale / zero point 折成 initializer(匯出後自動跑)
     autocast.py    modelopt AutoCast 包裝、keep_topk_in_fp16
     modify.py      config 驅動的圖手術(deploy.onnx.modify_graph)
   backends/

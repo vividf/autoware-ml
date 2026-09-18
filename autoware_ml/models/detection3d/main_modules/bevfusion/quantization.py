@@ -53,7 +53,10 @@ from autoware_ml.quantization.plan import QuantizationPlan, QuantRules
 #: BEVFusion lidar quantization declaration (dense graph only; see module docstring).
 BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
     quantize_submodules={
-        "pts_middle_encoder": ("spconv",),
+        # Pinned INT8, not following ``default_precision``: these layers deploy as
+        # ``autoware::ImplicitGemm`` plugin nodes and the plugin has no FP8 path, so an
+        # fp8 default would fail at plan time (the sparse weight descriptor is INT8-only).
+        "pts_middle_encoder": {"spconv": "int8"},
         "pts_backbone": ("conv",),
         "pts_neck": ("conv",),
         "bbox_head": {"conv": None, "linear": "fp8"},

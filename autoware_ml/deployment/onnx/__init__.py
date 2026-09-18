@@ -22,6 +22,7 @@ from autoware_ml.deployment.onnx.export import (
     normalize_dynamic_shapes_for_model,
 )
 from autoware_ml.deployment.onnx.modify import modify_onnx_graph, should_modify_graph
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
 from autoware_ml.deployment.onnx.autocast import (
     autocast_to_fp16,
     keep_topk_in_fp16,
@@ -38,6 +39,7 @@ __all__ = [
     "build_dynamic_shapes",
     "cast_graph_to_fp16",
     "export_to_onnx",
+    "fold_qdq_params",
     "keep_topk_in_fp16",
     "modify_onnx_graph",
     "normalize_dynamic_shapes_for_model",
