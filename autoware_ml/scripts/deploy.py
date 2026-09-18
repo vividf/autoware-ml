@@ -38,6 +38,7 @@ from autoware_ml.builders.model_builder import (
 )
 from autoware_ml.datamodule.data_module import DataModule
 from autoware_ml.deployment.deployment_export import DeploymentExport
+from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.utils.mlflow_helpers import (
     MlflowRunContext,
@@ -98,6 +99,17 @@ def deploy(
         run_id=run_id,
     )
     export_outputs = deployment_exporter.export()
+
+    # Post-export steps (opt-in, stage-graph models only): cross-backend
+    # verification of the exported artifacts against the PyTorch reference.
+    run_post_export(
+        deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
+        model=model,
+        datamodule=datamodule,
+        output_dir=output_dir,
+        device=deployment_exporter.device,
+        onnx_paths=export_outputs.onnx_paths_by_module,
+    )
     logger.info("Deployment completed successfully.")
     for path in export_outputs.onnx_exported_paths:
         if path.exists():
