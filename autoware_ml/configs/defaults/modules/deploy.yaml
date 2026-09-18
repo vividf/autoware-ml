@@ -10,3 +10,6 @@ deploy:
   tensorrt:
     enabled: true
     workspace_size: 4294967296
+    # Custom TensorRT plugin shared libraries loaded before the ONNX is parsed
+    # (graphs with autoware::* ops). Empty for plain graphs.
+    plugin_libraries: []
