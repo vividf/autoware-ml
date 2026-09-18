@@ -76,9 +76,12 @@ autoware-ml test \
 
 ## Deployment
 
-PointTransformerV3 ONNX export is available. The generic TensorRT stage remains
-disabled in Autoware-ML because PTv3 requires a runtime with matching sparse
-convolution plugins.
+PointTransformerV3 exports to ONNX; the sparse (cpe) convolutions become
+`autoware::ImplicitGemm` plugin nodes, so TensorRT builds the engines once
+`deploy.tensorrt.plugin_libraries` points at the plugin the image ships
+([Deployment › Plugin graphs](../user-guide/deployment.md#plugin-graphs-sparse-convolutions)).
+The segmentation j6gen2 config carries the optimization profiles for the two graphs; the
+other configs (nuScenes, detection) leave TensorRT off until theirs are measured.
 
 ```bash
 autoware-ml deploy \
@@ -131,6 +134,45 @@ Deployment uses an explicit PTv3 export wrapper and a copied encoder, so the
 training model is not mutated when export-only sparse-convolution and
 serialization settings are applied.
 
+### Verification, evaluation and TensorRT
+
+The segmentation and detection models declare their deployment as a stage graph
+(`serialize_points` glue, then the `ptv3_encoder` and `ptv3_seg3d_head` /
+`ptv3_det3d_head` graphs — the same modules, input names and dynamic axes as the split
+export below, from which the export specs are now derived):
+
+```bash
+autoware-ml deploy \
+    --config-name segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2 \
+    --weights <best.ckpt> \
+    deploy.onnx.precision=fp16 deploy.tensorrt.enabled=true \
+    deploy.verification.enabled=true deploy.evaluation.enabled=true deploy.evaluation.num_samples=300
+```
+
+Verification compares `pred_probs` between backends on the first batch (`pred_labels` is
+gated on its mismatch ratio, 5 %); evaluation and verification take one frame per batch
+(`batch_size=1`); evaluation scores every backend with the mIoU
+suites and logs the per-graph latency. The ONNX Runtime backend runs the plugin graphs in
+PyTorch. The PyTorch reference runs the export modules (`shuffle_orders` off, the export
+attention windows), so its outputs are comparable with the engines'.
+
+### INT8 and FP8
+
+`autoware-ml quantize` produces a self-describing checkpoint for three variants
+([Quantization](../user-guide/quantization.md)); `deploy` takes it as `--weights`:
+
+- `..._j6gen2_int8`: attention / FFN linears INT8 with SmoothQuant (`alpha 0.8`); the
+  cpe sparse convolutions (`*cpe.0`, one per block) stay fp16.
+- `..._j6gen2_int8_sparse`: additionally the twelve cpe sparse convolutions as INT8
+  plugin nodes carrying their scales.
+- `..._j6gen2_fp8`: the linears in FP8 (E4M3, per-tensor) instead — INT8 linears cost
+  mIoU that E4M3 holds; the cpe convs stay fp16 (the plugin has no FP8 path).
+
+```bash
+autoware-ml quantize --config-name segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_int8 --weights <best.ckpt>
+autoware-ml deploy   --config-name segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_int8 --weights <ptq.ckpt>
+```
+
 ### ONNX Preprocessing Contract
 
 The exported PTv3 encoder ONNX expects all pooling-shape metadata to be
@@ -181,12 +223,12 @@ a performance penalty, hence this fill.
 
 The split export produces one graph per `deploy.onnx.modules` entry:
 
-- `encoder` - the encoder; outputs per-stage features `point_feat_0` …
+- `ptv3_encoder` - the encoder; outputs per-stage features `point_feat_0` …
   `point_feat_{S-1}` (finest to deepest, `S` encoder stages). It consumes the
   per-stage pooling metadata **except** `serialized_pooling_i_cluster`, which
   only drives head-side unpooling and enters the head graphs as
   `pooling_cluster_i` instead.
-- `seg3d_head` - consumes all per-stage features plus the per-pooling
+- `ptv3_seg3d_head` - consumes all per-stage features plus the per-pooling
   `pooling_cluster_i` tensors (the `serialized_pooling_i_cluster` metadata)
   and outputs `pred_labels`/`pred_probs`. For every decoder stage `i` with
   attention blocks (`dec_depths[i] > 0`) the graph additionally consumes that
@@ -197,7 +239,7 @@ The split export produces one graph per `deploy.onnx.modules` entry:
   `serialized_order`, `serialized_inverse`, and `grid_coord`). The rule is implemented once in
   `seg_head_export_input_names` and must be mirrored by deployment consumers
   from the artifact's `dec_depths`.
-- `det3d_head` - consumes `point_feat_{S-2}`, `point_feat_{S-1}`,
+- `ptv3_det3d_head` - consumes `point_feat_{S-2}`, `point_feat_{S-1}`,
   `pooling_cluster_{S-2}`, and `point_grid_coord_{S-2}` and outputs the
   detection head tensors.
 
@@ -212,6 +254,7 @@ The split export produces one graph per `deploy.onnx.modules` entry:
 | `autoware_ml/models/segmentation3d/encoders/ptv3.py`  | Reusable PTv3 encoder components               |
 | `autoware_ml/utils/point_cloud/`                      | Shared point-cloud utilities and serialization |
 | `autoware_ml/ops/segment/segment_csr.py`              | Segment reduction export operator              |
+| `autoware_ml/ops/spconv/`                             | Sparse-conv ONNX export (fusion, INT8)         |
 | `autoware_ml/losses/segmentation3d/`                  | Segmentation losses used by PTv3               |
 | `autoware_ml/datamodule/nuscenes/segmentation3d.py`   | NuScenes datamodule                            |
 | `autoware_ml/datamodule/t4dataset/segmentation3d.py`  | T4Dataset datamodule                           |

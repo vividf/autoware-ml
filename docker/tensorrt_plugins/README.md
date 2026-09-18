@@ -1,7 +1,7 @@
 # TensorRT plugins for sparse-convolution graphs
 
-Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_sparse`
-stage today) export ONNX nodes in the `autoware` domain —
+Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_lidar`
+graph, PTv3's `ptv3_encoder` / `ptv3_seg3d_head` graphs) export ONNX nodes in the `autoware` domain —
 `autoware::GetIndicePairsImplicitGemm` and `autoware::ImplicitGemm`. TensorRT has no
 implementation for them, so an engine build fails with
 
@@ -53,7 +53,7 @@ Without `PLUGINS_SRC` the script clones `autoware_universe@main`; `PLUGINS_REPO`
 
 ### Sparse INT8
 
-A deploy config whose sparse tower is quantized (`*_int8_spconv`) exports `ImplicitGemm`
+A deploy config whose sparse tower is quantized (BEVFusion `*_int8_sparse`, PTv3 `*_int8`) exports `ImplicitGemm`
 nodes with `precision=1` plus `channel_scale` / `bias_scaled` inputs. Upstream `main` has no
 INT8 path in that plugin yet, so build from the branch that does:
 
