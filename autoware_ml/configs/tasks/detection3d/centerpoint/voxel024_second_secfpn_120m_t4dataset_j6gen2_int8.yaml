@@ -1,0 +1,54 @@
+# @package _global_
+# INT8 (explicit Q/DQ) variant of the j6gen2 CenterPoint config.
+#
+#   autoware-ml quantize --config-name detection3d/centerpoint/voxel024_second_secfpn_120m_t4dataset_j6gen2_int8 \
+#     --weights <FP best.ckpt>
+#   autoware-ml deploy   --config-name detection3d/centerpoint/voxel024_second_secfpn_120m_t4dataset_j6gen2_int8 \
+#     --weights <ptq.ckpt written by the quantize run>
+#
+# The checkpoint describes its own quantization, so deploy / test read nothing from the
+# `quantization` section; it only drives `autoware-ml quantize`. Engines build strongly
+# typed: INT8 comes from the Q/DQ nodes in the exported ONNX, the un-quantized stages run
+# fp16 (deploy.onnx.precision), and the graph I/O stays fp32.
+defaults:
+  - /tasks/detection3d/centerpoint/voxel024_second_secfpn_120m_t4dataset_j6gen2
+  - _self_
+
+deploy:
+  onnx:
+    # fp16-typed QuantizeLinear / DequantizeLinear need opset 19.
+    opset_version: 19
+    precision: fp16
+  tensorrt:
+    enabled: true
+  verification:
+    enabled: true
+    # INT8 raw-logit diffs between backends are expected while the metrics stay equal
+    # (fake-quant vs real int8 kernels round differently), so the gates are measured
+    # values x1.25. j6gen2, 2026-09-18, 400-sample MSE calibration, 100 eval frames:
+    # pytorch-vs-onnx max_diff 5.04 (fp32 fake-quant reference vs fp16-typed Q/DQ ONNX,
+    # run unoptimized), onnx-vs-tensorrt 13.41; mAP 0.4486 / 0.4494 / 0.4470
+    # (fp16 export of the same weights: 0.4465); TensorRT model_graphs 6.83 -> 4.51 ms.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 8.0 }
+      - { ref: { backend: onnx, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 18.0 }
+  evaluation:
+    enabled: true
+
+quantization:
+  enabled: true
+  mode: ptq
+  fuse_bn: true
+  default_precision: int8
+  # The PFN stays fp16: pillar features are latency-cheap and quantizing them buys
+  # nothing. The first SECOND stage also stays fp16 — quantizing it costs accuracy
+  # (measured: mAP 0.4450 with blocks.0 quantized vs 0.4576 skipped, 100 frames).
+  skip_quantize:
+    - pts_voxel_encoder
+    - pts_backbone.blocks.0
+  # Reference recipe: 400 samples @ batch_size=1, seed 0, histogram + MSE amax.
+  ptq:
+    calibrate_samples: 400
+    batch_size: 1
+    calib_seed: 0
+    calib_shuffle: false
