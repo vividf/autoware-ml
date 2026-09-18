@@ -32,6 +32,7 @@ nav = [
     { "MLflow" = "user-guide/mlflow.md" },
     { "Optuna" = "user-guide/optuna.md" },
     { "Deployment" = "user-guide/deployment.md" },
+    { "Quantization" = "user-guide/quantization.md" },
   ]},
   { "Models" = [
     { "Calibration Status" = "models/calibration-status.md" },
