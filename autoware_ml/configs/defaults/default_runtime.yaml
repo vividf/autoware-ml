@@ -8,5 +8,6 @@ defaults:
   - modules/logger
   - modules/model
   - modules/paths
+  - modules/quantization
   - modules/run
   - modules/trainer
