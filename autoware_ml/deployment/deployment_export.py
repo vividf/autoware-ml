@@ -51,6 +51,9 @@ class DeploymentExportOutputs(BaseModel):
 
     onnx_exported_paths: Sequence[Path]
     tensorrt_exported_paths: Sequence[Path]
+    #: The shipped ONNX of every exported module, keyed by module name: the file the
+    #: post-export steps run (a graph modifier may write under another name).
+    onnx_paths_by_module: Mapping[str, Path]
 
 
 class DeploymentExport:
@@ -101,6 +104,7 @@ class DeploymentExport:
 
         onnx_exported_paths: Sequence[Path] = []
         tensorrt_exported_paths: Sequence[Path] = []
+        onnx_paths_by_module: dict[str, Path] = {}
 
         for module_name, export_spec in export_specs.items():
             module_onnx_cfg = merge_module_onnx_cfg(self.deploy_cfg.onnx, module_name)
@@ -139,6 +143,7 @@ class DeploymentExport:
                 )
                 # Recorded after the modifiers, which may write to a different path.
                 onnx_exported_paths.append(module_onnx_path)
+                onnx_paths_by_module[module_name] = module_onnx_path
                 logger.info(
                     "Stamped %s metadata: release=%s, commit=%s",
                     module_name,
@@ -160,4 +165,5 @@ class DeploymentExport:
         return DeploymentExportOutputs(
             onnx_exported_paths=onnx_exported_paths,
             tensorrt_exported_paths=tensorrt_exported_paths,
+            onnx_paths_by_module=onnx_paths_by_module,
         )
