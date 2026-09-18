@@ -26,7 +26,7 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
 from autoware_ml.deployment.post_export import run_post_export
-from autoware_ml.utils.checkpoints import apply_matching_weights
+from autoware_ml.quantization.loader import load_model_weights
 from autoware_ml.utils.deploy import (
     build_tensorrt_engine,
     export_to_onnx,
@@ -208,15 +208,10 @@ def main(cfg: DictConfig) -> None:
         logger.info(
             "Loading matching weights from %d checkpoint(s): %s", len(weight_paths), weight_paths
         )
-        apply_matching_weights(
-            model,
-            weight_paths,
-            map_location=device,
-            device=device,
-            set_eval=True,
-            enforce_full_coverage=True,
-            logger=logger,
-        )
+        # A quantized checkpoint describes itself: the identical quantized module tree is
+        # rebuilt from its embedded description before the weights load. Nothing here
+        # reads a `quantization` config section.
+        load_model_weights(model, weight_paths, device, set_eval=True, enforce_full_coverage=True)
 
         export_git_sha = get_git_sha()
         logger.info("Preparing export inputs...")

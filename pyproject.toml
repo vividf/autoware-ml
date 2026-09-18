@@ -26,6 +26,12 @@ dependencies = [
     "mlflow==3.10.1",
     "numpy==1.26.4",
     "nuscenes-devkit==1.2.0",
+    # Quantization (PTQ / QAT) engine: quantized-module registry, calibrators, fake-quant
+    # and the Q/DQ ONNX symbolics. huggingface_hub / safetensors are transitive imports
+    # of nvidia-modelopt 0.46.0 that its wheel does not declare.
+    "nvidia-modelopt==0.46.0",
+    "huggingface_hub>=0.30,<2.0",
+    "safetensors>=0.4,<1.0",
     "optuna==4.8.0",
     "onnx==1.21.0",
     "onnx_graphsurgeon==0.5.8",
