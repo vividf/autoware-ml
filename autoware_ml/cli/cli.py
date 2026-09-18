@@ -21,13 +21,13 @@ completion helpers used by the ``autoware-ml`` executable.
 import logging
 from importlib.metadata import version
 from pathlib import Path
+from typing import Annotated
 
 import click
 import typer
 from click.core import ParameterSource
 from click.shell_completion import CompletionItem
 from typer.core import TyperCommand, TyperGroup
-from typing_extensions import Annotated
 
 from autoware_ml.utils.cli.helpers import (
     complete_config_value,
@@ -36,6 +36,7 @@ from autoware_ml.utils.cli.helpers import (
     complete_session_name_value,
     run_lazy_script,
 )
+
 
 class CompletableGroup(TyperGroup, click.Group):
     """Typer group that click recognizes as a group.
@@ -75,6 +76,7 @@ session_app = typer.Typer(
 TASK_CONFIG_PREFIX = "tasks"
 TRAIN_ENTRYPOINT_MODULE = "autoware_ml.scripts.train"
 DEPLOY_ENTRYPOINT_MODULE = "autoware_ml.scripts.deploy"
+QUANTIZE_ENTRYPOINT_MODULE = "autoware_ml.scripts.quantize"
 TEST_ENTRYPOINT_MODULE = "autoware_ml.scripts.test"
 CLI_RUNTIME_MODULE = "autoware_ml.cli.runtime"
 
@@ -378,6 +380,61 @@ def deploy(
         extra_args=ctx.args,
         hydra_overrides=hydra_overrides,
         checkpoints=weights,
+        config_prefix=TASK_CONFIG_PREFIX,
+    )
+
+
+@app.command(
+    name="quantize",
+    cls=OptionFirstTyperCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def quantize(
+    ctx: typer.Context,
+    config_name: Annotated[
+        str,
+        typer.Option(
+            "--config-name",
+            help="Config name or YAML config path (with a `quantization` section)",
+            autocompletion=complete_task_config,
+        ),
+    ],
+    weights: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--weights",
+            help="FP training checkpoint(s) to quantize (repeatable; later checkpoints "
+            "overwrite earlier ones). Not needed with quantization.dry_run=true.",
+            autocompletion=complete_checkpoint_path,
+        ),
+    ] = None,
+) -> None:
+    """Quantize a trained model into a self-describing INT8 / FP8 checkpoint.
+
+    Post-training quantization calibrates the model's quantizers on the validation
+    split and writes ``ptq.ckpt``, which embeds its own quantization description so
+    ``deploy`` and ``test`` take it like any other ``--weights`` — no quantization
+    config needed downstream. ``quantization.dry_run=true`` prints the precision
+    placement table without weights, data or a GPU.
+
+    Args:
+        ctx: Typer context containing additional Hydra overrides.
+        config_name: Config name or config file path with a ``quantization`` section.
+        weights: FP checkpoint path(s) whose weights are quantized.
+    """
+    hydra_overrides: list[str] = []
+    if weights:
+        hydra_overrides.append("+weights=[" + ",".join(weights) + "]")
+
+    run_lazy_script(
+        CLI_RUNTIME_MODULE,
+        "run_hydra_entrypoint",
+        entrypoint_module=QUANTIZE_ENTRYPOINT_MODULE,
+        config_name=config_name,
+        stage="quantize",
+        extra_args=ctx.args,
+        hydra_overrides=hydra_overrides,
+        checkpoints=weights or [],
         config_prefix=TASK_CONFIG_PREFIX,
     )
 
