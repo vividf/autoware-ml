@@ -45,6 +45,10 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
         else None
     )
     return ExportSpec(
+        # The module is exported as it is: BatchNorm stays a graph node (TensorRT and ONNX
+        # Runtime fuse it themselves, and folding it into fp16 weights only costs precision).
+        # A path that needs folded weights (a quantizer calibrating on the deployed weight,
+        # a plugin node absorbing the bias) folds its own copy before it gets here.
         module=stage.module,
         args=state.graph_inputs[stage.name],
         input_names=list(stage.inputs),

@@ -21,15 +21,15 @@ mapping from module names to :class:`ExportSpec` objects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import inspect
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import lightning as L
-from omegaconf import DictConfig, OmegaConf
 import torch
+from omegaconf import DictConfig, OmegaConf
 from torch.export import Dim
 
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
@@ -396,108 +396,6 @@ def modify_onnx_graph(onnx_path: Path, modify_graph_cfg: DictConfig) -> Path:
     modified_path = apply_modifier(modifier, onnx_path)
     logger.info("Successfully modified ONNX graph: %s", modified_path)
     return modified_path
-
-
-def create_tensorrt_builder_config(tensorrt_cfg: DictConfig) -> tuple[Any, Any, Any, Any]:
-    """Create TensorRT builder objects for engine generation."""
-    import tensorrt as trt
-
-    trt_logger = trt.Logger(trt.Logger.WARNING)
-    trt.init_libnvinfer_plugins(trt_logger, "")
-    builder = trt.Builder(trt_logger)
-    # Always strongly typed: deploy.onnx.precision decides which dtypes the ONNX carries, and the
-    # engine has to use them as exported rather than let the builder reassign precisions.
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    parser = trt.OnnxParser(network, trt_logger)
-    config = builder.create_builder_config()
-
-    workspace_size = tensorrt_cfg.get("workspace_size", 1 << 30)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size)
-    logger.info("Workspace size: %.2f GB", workspace_size / (1024**3))
-    return builder, network, parser, config
-
-
-def parse_onnx_file(parser: Any, onnx_path: Path) -> None:
-    """Parse an ONNX file with a TensorRT parser."""
-    with open(onnx_path, "rb") as f:
-        onnx_data = f.read()
-
-    if not parser.parse(onnx_data):
-        errors = [parser.get_error(i) for i in range(parser.num_errors)]
-        error_msg = "\n".join(f"TensorRT parser error {i}: {err}" for i, err in enumerate(errors))
-        raise RuntimeError(f"Failed to parse ONNX file:\n{error_msg}")
-
-    logger.info("Successfully parsed ONNX file")
-
-
-def create_optimization_profile(builder: Any, tensorrt_cfg: DictConfig, network: Any) -> Any | None:
-    """Create the optimization profile of ``network`` from ``deploy.tensorrt.input_shapes``.
-
-    The table is keyed by ONNX input name and may cover every exported graph of the model;
-    only the entries of this network's inputs apply. An input without an entry gets no
-    profile, which TensorRT accepts for a static input and reports for a dynamic one.
-
-    Returns:
-        The profile, or ``None`` when no entry applies to the network.
-    """
-    if "input_shapes" not in tensorrt_cfg:
-        return None
-    input_shapes = OmegaConf.to_container(tensorrt_cfg.input_shapes, resolve=True)
-    network_inputs = [network.get_input(index).name for index in range(network.num_inputs)]
-    skipped = sorted(set(input_shapes) - set(network_inputs))
-    if skipped:
-        logger.info("input_shapes entries of other graphs' inputs skipped: %s", skipped)
-
-    profile = None
-    for input_name in network_inputs:
-        shapes = input_shapes.get(input_name)
-        if shapes is None:
-            continue
-        min_shape = shapes.get("min_shape")
-        opt_shape = shapes.get("opt_shape")
-        max_shape = shapes.get("max_shape")
-        if not (min_shape and opt_shape and max_shape):
-            raise ValueError(
-                f"TensorRT optimization profile for input '{input_name}' is incomplete. "
-                "All of min_shape, opt_shape, and max_shape must be specified."
-            )
-        if profile is None:
-            profile = builder.create_optimization_profile()
-        profile.set_shape(input_name, min=min_shape, opt=opt_shape, max=max_shape)
-        logger.info(
-            "Optimization profile for '%s': min=%s, opt=%s, max=%s",
-            input_name,
-            min_shape,
-            opt_shape,
-            max_shape,
-        )
-    return profile
-
-
-def build_tensorrt_engine(
-    onnx_path: Path,
-    deploy_cfg: DictConfig,
-    output_path: Path,
-) -> None:
-    """Build a TensorRT engine from an ONNX model."""
-    logger.info("Building TensorRT engine...")
-    tensorrt_cfg = deploy_cfg.tensorrt
-    builder, network, parser, config = create_tensorrt_builder_config(tensorrt_cfg)
-    parse_onnx_file(parser, onnx_path)
-
-    profile = create_optimization_profile(builder, tensorrt_cfg, network)
-    if profile is not None:
-        config.add_optimization_profile(profile)
-
-    logger.info("Building TensorRT engine (this may take a while)...")
-    serialized_engine = builder.build_serialized_network(network, config)
-    if serialized_engine is None:
-        raise RuntimeError("Failed to build TensorRT engine.")
-
-    with open(output_path, "wb") as f:
-        f.write(serialized_engine)
-
-    logger.info("Successfully built TensorRT engine: %s", output_path)
 
 
 def should_export_stage(stage_cfg: DictConfig | None) -> bool:
