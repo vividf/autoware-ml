@@ -24,9 +24,10 @@ from pathlib import Path
 
 import hydra
 import lightning as L
+import torch
 from omegaconf import DictConfig
 
-from autoware_ml.utils.checkpoints import apply_matching_weights
+from autoware_ml.quantization.loader import load_model_weights
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_RUN_ID_ENV,
     build_run_metadata,
@@ -151,7 +152,11 @@ def main(cfg: DictConfig):
     logger.info(f"Accelerator: {cfg.trainer.get('accelerator', 'auto')}")
     logger.info(f"Devices: {cfg.trainer.get('devices', 'auto')}")
 
-    apply_matching_weights(model, weight_paths, map_location="cpu", set_eval=True, logger=logger)
+    # Quantized (PTQ / QAT) checkpoints rebuild their quantized tree before loading; an FP
+    # checkpoint takes the plain matching-weights path.
+    load_model_weights(
+        model, weight_paths, torch.device("cpu"), set_eval=True, enforce_full_coverage=False
+    )
     trainer.test(model, datamodule=datamodule, ckpt_path=None)
 
     logger.info("Evaluation completed!")
