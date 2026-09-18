@@ -13,3 +13,14 @@ deploy:
     # Custom TensorRT plugin shared libraries loaded before the ONNX is parsed
     # (graphs with autoware::* ops). Empty for plain graphs.
     plugin_libraries: []
+  # Post-export steps. Both run only for models that declare a stage graph
+  # (BaseModel.build_stages) and are opt-in per model config.
+  # Cross-backend numerical parity of the final raw graph outputs.
+  verification:
+    enabled: false
+    # Default absolute tolerance for FP32-graph comparisons. Lossy backends (fp16
+    # engines, int8) set an explicit per-scenario `tolerance` instead of loosening this.
+    tolerance: 0.01
+    num_verify_batches: 1
+    # - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda } }
+    scenarios: []
