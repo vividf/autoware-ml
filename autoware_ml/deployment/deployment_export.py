@@ -30,8 +30,8 @@ from autoware_ml.utils.deploy import (
     export_to_onnx,
     should_modify_graph,
     modify_onnx_graph,
-    build_tensorrt_engine,
 )
+from autoware_ml.deployment.backends.tensorrt_builder import build_engine_from_config
 from autoware_ml.utils.mlflow_helpers import get_git_sha
 from autoware_ml.utils.onnx_meta import stamp_onnx_meta
 from autoware_ml.utils.onnx_precision import (
@@ -178,7 +178,7 @@ class DeploymentExport:
                             f"ONNX file not found: {module_onnx_path}. "
                             "TensorRT export requires a valid ONNX model."
                         )
-                    build_tensorrt_engine(module_onnx_path, self.deploy_cfg, module_engine_path)
+                    build_engine_from_config(module_onnx_path, self.deploy_cfg, module_engine_path)
                     tensorrt_exported_paths.append(module_engine_path)
 
         # Implement the export logic here
