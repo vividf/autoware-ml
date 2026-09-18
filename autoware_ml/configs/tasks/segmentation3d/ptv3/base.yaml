@@ -82,3 +82,30 @@ deploy:
           class_names: ${dataset.segmentation3d.class_names}
   tensorrt:
     enabled: false
+    # The encoder and head graphs carry autoware:: plugin ops (the cpe sparse
+    # convolutions); TensorRT loads their library before parsing (built by the image, see
+    # docker/tensorrt_plugins/README.md). ONNX Runtime cannot run them, so the stage graph
+    # falls back to PyTorch on that backend.
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
+  # Post-export checks over the stage graph (PTv3SegmentationModel.build_stages). Both
+  # opt-in; the pytorch reference runs the export modules (shuffle_orders off), so the raw
+  # outputs are comparable across backends.
+  verification:
+    enabled: false
+    num_verify_batches: 1
+    # Gate on pred_probs (softmax); pred_labels is an int argmax and is reported as a
+    # mismatch ratio, not gated. Measured 2026-09-18 on the j6gen2 FP checkpoint with the
+    # fp16 island cast: pytorch vs tensorrt max_diff 0.0217 (mean 4e-5, 0.03 % of the
+    # labels flipped at near-ties), mIoU equal; gate 0.1 leaves ~4x headroom.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.1 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      # Plugin ops have no ONNX Runtime implementation: this column would be the PyTorch
+      # numbers under another name (the framework stars it), so it stays off.
+      onnx: { enabled: false, device: cuda }
+      tensorrt: { enabled: true, device: cuda }

@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.losses.segmentation3d.lovasz import LovaszLoss
 from autoware_ml.metrics.segmentation3d.eval_output import (
@@ -257,14 +257,26 @@ def segmentation_eval_output(seg_logits: torch.Tensor, batch: Mapping[str, Any])
     Returns:
         ``{"seg_frames": [...]}`` keyed for the segmentation suites.
     """
+    return segmentation_eval_output_from_probs(
+        torch.softmax(seg_logits, dim=1), seg_logits.argmax(dim=1), batch
+    )
+
+
+def segmentation_eval_output_from_probs(
+    probs: torch.Tensor, pred_labels: torch.Tensor, batch: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The ``seg_frames`` contract from per-voxel softmax scores and argmax labels.
+
+    What a deployed graph emits (``pred_probs`` / ``pred_labels``); the PyTorch path
+    reaches it through :func:`segmentation_eval_output`, so both score the same way.
+    """
     inverse = batch["inverse"].long()
     offset = batch["offset"].long()
-    scores = torch.softmax(seg_logits, dim=1)[inverse]
     return segmentation_frames_eval_output(
         coord=batch["origin_coord"],
-        pred_labels=seg_logits.argmax(dim=1)[inverse],
+        pred_labels=pred_labels.long()[inverse],
         target_labels=batch["origin_segment"].long(),
-        scores=scores,
+        scores=probs[inverse],
         frame_ids=concat_frame_ids(offset, inverse),
         num_frames=int(offset.shape[0]),
         batch=batch,
