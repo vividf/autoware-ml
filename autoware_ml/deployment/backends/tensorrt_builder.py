@@ -147,9 +147,25 @@ def _parse_onnx_file(parser: Any, onnx_path: Path) -> None:
     logger.info("Successfully parsed ONNX file")
 
 
-def _create_optimization_profile(builder: Any, input_shapes: Mapping[str, ShapeProfile]):
+def _create_optimization_profile(
+    builder: Any, network: Any, input_shapes: Mapping[str, ShapeProfile]
+):
+    """Profile over the configured inputs this network actually has.
+
+    ``deploy.tensorrt.input_shapes`` is one mapping for every exported module, so a
+    multi-module model lists the inputs of all of them; an entry that names another
+    module's input is skipped here rather than handed to TensorRT as an unknown tensor.
+    """
+    network_inputs = {network.get_input(i).name for i in range(network.num_inputs)}
     profile = builder.create_optimization_profile()
     for input_name, shapes in input_shapes.items():
+        if input_name not in network_inputs:
+            logger.info(
+                "Optimization profile entry '%s' is not an input of this network (%s); skipped.",
+                input_name,
+                sorted(network_inputs),
+            )
+            continue
         profile.set_shape(
             input_name,
             min=list(shapes.min_shape),
@@ -196,7 +212,9 @@ def build_engine(
     _parse_onnx_file(parser, onnx_path)
 
     if input_shapes:
-        config.add_optimization_profile(_create_optimization_profile(builder, input_shapes))
+        profile = _create_optimization_profile(builder, network, input_shapes)
+        if profile.num_shape_entries if hasattr(profile, "num_shape_entries") else True:
+            config.add_optimization_profile(profile)
 
     logger.info("Building TensorRT engine (this may take a while)...")
     serialized_engine = builder.build_serialized_network(network, config)

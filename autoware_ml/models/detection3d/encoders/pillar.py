@@ -23,8 +23,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 
 class PFNLayer(nn.Module):
@@ -33,6 +33,10 @@ class PFNLayer(nn.Module):
     The layer applies a linear projection, normalization, and pooling over the
     points that belong to each pillar.
     """
+
+    #: ``norm`` normalizes ``linear``'s output channels (the reshape in ``forward`` only
+    #: flattens the point axis), so the pair folds into the linear layer for export.
+    bn_fusion_pairs = (("linear", "norm"),)
 
     def __init__(self, in_channels: int, out_channels: int, last_layer: bool) -> None:
         """Initialize one PFN layer.
