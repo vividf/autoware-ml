@@ -42,6 +42,7 @@ from autoware_ml.deployment.stages import GraphStage, RunState, Stage, TorchStag
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.base import BaseModel
+from autoware_ml.quantization.plan import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
 
@@ -101,6 +102,20 @@ class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
         bev_features = self.neck(bev_features)
         outputs = self.bbox_head(bev_features)
         return outputs.export_tensors(self.output_names)
+
+
+#: CenterPoint's quantization declaration: which top-level submodules carry which
+#: quantizable module kinds. An architecture fact, so it lives in code; the `quantization`
+#: config only subtracts from it (`skip_quantize` / `disable_recipes`). Submodules absent
+#: on a variant are skipped, so one rules object serves every CenterPoint composition.
+CENTERPOINT_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "pts_backbone": ("conv", "linear"),
+        "pts_neck": ("conv",),
+        "bbox_head": ("conv",),
+        "pts_voxel_encoder": ("linear",),
+    },
+)
 
 
 class CenterPointDetectionModel(BaseModel):
@@ -213,6 +228,10 @@ class CenterPointDetectionModel(BaseModel):
         """Reject single-module CenterPoint deployment export."""
         del batch_inputs
         raise RuntimeError("CenterPoint deployment uses split modules; see build_stages().")
+
+    def build_quantization_rules(self) -> QuantRules:
+        """CenterPoint's quantizable submodules (see :data:`CENTERPOINT_QUANT_RULES`)."""
+        return CENTERPOINT_QUANT_RULES
 
     def build_stages(self) -> Sequence[Stage]:
         """Declare the deployed CenterPoint: two exported graphs with PyTorch glue between.
