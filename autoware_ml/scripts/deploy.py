@@ -25,6 +25,7 @@ from mlflow.entities import RunStatus
 from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
+from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.utils.checkpoints import apply_matching_weights
 from autoware_ml.utils.deploy import (
     apply_onnx_transforms,
@@ -38,11 +39,6 @@ from autoware_ml.utils.deploy import (
     should_modify_graph,
     supports_export_stage,
     validate_cuda_available,
-)
-from autoware_ml.utils.onnx_precision import (
-    convert_onnx_precision,
-    resolve_onnx_precision,
-    should_convert_precision,
 )
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_RUN_ID_ENV,
@@ -59,6 +55,9 @@ from autoware_ml.utils.mlflow_helpers import (
 )
 from autoware_ml.utils.onnx_meta import release_to_model_version, stamp_onnx_meta
 from autoware_ml.utils.onnx_precision import (
+    convert_onnx_precision,
+    resolve_onnx_precision,
+    should_convert_precision,
     validate_module_onnx_precision,
 )
 from autoware_ml.utils.runtime import (
@@ -225,6 +224,7 @@ def main(cfg: DictConfig) -> None:
         export_specs = resolve_export_specs(datamodule, model, device)
         onnx_exported_paths: list[Path] = []
         tensorrt_exported_paths: list[Path] = []
+        shipped_onnx_paths: dict[str, Path] = {}
 
         for module_name, export_spec in export_specs.items():
             module_onnx_cfg = merge_module_onnx_cfg(deploy_cfg.onnx, module_name)
@@ -266,6 +266,7 @@ def main(cfg: DictConfig) -> None:
                         module_onnx_path = convert_onnx_precision(
                             module_onnx_path, resolve_onnx_precision(module_onnx_cfg)
                         )
+                    shipped_onnx_paths[module_name] = module_onnx_path
                     metainfo_cfg = module_onnx_cfg.get("metainfo", None)
                     stamp_onnx_meta(
                         module_onnx_path,
@@ -302,6 +303,17 @@ def main(cfg: DictConfig) -> None:
                         )
                     build_tensorrt_engine(module_onnx_path, deploy_cfg, module_engine_path)
                     tensorrt_exported_paths.append(module_engine_path)
+
+        # Post-export steps (opt-in, stage-graph models only): cross-backend
+        # verification of the exported artifacts against the PyTorch reference.
+        run_post_export(
+            deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
+            model=model,
+            datamodule=datamodule,
+            output_dir=output_dir,
+            device=device,
+            onnx_paths=shipped_onnx_paths,
+        )
 
     except Exception:
         if mlflow_client is not None and deploy_run_id is not None:
