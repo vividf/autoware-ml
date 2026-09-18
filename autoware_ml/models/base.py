@@ -49,6 +49,12 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
     All parameters are explicitly typed for IDE support and type checking.
     """
 
+    #: Set on a model whose raw graph outputs are incomparable across backends by
+    #: construction (stochastic ordering, backend-specific proposal selection ...). One
+    #: sentence saying why; cross-backend verification then skips loudly and per-backend
+    #: evaluation is the meaningful gate. ``None`` means the raw outputs are comparable.
+    verification_caveat: str | None = None
+
     def __init__(
         self,
         optimizer: Callable[..., Optimizer] | None = None,
