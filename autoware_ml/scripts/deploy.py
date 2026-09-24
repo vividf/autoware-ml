@@ -27,6 +27,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from autoware_ml.utils.checkpoints import apply_matching_weights
 from autoware_ml.utils.deploy import (
+    apply_onnx_transforms,
     build_tensorrt_engine,
     export_to_onnx,
     merge_module_onnx_cfg,
@@ -248,6 +249,12 @@ def main(cfg: DictConfig) -> None:
                         module_onnx_path,
                     )
                     onnx_exported_paths.append(module_onnx_path)
+
+                    # Stage-declared rewrites first: they pattern-match the raw fp32
+                    # export (plugin-node fusion, INT8 plugin scales).
+                    module_onnx_path = apply_onnx_transforms(
+                        module_onnx_path, export_spec.onnx_transforms
+                    )
 
                     modify_graph_cfg = module_onnx_cfg.get("modify_graph", None)
                     if should_modify_graph(modify_graph_cfg):
