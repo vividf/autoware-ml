@@ -14,6 +14,25 @@ experiment_name: lidar_voxel0170_second_secfpn_b16_50e_t4dataset_120m
 trainer:
   max_epochs: 50
 
+deploy:
+  tensorrt:
+    # Voxel count varies per frame; the max matches the evaluation pillar budget
+    # (eval_max_voxels), the largest the runtime can hand the engine. The point channels
+    # are [x, y, z, intensity, time lag].
+    input_shapes:
+      voxels:
+        min_shape: [1000, "${max_num_points}", 5]
+        opt_shape: [80000, "${max_num_points}", 5]
+        max_shape: ["${eval_max_voxels}", "${max_num_points}", 5]
+      coors:
+        min_shape: [1000, 3]
+        opt_shape: [80000, 3]
+        max_shape: ["${eval_max_voxels}", 3]
+      num_points_per_voxel:
+        min_shape: [1000]
+        opt_shape: [80000]
+        max_shape: ["${eval_max_voxels}"]
+
 callbacks:
   dynamic_validation:
     # Validate every 5 epochs, then every epoch over the last 10 of the 50-epoch schedule.
