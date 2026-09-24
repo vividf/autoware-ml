@@ -15,10 +15,10 @@
 """Scenario-driven cross-backend verification.
 
 Each scenario names a reference and a test backend (with devices); the verifier
-runs both pipelines on the same preprocessed batches and compares the final raw
-graph outputs element-wise against an absolute tolerance (the verifier default,
-or the scenario's own ``tolerance`` override). No ground truth is involved: this
-is numerical parity, a peer of — not a form of — evaluation.
+runs both pipelines on the same preprocessed batches and compares the raw model
+outputs element-wise: floats against an absolute tolerance (the verifier default or
+the scenario's ``tolerance``), integers by the share that differ. No ground truth is
+involved: this is numerical parity, a peer of — not a form of — evaluation.
 """
 
 from __future__ import annotations
