@@ -17,11 +17,15 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class ConvModule(nn.Module):
     """Convolution, batch normalization, and ReLU activation composed into one block."""
+
+    #: ``norm`` directly normalizes ``conv``'s output (``forward`` is act(norm(conv(x)))),
+    #: so the pair folds into the convolution for export.
+    bn_fusion_pairs = (("conv", "norm"),)
 
     def __init__(
         self,

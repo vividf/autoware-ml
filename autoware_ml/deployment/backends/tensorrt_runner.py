@@ -27,21 +27,30 @@ torch stream, so the reported time is the engine's pure GPU compute.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import tensorrt as trt
 import torch
 
+from autoware_ml.deployment.backends.tensorrt_builder import load_tensorrt_plugin_libraries
+
 logger = logging.getLogger(__name__)
 
 
-def load_trt_engine(engine_path: str | Path, *, component_name: str | None = None):
+def load_trt_engine(
+    engine_path: str | Path,
+    *,
+    component_name: str | None = None,
+    plugin_libraries: Sequence[str] = (),
+):
     """Deserialize a TensorRT engine and create its execution context, failing loud.
 
     Args:
         engine_path: Path to the serialized ``.engine`` file.
         component_name: Optional component label for error messages.
+        plugin_libraries: Custom TensorRT plugin ``.so`` paths the engine's ops come from.
 
     Returns:
         Tuple of ``(engine, execution_context)``.
@@ -56,6 +65,9 @@ def load_trt_engine(engine_path: str | Path, *, component_name: str | None = Non
     if not engine_path.exists():
         raise FileNotFoundError(f"TensorRT engine not found: {engine_path}")
 
+    # Custom plugin libraries (autoware::* ops) must be loaded before the registry
+    # initializes, in this process — an engine built elsewhere still needs them here.
+    load_tensorrt_plugin_libraries(plugin_libraries)
     trt_logger = trt.Logger(trt.Logger.WARNING)
     trt.init_libnvinfer_plugins(trt_logger, "")
     runtime = trt.Runtime(trt_logger)
@@ -103,13 +115,16 @@ class TensorRTModuleRunner:
     Args:
         engine_path: Path to the serialized ``.engine`` file.
         device: CUDA device the engine executes on.
+        plugin_libraries: Custom plugin ``.so`` paths to load before deserializing.
     """
 
-    def __init__(self, engine_path: str | Path, device: torch.device) -> None:
+    def __init__(
+        self, engine_path: str | Path, device: torch.device, plugin_libraries: Sequence[str] = ()
+    ) -> None:
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError(f"TensorRT requires a CUDA device, got {self.device}.")
-        self.engine, self.context = load_trt_engine(engine_path)
+        self.engine, self.context = load_trt_engine(engine_path, plugin_libraries=plugin_libraries)
         self.input_names, self.output_names = list_trt_io_names(self.engine)
         # Bindings persist across calls: input shapes are re-declared and output buffers
         # re-allocated only when a shape actually changes. Re-binding every call was
