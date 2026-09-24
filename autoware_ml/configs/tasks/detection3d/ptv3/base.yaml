@@ -99,6 +99,11 @@ deploy:
           class_names: ${dataset.detection3d.class_names}
   tensorrt:
     enabled: false
+    # The encoder graph carries autoware:: plugin ops (cpe sparse convolutions); TensorRT
+    # loads their library before parsing. Building the detection engines also needs
+    # deploy.tensorrt.input_shapes for the encoder / head inputs (not shipped yet: only the
+    # segmentation j6gen2 config carries measured profiles).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # Post-export checks over the stage graph (PTv3DetectionModel.build_stages), opt-in.
   verification:
     enabled: false

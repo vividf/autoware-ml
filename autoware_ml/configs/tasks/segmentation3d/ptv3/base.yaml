@@ -82,6 +82,11 @@ deploy:
           class_names: ${dataset.segmentation3d.class_names}
   tensorrt:
     enabled: false
+    # The encoder and head graphs carry autoware:: plugin ops (the cpe sparse
+    # convolutions); TensorRT loads their library before parsing (built by the image, see
+    # docker/tensorrt_plugins/README.md). ONNX Runtime cannot run them, so the stage graph
+    # falls back to PyTorch on that backend.
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # Post-export checks over the stage graph (PTv3SegmentationModel.build_stages). Both
   # opt-in; the pytorch reference runs the export modules (shuffle_orders off), so the raw
   # outputs are comparable across backends.

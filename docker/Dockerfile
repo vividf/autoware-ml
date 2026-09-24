@@ -3,6 +3,10 @@ FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG PIXI_VERSION=0.80.0
+# TensorRT plugins for sparse-convolution graphs (see docker/tensorrt_plugins/README.md).
+# Set to "false" to skip both native builds — the image then cannot build engines for
+# graphs carrying autoware:: custom ops.
+ARG BUILD_TENSORRT_PLUGINS="true"
 ARG USERNAME=autoware-ml
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -32,6 +36,7 @@ ENV GIT_PS1_DESCRIBE_STYLE=contains \
 # hadolint ignore=DL3008
 RUN apt-get update && \
   apt-get install -y --no-install-recommends \
+  cmake \
   bash-completion \
   build-essential \
   ca-certificates \
@@ -91,6 +96,22 @@ RUN /opt/pixi/bin/pixi run --environment dev install-project \
   && chown -R "${USERNAME}:${USERNAME}" /workspace /ccache
 
 # Copy and set up entrypoint
+# TensorRT plugins for the sparse-convolution custom ops the deployed graphs bind against
+# (autoware::ImplicitGemm and friends). Two native builds, kept in their own layers so the
+# project copy above does not invalidate them: the spconv/cumm C++ packages the plugin
+# links against, then the plugin itself into /opt/plugins. Both use the system toolchain —
+# cumm installs headers into /usr/local/include, which the pixi compilers do not search.
+RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
+      bash /workspace/docker/tensorrt_plugins/build_spconv_cpp.sh \
+      && rm -rf /opt/spconv_cpp /var/lib/apt/lists/*; \
+    fi
+RUN if [ "${BUILD_TENSORRT_PLUGINS}" = "true" ]; then \
+      PYTHON_BIN="$(/opt/pixi/bin/pixi run --environment dev which python)" \
+        bash /workspace/docker/tensorrt_plugins/build_plugin.sh \
+      && rm -rf /tmp/autoware_trt_plugins_build /tmp/autoware_trt_plugins_src \
+                /tmp/tensorrt_oss_headers; \
+    fi
+
 COPY docker/entrypoint.sh /entrypoint.sh
 
 # Metadata
