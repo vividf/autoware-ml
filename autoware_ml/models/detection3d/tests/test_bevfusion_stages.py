@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BEVFusion lidar stage graph: declaration validity, ABI names, the ONNX fallback, and
-the packed-output decode's agreement with the head."""
+"""BEVFusion lidar stage graph: declaration validity, ABI names, the ONNX fallback, the
+rulebook-precompute opt-in, and the packed-output decode's agreement with the head."""
 
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
 from autoware_ml.models.detection3d.heads.transfusion import TransFusionHead
 from autoware_ml.models.detection3d.task_modules.bbox_coders import TransFusionBBoxCoder
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.rulebook import rulebook_input_names
 from autoware_ml.types.backend import Backend
 
 
@@ -78,7 +80,25 @@ def test_lidar_declaration_keeps_the_runtime_module_and_falls_back_on_onnx() -> 
     # TensorRT executes the plugin ops (deploy.tensorrt.plugin_libraries); ONNX Runtime has
     # no implementation for them, so only that backend falls back to PyTorch.
     assert graph.torch_fallback_backends == (Backend.ONNX,)
+    # The bias/ReLU fold into the plugin nodes is part of the declaration.
+    assert fuse_sparse_graph in graph.onnx_transforms
     assert model.verification_caveat
+
+
+@pytest.mark.skipif(not IS_SPCONV_AVAILABLE, reason="BEVFusion sparse encoder requires spconv")
+def test_rulebook_precompute_is_an_opt_in_that_adds_a_glue_stage_and_graph_inputs() -> None:
+    encoder = _sparse_encoder(export_precompute_rulebooks=True)
+    model = _lidar_model(encoder)
+    stages = validate_stages(model.build_stages())
+    assert [stage.name for stage in stages] == [
+        "fetch_voxels",
+        "precompute_rulebooks",
+        "bevfusion_lidar",
+    ]
+    graph = stages[2]
+    expected = rulebook_input_names(encoder.downsample_stages())
+    assert expected and graph.inputs[3:] == expected
+    assert set(graph.onnx_dynamic_axes) == set(graph.inputs)
 
 
 def test_camera_lidar_models_keep_their_hand_written_export_specs() -> None:
