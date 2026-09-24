@@ -10,3 +10,21 @@ model:
       # (Y, X, Z) voxel grid and dense (Y, X, Z) output of the sparse encoder.
       sparse_shape: [1440, 1440, 41]
       dense_output_shapes: [180, 180, 2]
+
+deploy:
+  tensorrt:
+    # The max is the evaluation voxel budget (eval_max_voxels), the most the runtime hands
+    # the engine. Point channels: x, y, z, intensity, time lag.
+    input_shapes:
+      voxels:
+        min_shape: [1000, "${max_num_points}", 5]
+        opt_shape: [80000, "${max_num_points}", 5]
+        max_shape: ["${eval_max_voxels}", "${max_num_points}", 5]
+      coors:
+        min_shape: [1000, 3]
+        opt_shape: [80000, 3]
+        max_shape: ["${eval_max_voxels}", 3]
+      num_points_per_voxel:
+        min_shape: [1000]
+        opt_shape: [80000]
+        max_shape: ["${eval_max_voxels}"]
