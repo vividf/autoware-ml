@@ -77,12 +77,44 @@ The export produces the ONNX modules consumed by `autoware_universe/perception/a
 
 Every main-body module returns the runtime detection interface: `bbox_pred` with the raw regression channels `(center, height, dim, rot, vel)` per proposal, `score` with per-proposal confidences, and `label_pred` with per-proposal class labels. Metric-space decoding happens in the runtime node.
 
-TensorRT engine generation is disabled (`deploy.tensorrt.enabled=false`); the runtime builds engines itself using the custom sparse-convolution and `bev_pool` plugins.
+The camera-LiDAR export leaves TensorRT engine generation disabled (`deploy.tensorrt.enabled=false`); the runtime builds those engines itself with its `bev_pool` plugin.
+
+### LiDAR-only: verification, evaluation and TensorRT
+
+The LiDAR-only model declares its deployment as a stage graph (`BEVFusionDetectionModel.build_stages`): `fetch_voxels` (PyTorch glue) feeds the single `bevfusion_lidar` graph, whose sparse encoder exports as `autoware::ImplicitGemm` plugin nodes. TensorRT loads `deploy.tensorrt.plugin_libraries` (built by the image, see [Deployment › Plugin graphs](../user-guide/deployment.md#plugin-graphs-sparse-convolutions)) and builds the engine here, so the export can be verified and scored per backend:
+
+```bash
+autoware-ml deploy \
+    --config-name detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2 \
+    --weights <best.ckpt> \
+    deploy.onnx.precision=fp16 deploy.tensorrt.enabled=true \
+    deploy.evaluation.enabled=true deploy.evaluation.num_samples=100
+```
+
+Element-wise verification is skipped for this model (its `verification_caveat`: the head's proposal selection is a top-k over scores, so a near-tie reorders proposals between backends while the decoded detections agree); the evaluation table is the gate. ONNX Runtime cannot run the plugin nodes, so the `onnx` backend runs the graph in PyTorch (starred in the table).
+
+Export knobs on the j6gen2 config, all export-only (training is untouched):
+
+- `model.bbox_head.fuse_export_attention: true` exports the decoder's attention as TensorRT-fusable blocks (default `false` keeps the explicit attention graph).
+- `model.pts_middle_encoder.export_do_sort` (default `true`): argsort the pair masks; a latency-only trade-off, measure per target.
+- `model.pts_middle_encoder.export_precompute_rulebooks` (default `false`): precompute the down-sampling rulebooks outside the graph; removes TensorRT's data-dependent-shape synchronizations but adds `rulebook/...` graph inputs the runtime must supply.
+
+### INT8
+
+Two quantized variants produce self-describing checkpoints with `autoware-ml quantize` and deploy through the same command ([Quantization](../user-guide/quantization.md)):
+
+- `..._j6gen2_int8`: the dense towers (SECOND except `blocks.0`, FPN except `blocks.0`, the head's convolutions) as explicit Q/DQ; the sparse encoder and the decoder stay fp16.
+- `..._j6gen2_int8_sparse`: additionally the sparse encoder from stage 3.1 onwards as INT8 plugin nodes carrying their scales (the early high-resolution layers are both the least accurate and the slowest in INT8).
+
+```bash
+autoware-ml quantize --config-name detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_int8 --weights <best.ckpt>
+autoware-ml deploy   --config-name detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_int8 --weights <ptq.ckpt>
+```
 
 ## Implementation
 
 | Path                                                          | Description                                      |
-| ------------------------------------------------------------- | ------------------------------------------------ |
+|---------------------------------------------------------------|--------------------------------------------------|
 | `autoware_ml/models/detection3d/bevfusion.py`                 | BEVFusion model wrapper                          |
 | `autoware_ml/models/detection3d/feature_extractors.py`        | LiDAR BEV and multiview image feature extractors |
 | `autoware_ml/models/detection3d/view_transforms/depth_lss.py` | Multiview image-to-BEV transform                 |
@@ -92,6 +124,8 @@ TensorRT engine generation is disabled (`deploy.tensorrt.enabled=false`); the ru
 | `autoware_ml/models/detection3d/backbones/second.py`          | SECOND backbone                                  |
 | `autoware_ml/models/detection3d/necks/second_fpn.py`          | SECONDFPN neck                                   |
 | `autoware_ml/models/detection3d/heads/transfusion.py`         | TransFusion detection head                       |
+| `autoware_ml/ops/spconv/`                                     | Sparse-conv ONNX export (fusion, INT8, rulebook) |
+| `docker/tensorrt_plugins/`                                    | TensorRT plugin build for the sparse graph       |
 | `autoware_ml/models/common/backbones/resnet.py`               | ResNet multiview image backbone                  |
 | `autoware_ml/models/common/necks/lss_fpn.py`                  | Multiview image neck                             |
 | `autoware_ml/models/detection3d/task_modules/`                | Shared assigners, costs, coders                  |
