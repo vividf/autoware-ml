@@ -26,21 +26,23 @@ from typing import Any
 
 import torch
 
+from autoware_ml.deployment.stages import Stage
+from autoware_ml.models.base import BaseModel
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3SegDecoderHead,
     segmentation_eval_output,
+    segmentation_eval_output_from_probs,
     segmentation_predict_outputs,
 )
 from autoware_ml.models.segmentation3d.ptv3_base import (
     PTv3BaseModel,
     PTv3EncoderExportBase,
-    build_encoder_export_spec,
     build_monolithic_export_inputs,
     build_point_feature_dynamic_axes,
-    build_ptv3_export_context,
     build_ptv3_input_dynamic_axes,
-    build_seg_head_export_spec,
+    build_ptv3_stages,
+    build_seg_head_stage,
     split_block_parameters,
 )
 from autoware_ml.utils.deploy import ExportSpec
@@ -182,10 +184,23 @@ class PTv3SegmentationModel(PTv3BaseModel):
         return self.seg3d_head.loss(outputs, batch_inputs_dict["segment"])
 
     def build_eval_output(
-        self, batch: Mapping[str, Any], outputs: torch.Tensor
+        self, batch: Mapping[str, Any], outputs: torch.Tensor | Mapping[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
-        """Scatter voxel predictions to points for the segmentation metric."""
+        """Pair predictions with ground truth for the segmentation suites.
+
+        ``outputs`` is the forward's voxel logits, or — on a deployment backend — the
+        exported graph's ``pred_labels`` / ``pred_probs``, which are already the argmax and
+        softmax the suites need.
+        """
+        if isinstance(outputs, Mapping):
+            return segmentation_eval_output_from_probs(
+                outputs["pred_probs"], outputs["pred_labels"], batch
+            )
         return segmentation_eval_output(outputs, batch)
+
+    def build_stages(self) -> Sequence[Stage]:
+        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads."""
+        return build_ptv3_stages(self, build_seg_head_stage(self, self.seg3d_head))
 
     def predict_outputs(
         self,
@@ -231,13 +246,5 @@ class PTv3SegmentationModel(PTv3BaseModel):
         )
 
     def build_export_specs(self, batch: Mapping[str, torch.Tensor]) -> dict[str, ExportSpec]:
-        """Build split PTv3 segmentation ONNX export specs for encoder and head."""
-        context = build_ptv3_export_context(self, batch)
-        return {
-            "ptv3_encoder": build_encoder_export_spec(context),
-            "ptv3_seg3d_head": build_seg_head_export_spec(
-                context,
-                self.seg3d_head.prepare_for_export(self.EXPORT_ORDER),
-                self.get_export_output_names(),
-            ),
-        }
+        """``ptv3_encoder`` + ``ptv3_seg3d_head`` export specs, derived from :meth:`build_stages`."""
+        return BaseModel.build_export_specs(self, batch)
