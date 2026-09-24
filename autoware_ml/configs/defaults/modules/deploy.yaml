@@ -14,7 +14,7 @@ deploy:
     plugin_libraries: []
   # Post-export steps. Both run only for models that declare a stage graph
   # (ModuleBaseModel.build_stages) and are opt-in per model config.
-  # Cross-backend numerical parity of the final raw graph outputs.
+  # Cross-backend numerical parity of the raw model outputs (model_output_names).
   verification:
     enabled: false
     # Default absolute tolerance for FP32-graph comparisons. Lossy backends (fp16
