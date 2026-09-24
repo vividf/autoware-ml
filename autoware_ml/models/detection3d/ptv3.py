@@ -32,6 +32,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     build_ptv3_stages,
     stage_voxel_axis_name,
 )
+from autoware_ml.quantization.plan import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import offset_to_batch
 from autoware_ml.utils.point_cloud.structures import Point
@@ -432,6 +433,12 @@ class _PTv3DetHeadExportModule(nn.Module):
         return tuple(outputs[name] for name in self.output_names)
 
 
+#: PTv3 detection quantization declaration: the encoder's GEMM-bearing layers.
+PTV3_DET_QUANT_RULES = QuantRules(
+    quantize_submodules={"encoder": {"linear": None, "spconv": "int8"}},
+)
+
+
 class PTv3DetectionModel(PTv3BaseModel):
     """Compose the PTv3 encoder with dense BEV detection heads."""
 
@@ -545,6 +552,10 @@ class PTv3DetectionModel(PTv3BaseModel):
     ) -> dict[str, ExportSpec]:
         """``ptv3_encoder`` + ``ptv3_det3d_head`` export specs, derived from :meth:`build_stages`."""
         return BaseModel.build_export_specs(self, batch_inputs_dict)
+
+    def build_quantization_rules(self) -> QuantRules:
+        """The encoder's GEMM-bearing layers (see :data:`PTV3_DET_QUANT_RULES`)."""
+        return PTV3_DET_QUANT_RULES
 
     def build_stages(self) -> Sequence[Stage]:
         """``serialize_points -> ptv3_encoder -> ptv3_det3d_head``."""

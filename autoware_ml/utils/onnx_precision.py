@@ -34,6 +34,9 @@ import onnx
 # cspell:ignore onnxconverter
 from onnxconverter_common import float16
 
+from autoware_ml.deployment.onnx.inspect import onnx_custom_op_domains, onnx_has_qdq
+from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,10 +85,40 @@ def should_convert_precision(onnx_cfg: Any) -> bool:
 
 
 def convert_onnx_precision(onnx_path: str | Path, precision: OnnxPrecision) -> Path:
-    """Convert an exported fp32 ONNX to the requested explicit precision, in place."""
-    if precision == OnnxPrecision.FP16:
-        return _convert_to_fp16(Path(onnx_path))
-    raise ValueError(f"No conversion implemented for precision '{precision}'.")
+    """Convert an exported ONNX to ``precision`` in place and return its path.
+
+    Two fp16 paths, chosen from the graph itself:
+
+    - A graph carrying quantize/dequantize nodes or custom-domain plugin ops takes the
+      island-aware whole-graph cast
+      (:func:`autoware_ml.deployment.onnx.precision.cast_graph_to_fp16`): the generic
+      converter has no rule keeping a calibrated Q/DQ pair exact and cannot type a plugin
+      op. Conv-family Q/DQ go fp16 with the graph; Q/DQ feeding a Gemm/MatMul stay
+      fp32-typed islands; the graph I/O stays fp32.
+    - Every other graph takes the onnxconverter-common path below, unchanged.
+    """
+    if precision != OnnxPrecision.FP16:
+        raise ValueError(f"No conversion implemented for precision '{precision}'.")
+    onnx_path = Path(onnx_path)
+    domains = onnx_custom_op_domains(onnx_path)
+    has_qdq = onnx_has_qdq(onnx_path)
+    if domains or has_qdq:
+        logger.info(
+            "Converting %s to fp16 with the island-aware whole-graph cast (%s).",
+            onnx_path.name,
+            ", ".join(
+                filter(
+                    None,
+                    [
+                        f"plugin domains: {', '.join(domains)}" if domains else "",
+                        "Q/DQ nodes" if has_qdq else "",
+                    ],
+                )
+            ),
+        )
+        cast_graph_to_fp16(onnx_path)
+        return onnx_path
+    return _convert_to_fp16(onnx_path)
 
 
 def _convert_to_fp16(onnx_path: Path) -> Path:

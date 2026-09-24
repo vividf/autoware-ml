@@ -32,6 +32,7 @@ from autoware_ml.models.detection3d.tests.ptv3_detection_fixtures import (
     build_trans_model,
     move_batch_to_device,
 )
+from autoware_ml.models.segmentation3d.ptv3 import PTV3_SEG_QUANT_RULES
 from autoware_ml.models.segmentation3d.ptv3_base import (
     DET_HEAD_STAGE,
     ENCODER_STAGE,
@@ -73,6 +74,7 @@ def test_seg_declaration_names_the_runtime_modules_and_is_name_covered() -> None
     assert not any(name.endswith("_cluster") for name in encoder.inputs)
     assert encoder.torch_fallback_backends == (Backend.ONNX,)
     assert stages[2].outputs == ("pred_labels", "pred_probs")
+    assert model.build_quantization_rules() is PTV3_SEG_QUANT_RULES
 
 
 @REQUIRES_SPARSE_CUDA
@@ -129,3 +131,28 @@ def test_det_declaration_and_specs() -> None:
     specs = model.build_export_specs(batch)
     assert list(specs) == ["ptv3_encoder", "ptv3_det3d_head"]
     assert specs["ptv3_det3d_head"].output_names == list(model.export_output_names)
+
+
+def test_export_replacement_drops_quantizer_buffers_of_a_quantized_cpe_conv() -> None:
+    spconv = pytest.importorskip("spconv.pytorch")
+    from autoware_ml.models.segmentation3d.encoders.ptv3 import (
+        ExportableSubMConv3d,
+        replace_submconv3d_for_export,
+    )
+
+    conv = spconv.SubMConv3d(4, 8, kernel_size=3, indice_key="cpe", bias=True)
+    # A calibrated (modelopt) sparse conv carries its quantizers' amax buffers next to
+    # the weights; the float export copy has no slot for them.
+    conv.input_quantizer = torch.nn.Module()
+    conv.input_quantizer.register_buffer("_amax", torch.tensor(1.5))
+    conv.weight_quantizer = torch.nn.Module()
+    conv.weight_quantizer.register_buffer("_amax", torch.tensor(0.5))
+    holder = torch.nn.Sequential(conv)
+
+    replace_submconv3d_for_export(holder)
+
+    exported = holder[0]
+    assert isinstance(exported, ExportableSubMConv3d)
+    assert torch.equal(exported.weight, conv.weight)
+    assert torch.equal(exported.bias, conv.bias)
+    assert not any("quantizer" in key for key in exported.state_dict())

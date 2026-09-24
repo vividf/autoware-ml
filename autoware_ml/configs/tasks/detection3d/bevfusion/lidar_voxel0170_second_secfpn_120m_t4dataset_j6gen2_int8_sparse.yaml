@@ -1,0 +1,26 @@
+# @package _global_
+# INT8 dense + INT8 sparse tower (ImplicitGemm plugin scales) variant.
+#
+#   autoware-ml quantize --config-name detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_int8_sparse --weights <FP best.ckpt>
+#   autoware-ml deploy   --config-name detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_int8_sparse --weights <ptq.ckpt>
+#
+# The checkpoint describes its own quantization, so deploy / test read nothing from the
+# `quantization` section. Engines build strongly typed: dense INT8 from the Q/DQ nodes,
+# the quantized sparse layers as INT8 plugin nodes carrying their scales, the rest fp16.
+defaults:
+  - /tasks/detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_int8
+  - _self_
+
+quantization:
+  # The early, high-resolution sparse layers are both the least accurate in INT8 and the
+  # slowest (per-layer GEMM speedups 0.45-0.82x below stage 3 against 1.4-1.55x in
+  # stage 4), so the recipe keeps them fp16 and quantizes stage 3.1 onwards. A quantized
+  # sparse layer deploys as an INT8 plugin node carrying its scales, not as Q/DQ.
+  skip_quantize:
+    - bbox_head.decoder
+    - pts_neck.blocks.0
+    - pts_backbone.blocks.0
+    - pts_middle_encoder.conv_input
+    - pts_middle_encoder.encoder_layers.encoder_layer1
+    - pts_middle_encoder.encoder_layers.encoder_layer2
+    - pts_middle_encoder.encoder_layers.encoder_layer3.0

@@ -45,6 +45,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     build_seg_head_stage,
     split_block_parameters,
 )
+from autoware_ml.quantization.plan import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -96,6 +97,17 @@ class _PTv3SegmentationExportModule(PTv3EncoderExportBase):
         pred_probs = torch.softmax(point_logits, dim=1)
         pred_labels = pred_probs.argmax(dim=1)
         return pred_labels, pred_probs
+
+
+#: PTv3's quantization declaration: the GEMM-bearing submodules, nothing else. Linear
+#: layers follow ``default_precision`` (FP8 for attention / FFN unless a recipe says INT8);
+#: the cpe sparse convolutions deploy as INT8 plugin nodes when quantized.
+PTV3_SEG_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "encoder": {"linear": None, "spconv": "int8"},
+        "seg3d_head": {"linear": None, "spconv": "int8"},
+    },
+)
 
 
 class PTv3SegmentationModel(PTv3BaseModel):
@@ -197,6 +209,10 @@ class PTv3SegmentationModel(PTv3BaseModel):
                 outputs["pred_probs"], outputs["pred_labels"], batch
             )
         return segmentation_eval_output(outputs, batch)
+
+    def build_quantization_rules(self) -> QuantRules:
+        """PTv3's quantizable towers (see :data:`PTV3_SEG_QUANT_RULES`)."""
+        return PTV3_SEG_QUANT_RULES
 
     def build_stages(self) -> Sequence[Stage]:
         """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads."""

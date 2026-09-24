@@ -1,0 +1,16 @@
+# @package _global_
+# INT8 linears + INT8 cpe sparse convolutions (ImplicitGemm plugin scales) variant.
+#
+#   autoware-ml quantize --config-name segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_int8_sparse --weights <FP best.ckpt>
+#   autoware-ml deploy   --config-name segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_int8_sparse --weights <ptq.ckpt>
+#
+# Same recipe as `_int8` with the twelve cpe sparse convolutions quantized as well: they
+# deploy as INT8 plugin nodes carrying their scales (not as Q/DQ). Their channel counts
+# (64-512) are where INT8 GEMMs pay off; the plugin needs the INT8 build of
+# libautoware_tensorrt_plugins (docker/tensorrt_plugins/README.md).
+defaults:
+  - /tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_int8
+  - _self_
+
+quantization:
+  skip_quantize: []

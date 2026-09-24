@@ -127,6 +127,11 @@ def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
         AssertionError: If modules are in training mode
     """
     assert not conv.training and not bn.training, "Fusion only works in eval mode"
+    if bn.running_mean is None or bn.running_var is None:
+        raise ValueError(
+            f"Cannot fold {type(bn).__name__} without running statistics "
+            "(track_running_stats=False): there is nothing to fold into the convolution."
+        )
 
     # Check if this is a transposed convolution
     is_transposed = isinstance(conv, (nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d))
