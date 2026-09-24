@@ -187,6 +187,11 @@ deploy:
           image_feats: { 0: num_imgs }
   tensorrt:
     enabled: false
+    # The lidar graph carries autoware::ImplicitGemm / GetIndicePairsImplicitGemm plugin
+    # ops; TensorRT loads their library before parsing the ONNX (the image builds it, see
+    # docker/tensorrt_plugins/README.md). ONNX Runtime cannot run them, so the stage graph
+    # falls back to PyTorch on that backend.
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # Post-export checks over the lidar-only stage graph (BEVFusionDetectionModel.build_stages).
   # Raw positional comparison is meaningless for the packed outputs: the graph selects the
   # top-num_proposals queries and zero-padded heatmap borders produce mass ties, so backends

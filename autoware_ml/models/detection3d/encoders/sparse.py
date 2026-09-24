@@ -223,6 +223,11 @@ class SparseEncoder(nn.Module):
             targets — the reference deployment does exactly that — so measure before
             changing it. Applies only to the export copy
             (:meth:`prepare_for_export`); training always uses spconv's own default.
+        export_precompute_rulebooks: Whether the deployed stage graph precomputes the
+            rulebooks of the down-sampling layers outside the graph and feeds them as
+            extra graph inputs (``rulebook/<indice_key>/<slot>``), removing the
+            data-dependent shapes TensorRT synchronizes on. Changes the exported graph's
+            input list, so the runtime has to supply them; off by default.
     """
 
     def __init__(
@@ -242,10 +247,12 @@ class SparseEncoder(nn.Module):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         export_do_sort: bool = True,
+        export_precompute_rulebooks: bool = False,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
         self.export_do_sort = export_do_sort
+        self.export_precompute_rulebooks = export_precompute_rulebooks
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
