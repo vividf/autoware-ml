@@ -948,13 +948,52 @@ class TransFusionHead(nn.Module):
         if batch_vels is not None:
             batch_vels = batch_vels[..., -self.num_proposals :].float()
 
-        bbox_scores, bbox_classes = self.bbox_coder.decode_heatmaps(heatmaps=batch_scores)
-        pred_bboxes = self.bbox_coder.decode_boxes(
+        return self.decode_proposals(
+            batch_scores=batch_scores,
             rots=batch_rots,
             dims=batch_dims,
             centers=batch_centers,
             heights=batch_heights,
             vels=batch_vels,
+        )
+
+    def decode_proposals(
+        self,
+        batch_scores: Float32[torch.Tensor, "batch_size num_classes num_proposals"],
+        rots: Float32[torch.Tensor, "batch_size 2 num_proposals"],
+        dims: Float32[torch.Tensor, "batch_size 3 num_proposals"],
+        centers: Float32[torch.Tensor, "batch_size 2 num_proposals"],
+        heights: Float32[torch.Tensor, "batch_size 1 num_proposals"],
+        vels: Float32[torch.Tensor, "batch_size 2 num_proposals"] | None,
+    ) -> ModelPredictions:
+        """Turn per-proposal predictions into the final detections.
+
+        The post-processing every consumer must agree on: metric-space decoding with the
+        configured bbox coder, the per-class score thresholds and the post-center range
+        filter, then NMS. Split out of :meth:`decode_outputs` because a deployment whose
+        graph performs the proposal selection itself arrives with the same per-proposal
+        tensors and must run exactly this tail; sharing it is what keeps the deployed
+        behavior tied to the model's.
+
+        Args:
+            batch_scores: Per-class proposal scores after the dense-heatmap calibration,
+                in float32.
+            rots: Rotation channels of the proposals.
+            dims: Dimension channels of the proposals.
+            centers: BEV center channels of the proposals.
+            heights: Height channel of the proposals.
+            vels: Velocity channels of the proposals, or ``None``.
+
+        Returns:
+            The typed predictions, one per batch element.
+        """
+        bbox_scores, bbox_classes = self.bbox_coder.decode_heatmaps(heatmaps=batch_scores)
+        pred_bboxes = self.bbox_coder.decode_boxes(
+            rots=rots,
+            dims=dims,
+            centers=centers,
+            heights=heights,
+            vels=vels,
         )
 
         # Create keep_masks based on score_thresholds and post_center_range

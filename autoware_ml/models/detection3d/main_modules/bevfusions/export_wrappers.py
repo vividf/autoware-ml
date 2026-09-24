@@ -16,9 +16,12 @@ from jaxtyping import Float32
 import torch
 import torch.nn.functional as F
 
+from collections.abc import Mapping
+
 from autoware_ml.dataclasses.models.detection3d.head_outputs import (
     TransFusionHeadOutputs,
 )
+from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.models.detection3d.heads.transfusions.transfusion_head import TransFusionHead
 
 
@@ -72,3 +75,46 @@ def export_detection_outputs(
         dim=0,
     )
     return bbox_pred, score, query_labels[0]
+
+
+# The packed ``bbox_pred`` channel layout of :func:`export_detection_outputs`.
+_PACKED_CENTER = slice(0, 2)
+_PACKED_HEIGHT = slice(2, 3)
+_PACKED_DIM = slice(3, 6)
+_PACKED_ROT = slice(6, 8)
+_PACKED_VEL = slice(8, 10)
+
+
+def decode_packed_detections(
+    head: TransFusionHead, outputs: Mapping[str, torch.Tensor]
+) -> ModelPredictions:
+    """Turn the deployed graph's packed tensors into the typed detections.
+
+    The inverse of :func:`export_detection_outputs` up to the post-processing: the graph
+    already fused the per-proposal score and picked the winning label, so the class scores
+    are re-scattered into the per-class layout the head's post-processing expects, and that
+    post-processing (metric-space decoding, score and range filtering, NMS) is the head's
+    own :meth:`TransFusionHead.decode_proposals`, not a copy of it.
+
+    Args:
+        head: The model's detection head, providing the post-processing.
+        outputs: ``bbox_pred`` / ``score`` / ``label_pred`` of one sample.
+
+    Returns:
+        The one sample's typed predictions, as :meth:`TransFusionHead.decode_outputs`
+        returns them.
+    """
+    bbox_pred = outputs["bbox_pred"].float()
+    scores = outputs["score"].float()
+    labels = outputs["label_pred"].long()
+    num_proposals = scores.shape[0]
+    score_matrix = bbox_pred.new_zeros((1, head.num_classes, num_proposals))
+    score_matrix[0, labels, torch.arange(num_proposals, device=bbox_pred.device)] = scores
+    return head.decode_proposals(
+        batch_scores=score_matrix,
+        rots=bbox_pred[_PACKED_ROT].unsqueeze(0),
+        dims=bbox_pred[_PACKED_DIM].unsqueeze(0),
+        centers=bbox_pred[_PACKED_CENTER].unsqueeze(0),
+        heights=bbox_pred[_PACKED_HEIGHT].unsqueeze(0),
+        vels=bbox_pred[_PACKED_VEL].unsqueeze(0),
+    )

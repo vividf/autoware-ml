@@ -20,7 +20,7 @@ This module contains the high-level BEVFusion detector wrapper and export ABI.
 from __future__ import annotations
 
 from copy import deepcopy
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from types import MappingProxyType
 
@@ -40,6 +40,7 @@ from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
+from autoware_ml.deployment.stages import GraphStage, RunState, Stage, TorchStage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_lidar import (
@@ -52,11 +53,13 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_camera imp
 from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.heads.transfusions.transfusion_head import TransFusionHead
 from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers import (
+    decode_packed_detections,
     export_detection_outputs,
 )
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -524,6 +527,67 @@ class BEVFusionDetectionModel(ModuleBaseModel):
         )
         return multi_task_predictions
 
+    def build_stages(self) -> Sequence[Stage] | None:
+        """Declare the deployed lidar-only BEVFusion; camera-lidar keeps its export specs.
+
+        ::
+
+            fetch_voxels (torch) -> bevfusion_lidar (graph)
+
+        The single ``bevfusion_lidar`` graph is the module the runtime loads, unchanged
+        in name and I/O. Its ONNX carries ``autoware::`` plugin ops (the sparse encoder),
+        which TensorRT executes through its plugin library and ONNX Runtime cannot run,
+        so only that backend falls back to PyTorch. The graph is single-sample.
+
+        Returns:
+            The stages for a lidar-only model, ``None`` for camera-lidar (its two-graph
+            export keeps the hand-written :meth:`build_export_specs`) and camera-only.
+        """
+        if self.camera_network is not None or self.lidar_network is None:
+            return None
+
+        def fetch_voxels(state: RunState) -> Mapping[str, torch.Tensor]:
+            batch: ModelBatchInputs = state.batch
+            if batch.batch_size() != 1:
+                raise ValueError(
+                    "BEVFusion's deployed graph is single-sample, but the batch holds "
+                    f"{batch.batch_size()} samples. Deploy with batch_size=1."
+                )
+            voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(batch)
+            return {"voxels": voxels, "coors": coors, "num_points_per_voxel": num_points_per_voxel}
+
+        return (
+            TorchStage(
+                "fetch_voxels",
+                run=fetch_voxels,
+                inputs=(),  # reads only the batch
+                outputs=("voxels", "coors", "num_points_per_voxel"),
+            ),
+            GraphStage(
+                "bevfusion_lidar",
+                module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
+                inputs=("voxels", "coors", "num_points_per_voxel"),
+                # The packed outputs are the names build_deployed_eval_output decodes.
+                outputs=("bbox_pred", "score", "label_pred"),
+                onnx_dynamic_axes={
+                    "voxels": {0: "voxels_num"},
+                    "coors": {0: "voxels_num"},
+                    "num_points_per_voxel": {0: "voxels_num"},
+                },
+                torch_fallback_backends=(Backend.ONNX,),
+            ),
+        )
+
+    def build_deployed_eval_output(
+        self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Decode the graph's packed boxes through the head's post-processing and pair
+        them with the ground truth, as :meth:`build_eval_output` does for forward()."""
+        return detection_eval_output(
+            predictions=decode_packed_detections(self.bbox_head, outputs),
+            batch_inputs=multi_task_batch_inputs,
+        )
+
     def _prepare_export_model(self) -> "BEVFusionDetectionModel":
         """Return an export-ready model copy with exportable submodules.
 
@@ -543,7 +607,8 @@ class BEVFusionDetectionModel(ModuleBaseModel):
         """Build the ONNX export specifications.
 
         Lidar-only models export one ``bevfusion_lidar`` main body, which the
-        ``autoware_bevfusion`` runtime consumes unchanged. Camera-lidar models
+        ``autoware_bevfusion`` runtime consumes unchanged; its spec is derived from
+        the stage graph of :meth:`build_stages`. Camera-lidar models
         export the ``bevfusion_image_backbone`` (raw ``uint8`` images to neck
         features) and the ``bevfusion_camera_lidar`` main body consuming those
         features together with precomputed depth maps and BEV-pool metadata.
@@ -562,19 +627,14 @@ class BEVFusionDetectionModel(ModuleBaseModel):
             ValueError: If the batch lacks the voxel data, or lacks image data or
                 depth maps when the camera branch is configured.
         """
+        if self.camera_network is None:
+            # The lidar-only export is derived from the stage graph (the base default).
+            return super().build_export_specs(multi_task_batch_inputs)
+
         voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(
             multi_task_batch_inputs
         )
         export_model = self._prepare_export_model()
-
-        if self.camera_network is None:
-            return {
-                "bevfusion_lidar": ExportSpec(
-                    module=_BEVFusionLidarExportWrapper(export_model),
-                    args=(voxels, coors, num_points_per_voxel),
-                    input_param_names=["voxels", "coors", "num_points_per_voxel"],
-                )
-            }
 
         image_data = multi_task_batch_inputs.image_data
         if image_data is None:
