@@ -20,7 +20,7 @@ This module is the single interface between deployment stages and quantization
 - :class:`QuantRules` — a model's *declaration*: which top-level submodules get
   which module kinds replaced, and which architecture recipes apply. One model
   = one rules object next to the model (e.g. CenterPoint's in
-  ``models/detection3d/main_modules/centerpoint/quantization.py``).
+  ``models/detection3d/centerpoint.py``).
 - :class:`QuantizationPlan` — rules + parsed config, bound together. Its
   :meth:`~QuantizationPlan.prepare` fuses BN and inserts Q/DQ **and records
   every placement decision it makes**.

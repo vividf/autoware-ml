@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import torch
@@ -38,6 +39,8 @@ from autoware_ml.models.detection3d.feature_extractors import (
     MultiviewImageFeatureExtractor,
 )
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
+from autoware_ml.quantization.plan import QuantRules
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
@@ -128,6 +131,22 @@ def decode_packed_detections(
         bbox_pred[2:3].unsqueeze(0),
         bbox_pred[8:10].unsqueeze(0),
     )
+
+
+#: BEVFusion's quantization declaration. The dense towers quantize with Q/DQ; the sparse
+#: middle encoder quantizes as the ``spconv`` kind — its layers deploy as
+#: ``autoware::ImplicitGemm`` plugin nodes carrying per-layer INT8 scales rather than Q/DQ
+#: (the plugin has no FP8 path, so the kind is pinned INT8 rather than following
+#: ``default_precision``). The decoder's Linear layers are pinned FP8: INT8 linears cost
+#: accuracy for nothing while E4M3 held it. The pillar encoder has no weights to quantize.
+BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "pts_middle_encoder": {"spconv": "int8"},
+        "pts_backbone": ("conv",),
+        "pts_neck": ("conv",),
+        "bbox_head": {"conv": None, "linear": "fp8"},
+    },
+)
 
 
 class _BEVFusionExportWrapper(nn.Module):
@@ -713,6 +732,10 @@ class BEVFusionDetectionModel(BaseModel):
             return detection_eval_output(decode_packed_detections(self.bbox_head, outputs), batch)
         return detection_eval_output(self.bbox_head.predict(outputs), batch)
 
+    def build_quantization_rules(self) -> QuantRules:
+        """BEVFusion's quantizable towers (see :data:`BEVFUSION_LIDAR_QUANT_RULES`)."""
+        return BEVFUSION_LIDAR_QUANT_RULES
+
     def build_stages(self) -> Sequence[Stage] | None:
         """Declare the deployed lidar-only BEVFusion; camera-lidar keeps its export specs.
 
@@ -755,7 +778,11 @@ class BEVFusionDetectionModel(BaseModel):
                 # axes stay dynamic through deploy.onnx.modules.bevfusion_lidar.
                 outputs=("bbox_pred", "score", "label_pred"),
                 torch_fallback_backends=(Backend.ONNX,),
-                onnx_transforms=(fuse_sparse_graph,),
+                onnx_transforms=(
+                    fuse_sparse_graph,
+                    # No-op unless the checkpoint carries calibrated sparse quantizers.
+                    partial(sparse_int8_transform, module=self.pts_middle_encoder),
+                ),
             ),
         )
 

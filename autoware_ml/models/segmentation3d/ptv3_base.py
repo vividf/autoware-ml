@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import partial
 from typing import Any
 
 import torch
@@ -21,6 +22,7 @@ from autoware_ml.models.segmentation3d.encoders.ptv3 import (
     build_serialized_pooling_meta,
     collect_encoder_stage_points,
 )
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.structures import (
@@ -965,6 +967,9 @@ def build_encoder_stage(model: PTv3BaseModel) -> GraphStage:
         # executes them from deploy.tensorrt.plugin_libraries; ONNX Runtime has no
         # implementation, so only that backend falls back to torch.
         torch_fallback_backends=(Backend.ONNX,),
+        # A plugin node cannot absorb Q/DQ: a calibrated cpe convolution carries its
+        # scales as node attributes / inputs instead. No-op for an un-quantized encoder.
+        onnx_transforms=(partial(sparse_int8_transform, module=model.encoder),),
     )
 
 
@@ -988,6 +993,7 @@ def build_seg_head_stage(model: PTv3BaseModel, seg3d_head: nn.Module) -> GraphSt
         # them under these names (no second softmax).
         onnx_dynamic_axes=dynamic_axes,
         torch_fallback_backends=(Backend.ONNX,),
+        onnx_transforms=(partial(sparse_int8_transform, module=seg3d_head),),
     )
 
 
