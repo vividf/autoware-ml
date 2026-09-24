@@ -26,6 +26,7 @@ from torch import nn
 
 from autoware_ml.deployment.stages import GraphStage, TorchStage, validate_stages
 from autoware_ml.models.detection3d.bevfusion import (
+    BEVFUSION_LIDAR_QUANT_RULES,
     BEVFusionDetectionModel,
     decode_packed_detections,
 )
@@ -105,6 +106,14 @@ def test_camera_lidar_models_keep_their_hand_written_export_specs() -> None:
     model = _lidar_model(nn.Identity())
     model.view_transform = nn.Identity()  # any non-None image branch
     assert model.build_stages() is None
+
+
+def test_rules_are_the_model_declaration() -> None:
+    model = _lidar_model(nn.Identity())
+    assert model.build_quantization_rules() is BEVFUSION_LIDAR_QUANT_RULES
+    assert BEVFUSION_LIDAR_QUANT_RULES.quantize_submodules["pts_middle_encoder"] == {
+        "spconv": "int8"
+    }
 
 
 def _coder() -> TransFusionBBoxCoder:

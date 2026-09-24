@@ -25,7 +25,7 @@ identity (``isinstance(m, nn.Conv2d)`` stays true) and gains ``input_quantizer``
 Architecture-specific placement (residual-add / pool) lives in
 :mod:`autoware_ml.quantization.recipes`; which submodules get which kinds is a model's
 :class:`~autoware_ml.quantization.plan.QuantRules` declaration (e.g. CenterPoint's in
-``models/detection3d/main_modules/centerpoint/quantization.py``).
+``models/detection3d/centerpoint.py``).
 """
 
 from __future__ import annotations
