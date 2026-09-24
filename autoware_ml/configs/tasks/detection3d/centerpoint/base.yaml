@@ -103,6 +103,27 @@ deploy:
           vel: { 0: batch_size, 2: H, 3: W }
   tensorrt:
     enabled: false
+  # Post-export checks over the stage graph (CenterPointDetectionModel.build_stages).
+  # Both stay opt-in; the TensorRT scenario needs deploy.tensorrt.enabled=true.
+  verification:
+    enabled: false
+    num_verify_batches: 1
+    # Raw-logit diffs under deploy.onnx.precision=fp16 are large by design while the
+    # per-backend mAP stays equal (j6gen2, 2026-09-18: pytorch-vs-onnx max_diff 8.98,
+    # pytorch-vs-tensorrt 7.83; mAP 0.4486 / 0.4478 / 0.4465 on 100 frames) — the gates
+    # are the observed values x1.25, not strict bounds. The pytorch reference runs the
+    # un-folded model; export folds BN (an inference identity).
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 12.0 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: true, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
 
 data_preprocessing:
   pipeline:
