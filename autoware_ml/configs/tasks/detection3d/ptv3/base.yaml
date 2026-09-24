@@ -99,3 +99,17 @@ deploy:
           class_names: ${dataset.detection3d.class_names}
   tensorrt:
     enabled: false
+  # Post-export checks over the stage graph (PTv3DetectionModel.build_stages), opt-in.
+  verification:
+    enabled: false
+    num_verify_batches: 1
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.5 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      onnx: { enabled: false, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
