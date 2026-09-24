@@ -335,6 +335,10 @@ class TransFusionHead(nn.Module):
     with decoder layers, and computes assignment-based training targets.
     """
 
+    #: shared_act(shared_norm(shared_conv(x))); shared_norm is an Identity on the
+    #: reference-checkpoint branch, which BN folding skips.
+    bn_fusion_pairs = (("shared_conv", "shared_norm"),)
+
     def __init__(
         self,
         num_proposals: int,
