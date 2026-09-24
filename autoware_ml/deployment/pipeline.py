@@ -159,7 +159,7 @@ def _artifact_runner(
     if backend is Backend.TENSORRT:
         from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner
 
-        return TensorRTModuleRunner(path, device)
+        return TensorRTModuleRunner(path, device, plugin_libraries)
     raise ValueError(f"No artifact runner for backend {backend}.")
 
 
