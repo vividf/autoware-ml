@@ -45,6 +45,31 @@ class TestOutputComparator:
         assert not summary.passed
         assert "tolerance" in (summary.reason or "")
 
+    def test_integer_outputs_report_mismatch_ratio_without_gating(self):
+        # Class labels are decisions over the float outputs: a few flips at near-tie
+        # points must not fail the scenario, but the ratio is reported for the log.
+        labels_ref = np.zeros((40,), dtype=np.int64)
+        labels_test = labels_ref.copy()
+        labels_test[0] = 15
+        probs = torch.zeros((40, 4))
+        summary, details = OutputComparator(("pred_labels", "pred_probs")).compare(
+            [labels_ref, probs], [labels_test, probs.clone()], tolerance=1e-6
+        )
+        assert summary.passed
+        assert summary.max_diff == 0.0
+        label_detail = next(d for d in details if d.path.startswith("output[pred_labels]"))
+        assert "mismatch ratio" in label_detail.path
+        assert label_detail.max_diff == 1 / 40
+
+    def test_integer_outputs_fail_when_most_of_them_differ(self):
+        labels_ref = np.arange(20, dtype=np.int64)
+        labels_test = (labels_ref + 1) % 20  # every label wrong: a wiring mistake
+        summary, _ = OutputComparator(("pred_labels",)).compare(
+            [labels_ref], [labels_test], tolerance=1e-6
+        )
+        assert not summary.passed
+        assert "integer outputs differ" in (summary.reason or "")
+
     def test_shape_mismatch_fails_with_reason(self):
         a = [np.zeros((2, 3), dtype=np.float32)]
         b = [np.zeros((2, 4), dtype=np.float32)]

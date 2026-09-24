@@ -57,6 +57,32 @@ deploy:
           vel: { 0: batch_size, 2: H, 3: W }
   tensorrt:
     enabled: false
+  # Post-export checks over the stage graph (CenterPointDetectionModel.build_stages).
+  # Both stay opt-in; the TensorRT scenario needs deploy.tensorrt.enabled=true.
+  verification:
+    enabled: false
+    num_verify_batches: 1
+    # Raw-logit diffs under deploy.onnx.precision=fp16 are large by design while the
+    # per-backend mAP stays equal (j6gen2, 2026-09-18: pytorch-vs-onnx max_diff 8.98,
+    # pytorch-vs-tensorrt 7.83; mAP 0.4486 / 0.4478 / 0.4465 on 100 frames) — the gates
+    # are the observed values x1.25, not strict bounds. Measured while the export still
+    # folded BatchNorm into the weights; the export now keeps the BatchNorm nodes (TensorRT
+    # fuses them), which only narrows the fp16 diffs.
+    # The ONNX Runtime scenario runs on the CPU: its CUDA provider rejects the fp16
+    # BatchNormalization of the pillar encoder's [num_voxels, C, num_points] tensors
+    # (cuDNN CUDNN_STATUS_NOT_SUPPORTED, onnxruntime 1.24), the CPU provider runs it.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cpu }, tolerance: 12.0 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
+  evaluation:
+    enabled: false
+    num_samples: -1
+    num_warmup: 2
+    backends:
+      pytorch: { enabled: true, device: cuda }
+      # Same ONNX Runtime limitation as above; the CPU provider is too slow for a split.
+      onnx: { enabled: false, device: cuda }
+      tensorrt: { enabled: true, device: cuda }
 
 model:
   _target_: autoware_ml.models.detection3d.main_modules.centerpoint.CenterPointDetectionModel

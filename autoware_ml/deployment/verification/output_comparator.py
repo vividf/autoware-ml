@@ -45,6 +45,11 @@ import torch
 #: Headroom multiplier for the gate suggested on a verification failure. Observed
 #: max_diff varies a little run to run (kernel/tactic nondeterminism), so the suggested
 #: gate leaves margin above one observation without becoming a rubber stamp.
+#: Fraction of an integer output (argmax labels, indices) allowed to differ between two
+#: backends. Labels flip at near-ties (measured 0.03 % fp16, 0.3-0.4 % INT8 on PTv3); a
+#: wiring or class-order mistake flips most of them.
+DECISION_MISMATCH_TOLERANCE = 0.05
+
 SUGGESTED_GATE_HEADROOM = 1.25
 
 
@@ -183,6 +188,37 @@ class OutputComparator:
                 )
             )
             return _fail(path, f"shape mismatch {ref_np.shape} vs {test_np.shape}")
+
+        if ref_np.dtype.kind in "iub":
+            # Integer / boolean outputs (class labels, indices) are decisions taken over
+            # the float outputs compared elsewhere: a label flips whenever two logits are
+            # within backend noise of each other, so an element-wise max-diff gate would
+            # fail on a handful of near-tie points with the probabilities equal. Gate on
+            # the mismatch *ratio* instead: a few flips pass, a swapped or mis-wired
+            # integer output (ratio ~1) does not.
+            mismatch_ratio = float(np.mean(ref_np != test_np)) if ref_np.size else 0.0
+            passed = mismatch_ratio <= DECISION_MISMATCH_TOLERANCE
+            tensor_details.append(
+                TensorDiffDetail(
+                    path=f"{path} (decision mismatch ratio, gate {DECISION_MISMATCH_TOLERANCE})",
+                    shape=tuple(int(x) for x in ref_np.shape),
+                    max_diff=mismatch_ratio,
+                    mean_diff=mismatch_ratio,
+                )
+            )
+            reason = (
+                None
+                if passed
+                else (
+                    f"{path}: {mismatch_ratio:.1%} of the integer outputs differ "
+                    f"(gate {DECISION_MISMATCH_TOLERANCE:.0%}, shape={ref_np.shape}). Decisions "
+                    "flip at near-ties only in small numbers; this looks like a wiring or "
+                    "class-order mismatch."
+                )
+            )
+            return OutputDiffSummary(
+                passed=passed, max_diff=0.0, mean_diff=0.0, num_elements=0, reason=reason
+            )
 
         diff = np.abs(ref_np.astype(np.float64) - test_np.astype(np.float64))
         max_diff = float(np.max(diff)) if diff.size else 0.0
