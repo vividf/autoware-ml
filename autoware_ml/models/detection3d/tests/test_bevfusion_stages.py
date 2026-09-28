@@ -73,8 +73,8 @@ def test_lidar_declaration_keeps_the_runtime_module_and_falls_back_on_onnx() -> 
     assert graph.name == "bevfusion_lidar"
     assert graph.inputs == ("voxels", "coors", "num_points_per_voxel")
     assert graph.outputs == ("bbox_pred", "score", "label_pred")
-    assert graph.output_fields == tuple((n, n) for n in graph.outputs)
-    assert set(graph.onnx_dynamic_axes) == set(graph.inputs)
+    # Dynamic axes come from deploy.onnx.modules.bevfusion_lidar, not the declaration.
+    assert not graph.onnx_dynamic_axes
     # TensorRT executes the plugin ops (deploy.tensorrt.plugin_libraries); ONNX Runtime has
     # no implementation for them, so only that backend falls back to PyTorch.
     assert graph.torch_fallback_backends == (Backend.ONNX,)

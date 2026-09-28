@@ -748,17 +748,9 @@ class BEVFusionDetectionModel(BaseModel):
                 "bevfusion_lidar",
                 module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
                 inputs=("voxels", "coors", "num_points_per_voxel"),
+                # The packed outputs are the keys build_eval_output decodes; the voxel
+                # axes stay dynamic through deploy.onnx.modules.bevfusion_lidar.
                 outputs=("bbox_pred", "score", "label_pred"),
-                output_fields=(
-                    ("bbox_pred", "bbox_pred"),
-                    ("score", "score"),
-                    ("label_pred", "label_pred"),
-                ),
-                onnx_dynamic_axes={
-                    "voxels": {0: "voxels_num"},
-                    "coors": {0: "voxels_num"},
-                    "num_points_per_voxel": {0: "voxels_num"},
-                },
                 torch_fallback_backends=(Backend.ONNX,),
             ),
         )
