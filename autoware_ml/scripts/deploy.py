@@ -114,6 +114,7 @@ def deploy(
         output_dir=output_dir,
         device=deployment_exporter.device,
         onnx_paths=export_outputs.onnx_paths_by_module,
+        plugin_libraries=tuple(str(p) for p in (deploy_cfg.tensorrt.get("plugin_libraries") or ())),
         log_metric=log_metric,
     )
     logger.info("Deployment completed successfully.")

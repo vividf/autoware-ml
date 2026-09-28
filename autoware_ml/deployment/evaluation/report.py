@@ -28,10 +28,8 @@ Latency lives under its own root so it never collides with a metric:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Iterable
 
-from autoware_ml.metrics.base import EvalStage, MetricSuite
 from autoware_ml.types.backend import Backend
 
 LATENCY_ROOT = "latency"
@@ -44,12 +42,11 @@ _RANGE_SUFFIX = re.compile(r"_\d[0-9p]*m_(\d[0-9p]*m|inf)$")
 def metric_key(split: str, backend: str | Backend, prefix: str, name: str) -> str:
     """Build the canonical metric key ``{split}/{backend}/{prefix}/{name}``.
 
-    An empty ``prefix`` is skipped so a suite without a prefix reports directly under
-    ``{split}/{backend}/{name}``.
+    Lightning logs the same suite under ``{split}/{prefix}/{name}``; the backend segment
+    is the only difference (every attached suite has a prefix).
     """
     backend_name = backend.value if isinstance(backend, Backend) else str(backend)
-    parts = [split, backend_name] + ([prefix] if prefix else []) + [name]
-    return "/".join(parts)
+    return f"{split}/{backend_name}/{prefix}/{name}"
 
 
 def latency_key(backend: str | Backend, stage: str) -> str:
@@ -72,40 +69,3 @@ def is_headline(key: str, headline_metrics: Iterable[str]) -> bool:
         if tail.startswith(name + "_") and _RANGE_SUFFIX.fullmatch(tail[len(name) :]):
             return True
     return False
-
-
-def check_required_keys(
-    suites: Iterable[MetricSuite], eval_out: Mapping[str, Any], producer: str
-) -> None:
-    """Raise when a suite needs an ``eval_out`` key the model did not produce.
-
-    Args:
-        suites: Metric suites about to consume ``eval_out``.
-        eval_out: The flat dict returned by the model's ``build_eval_output``.
-        producer: Name of the model class, for the error message.
-    """
-    for suite in suites:
-        missing = [key for key in suite.required_keys() if key not in eval_out]
-        if missing:
-            raise ValueError(
-                f"Metric {type(suite).__name__!r} needs {missing}, not produced by "
-                f"{producer}.build_eval_output."
-            )
-
-
-def collect_suite_results(
-    suites: Iterable[MetricSuite], stage: EvalStage, *, backend: str | Backend
-) -> dict[str, float]:
-    """Compute every suite's ``result`` and key it canonically.
-
-    Raises:
-        ValueError: When two suites emit the same key (set distinct prefixes).
-    """
-    report: dict[str, float] = {}
-    for suite in suites:
-        for name, value in suite.result(stage).items():
-            key = metric_key(stage.value, backend, suite.prefix, name)
-            if key in report:
-                raise ValueError(f"Two metrics log the same key {key!r}. Set a distinct prefix.")
-            report[key] = float(value)
-    return report
