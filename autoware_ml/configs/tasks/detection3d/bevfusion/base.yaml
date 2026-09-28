@@ -192,20 +192,13 @@ deploy:
   # top-num_proposals queries and zero-padded heatmap borders produce mass ties, so backends
   # legitimately pick different near-zero-score proposals (measured 2026-09-01: high-score
   # proposals align to 0.038 while the positional bbox_pred diff is 159). The model declares
-  # `verification_caveat`; deploy.evaluation (mAP per backend) is the gate.
-  verification:
-    enabled: false
-    scenarios: []
+  # `verification_caveat`; deploy.evaluation (mAP per backend) is the gate. Everything not
+  # set here keeps the defaults of configs/defaults/modules/deploy.yaml (both opt-in).
   evaluation:
-    enabled: false
-    num_samples: -1
-    num_warmup: 2
     backends:
-      pytorch: { enabled: true, device: cuda }
       # Plugin ops have no ONNX Runtime implementation: this column would be the PyTorch
       # numbers under another name (the framework stars it), so it stays off.
-      onnx: { enabled: false, device: cuda }
-      tensorrt: { enabled: true, device: cuda }
+      onnx: { enabled: false }
 
 data_preprocessing:
   pipeline:

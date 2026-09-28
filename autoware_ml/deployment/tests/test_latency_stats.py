@@ -20,7 +20,7 @@ import statistics
 
 import pytest
 
-from autoware_ml.evaluation.latency import LatencyStats
+from autoware_ml.deployment.evaluation.latency import LatencyStats
 
 
 class TestLatencyStatsFromSamples:

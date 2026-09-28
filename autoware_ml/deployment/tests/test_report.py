@@ -21,8 +21,12 @@ from dataclasses import replace
 
 import pytest
 
-from autoware_ml.evaluation.evaluator import EvaluationResult, log_backend_report, log_comparison
-from autoware_ml.evaluation.report import is_headline, latency_key, metric_key
+from autoware_ml.deployment.evaluation.evaluator import (
+    EvaluationResult,
+    log_backend_report,
+    log_comparison,
+)
+from autoware_ml.deployment.evaluation.report import is_headline, latency_key, metric_key
 from autoware_ml.metrics.detection3d.suite import Detection3DMetricSuite
 from autoware_ml.metrics.segmentation3d.suite import Segmentation3DConfusionMatrixMetricSuite
 from autoware_ml.types.backend import Backend
@@ -33,7 +37,7 @@ def test_keys_carry_split_backend_prefix_and_name() -> None:
         metric_key("test", Backend.TENSORRT, "det3d", "mAP_0m_121m")
         == "test/tensorrt/det3d/mAP_0m_121m"
     )
-    assert metric_key("val", "onnx", "", "loss") == "val/onnx/loss"
+    assert metric_key("val", "onnx", "seg", "loss") == "val/onnx/seg/loss"
     assert latency_key(Backend.ONNX, "head_mean_ms") == "latency/onnx/head_mean_ms"
 
 
@@ -77,7 +81,7 @@ def _result(backend: Backend, headline: tuple[str, ...]) -> EvaluationResult:
 
 
 def test_report_leads_with_the_declared_metrics_only(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_backend_report(_result(Backend.PYTORCH, ("mAP",)))
     assert "det3d/mAP_0m_121m" in caplog.text
     assert "mAP_car" not in caplog.text and "mAPH" not in caplog.text and "mIoU" not in caplog.text
@@ -85,7 +89,7 @@ def test_report_leads_with_the_declared_metrics_only(caplog) -> None:
 
 def test_comparison_table_rows_come_from_the_shared_headlines(caplog) -> None:
     results = [_result(Backend.PYTORCH, ("mIoU",)), _result(Backend.TENSORRT, ("mIoU",))]
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_comparison(results)
     assert "test/seg3d/mIoU" in caplog.text
     assert "det3d/mAP" not in caplog.text
@@ -95,7 +99,7 @@ def test_fallback_stages_are_visible_in_report_and_comparison(caplog) -> None:
     """A backend whose stages ran in torch must say so — never a silent pytorch copy."""
     starred = replace(_result(Backend.ONNX, ("mIoU",)), fallback_stages=("encoder", "head"))
     clean = _result(Backend.TENSORRT, ("mIoU",))
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_backend_report(starred)
         log_comparison([starred, clean])
     assert "encoder, head" in caplog.text

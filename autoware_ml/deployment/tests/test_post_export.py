@@ -77,7 +77,6 @@ class _StagedModel(BaseModel):
                 module=self.head,
                 inputs=("encoded",),
                 outputs=("plus", "minus"),
-                output_fields=(("plus", "plus"), ("minus", "minus")),
             ),
         )
 

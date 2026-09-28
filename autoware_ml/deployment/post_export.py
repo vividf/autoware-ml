@@ -23,7 +23,7 @@ call in.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,7 @@ from autoware_ml.deployment.config import (
 )
 from autoware_ml.deployment.pipeline import PipelineCache, available_backends
 from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
-from autoware_ml.evaluation.evaluator import (
+from autoware_ml.deployment.evaluation.evaluator import (
     EvaluationResult,
     evaluate_backend,
     flatten_results,
@@ -51,22 +51,21 @@ from autoware_ml.utils.deploy import move_to_device
 logger = logging.getLogger(__name__)
 
 
-def preprocessed_batches(
+def predict_batches(
     datamodule: L.LightningDataModule,
     model: L.LightningModule,
     device: torch.device,
     *,
-    split: str,
     limit: int,
 ) -> list[Any]:
-    """Load up to ``limit`` batches of ``split`` and preprocess them like Lightning would.
+    """Load up to ``limit`` predict batches and preprocess them like Lightning would.
 
     ``limit < 0`` loads the whole split. The batch goes through
     ``model.on_after_batch_transfer`` — the one place preprocessing runs — so a stage
     graph sees exactly what ``forward()`` sees.
     """
-    datamodule.setup({"test": "test", "val": "validate", "predict": "predict"}[split])
-    dataloader = getattr(datamodule, f"{split}_dataloader")()
+    datamodule.setup("predict")
+    dataloader = datamodule.predict_dataloader()
     batches: list[Any] = []
     for index, batch in enumerate(dataloader):
         if 0 <= limit <= index:
@@ -100,9 +99,7 @@ def run_verification(
         )
         return
 
-    batches = preprocessed_batches(
-        datamodule, model, device, split="predict", limit=cfg.num_verify_batches
-    )
+    batches = predict_batches(datamodule, model, device, limit=cfg.num_verify_batches)
     if not batches:
         raise ValueError("Verification produced zero batches from the predict dataloader.")
 
@@ -225,11 +222,14 @@ def run_post_export(
     device: torch.device,
     log_metric: Callable[[str, float], None] | None = None,
     onnx_paths: Mapping[str, Path] | None = None,
+    plugin_libraries: Sequence[str] = (),
 ) -> list[EvaluationResult]:
     """Run the enabled post-export steps of ``deploy_cfg`` over the artifacts in ``output_dir``.
 
     ``log_metric(key, value)`` receives every evaluation metric and mean latency (the
-    deploy run's MLflow client, say).
+    deploy run's MLflow client, say). ``plugin_libraries`` are the TensorRT plugin ``.so``
+    the engines were built with (``deploy.tensorrt.plugin_libraries``), handed to the
+    runners by the caller so this module reads only its own config sections.
 
     Nothing runs when both ``deploy.verification`` and ``deploy.evaluation`` are disabled
     (the default). Enabling either on a model without ``build_stages()`` is an error: the
@@ -247,8 +247,6 @@ def run_post_export(
             "graph (see autoware_ml.deployment.stages) or disable these sections."
         )
     output_dir = Path(output_dir)
-    tensorrt_cfg = (deploy_cfg or {}).get("tensorrt") or {}
-    plugin_libraries = tuple(str(p) for p in (tensorrt_cfg.get("plugin_libraries") or ()))
     # ``onnx_paths``: the graphs the export loop shipped (a config modifier may write under
     # another name than <stage>.onnx); the engines are always <stage>.engine.
     pipelines = PipelineCache(

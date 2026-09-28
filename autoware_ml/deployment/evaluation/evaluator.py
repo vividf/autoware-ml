@@ -34,13 +34,9 @@ from typing import Any
 import torch
 
 from autoware_ml.deployment.pipeline import StagedPipeline
-from autoware_ml.evaluation.latency import LatencyStats
-from autoware_ml.evaluation.report import (
-    check_required_keys,
-    collect_suite_results,
-    is_headline,
-    latency_key,
-)
+from autoware_ml.deployment.evaluation.latency import LatencyStats
+from autoware_ml.deployment.evaluation.report import is_headline, latency_key, metric_key
+from autoware_ml.metrics.reporting import check_required_keys, collect_suite_results
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import move_to_device
@@ -164,7 +160,11 @@ def evaluate_backend(
         backend=pipeline.backend,
         device=str(pipeline.device),
         split=stage.value,
-        metrics=collect_suite_results(suites, stage, backend=pipeline.backend),
+        metrics=collect_suite_results(
+            suites,
+            stage,
+            key_of=lambda prefix, name: metric_key(stage.value, pipeline.backend, prefix, name),
+        ),
         latency={
             name: LatencyStats.from_samples(samples) for name, samples in stage_samples.items()
         },

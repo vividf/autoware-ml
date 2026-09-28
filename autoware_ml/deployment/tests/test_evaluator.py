@@ -26,7 +26,11 @@ from torch.utils.data import DataLoader
 
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
-from autoware_ml.evaluation.evaluator import MODEL_STAGE, evaluate_backend, flatten_results
+from autoware_ml.deployment.evaluation.evaluator import (
+    MODEL_STAGE,
+    evaluate_backend,
+    flatten_results,
+)
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.models.base import BaseModel
 from autoware_ml.types.backend import Backend
@@ -89,7 +93,6 @@ class _Model(BaseModel):
                 module=self.scale,
                 inputs=("x",),
                 outputs=("y",),
-                output_fields=(("y", "y"),),
             ),
         )
 

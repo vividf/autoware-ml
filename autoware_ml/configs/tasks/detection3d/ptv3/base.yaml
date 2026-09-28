@@ -99,17 +99,14 @@ deploy:
           class_names: ${dataset.detection3d.class_names}
   tensorrt:
     enabled: false
-  # Post-export checks over the stage graph (PTv3DetectionModel.build_stages), opt-in.
+  # Post-export checks over the stage graph (PTv3DetectionModel.build_stages), opt-in;
+  # everything not set here keeps configs/defaults/modules/deploy.yaml.
   verification:
-    enabled: false
-    num_verify_batches: 1
+    # Tolerance not yet measured on a trained detection checkpoint: a placeholder, to be
+    # replaced by the observed fp16 max_diff x1.25 like the other models.
     scenarios:
       - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.5 }
   evaluation:
-    enabled: false
-    num_samples: -1
-    num_warmup: 2
     backends:
-      pytorch: { enabled: true, device: cuda }
-      onnx: { enabled: false, device: cuda }
-      tensorrt: { enabled: true, device: cuda }
+      # Plugin ops have no ONNX Runtime implementation: that column stays off.
+      onnx: { enabled: false }
