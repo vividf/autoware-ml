@@ -211,9 +211,8 @@ class CenterPointDetectionModel(BaseModel):
                 "pts_backbone_neck_head_centerpoint",
                 module=head_wrapper,
                 inputs=("spatial_features",),
-                outputs=tuple(head_wrapper.output_names),
                 # The head's ONNX outputs are the keys of forward()'s output dict, so a
                 # backend's raw outputs feed build_eval_output unchanged.
-                output_fields=tuple((name, name) for name in head_wrapper.output_names),
+                outputs=tuple(head_wrapper.output_names),
             ),
         )

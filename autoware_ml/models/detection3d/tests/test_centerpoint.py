@@ -314,9 +314,7 @@ def test_stage_graph_reproduces_forward_and_names_the_deployed_modules() -> None
         "scatter",
         "pts_backbone_neck_head_centerpoint",
     ]
-    assert graph[-1].output_fields == tuple(
-        (name, name) for name in ["heatmap", "reg", "height", "dim", "rot", "vel"]
-    )
+    assert graph[-1].outputs == ("heatmap", "reg", "height", "dim", "rot", "vel")
 
     with torch.no_grad():
         expected = model(**batch)
