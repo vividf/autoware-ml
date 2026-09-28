@@ -97,7 +97,6 @@ Export knobs on the j6gen2 config, all export-only (training is untouched):
 
 - `model.bbox_head.fuse_export_attention: true` exports the decoder's attention as TensorRT-fusable blocks (default `false` keeps the explicit attention graph).
 - `model.pts_middle_encoder.export_do_sort` (default `true`): argsort the pair masks; a latency-only trade-off, measure per target.
-- `model.pts_middle_encoder.export_precompute_rulebooks` (default `false`): precompute the down-sampling rulebooks outside the graph; removes TensorRT's data-dependent-shape synchronizations but adds `rulebook/...` graph inputs the runtime must supply.
 
 ### INT8
 
@@ -124,7 +123,7 @@ autoware-ml deploy   --config-name detection3d/bevfusion/lidar_voxel0170_second_
 | `autoware_ml/models/detection3d/backbones/second.py`          | SECOND backbone                                  |
 | `autoware_ml/models/detection3d/necks/second_fpn.py`          | SECONDFPN neck                                   |
 | `autoware_ml/models/detection3d/heads/transfusion.py`         | TransFusion detection head                       |
-| `autoware_ml/ops/spconv/`                                     | Sparse-conv ONNX export (fusion, INT8, rulebook) |
+| `autoware_ml/ops/spconv/`                                     | Sparse-conv ONNX export (fusion, INT8)           |
 | `docker/tensorrt_plugins/`                                    | TensorRT plugin build for the sparse graph       |
 | `autoware_ml/models/common/backbones/resnet.py`               | ResNet multiview image backbone                  |
 | `autoware_ml/models/common/necks/lss_fpn.py`                  | Multiview image neck                             |

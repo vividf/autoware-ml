@@ -217,10 +217,7 @@ The Docker image builds the plugin (`docker/tensorrt_plugins/`, see its README f
 rebuild against another `autoware_universe` branch). ONNX Runtime cannot run plugin
 nodes, so such stages declare `torch_fallback_backends=(Backend.ONNX,)`: the `onnx`
 backend runs them in PyTorch (starred in the evaluation table) while `tensorrt` runs the
-engine. The exported graph is ready for the runtime as it is; BEVFusion's
-`export_precompute_rulebooks` knob (off by default) moves the down-sampling layers'
-rulebook construction outside the graph, which removes TensorRT's data-dependent-shape
-synchronizations but adds inputs the runtime has to supply.
+engine. The exported graph is ready for the runtime as it is.
 
 The FP16 cast of a plugin or Q/DQ graph is island-aware
 (`autoware_ml/deployment/onnx/precision.py`): plugin nodes, integer index paths and
@@ -270,7 +267,7 @@ def build_stages(self):
                    outputs=("pillar_features",)),
         TorchStage("scatter", run=...),
         GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
-                   outputs=("heatmap", "reg", ...), output_fields=(("heatmap", "heatmap"), ...)),
+                   outputs=("heatmap", "reg", ...)),  # the final stage's outputs are forward()'s keys
     )
 ```
 

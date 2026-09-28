@@ -75,10 +75,11 @@ records the placement (`PlacementRecord`) into the checkpoint. `deploy` and `tes
 the same tree from that record before loading the weights, so an FP checkpoint and a
 quantized one are loaded through the same `load_model_weights`.
 
-Recipes (`autoware_ml/quantization/recipes/`) are per-module-class adjustments applied
-inside the quantized subtree — sharing an input quantizer across a residual add, keeping
-the TransFusion decoder's packed attention weights FP — and are listed by class in the
-placement table. `disable_recipes: [<name>]` opts out of one.
+A model declares its rules once (`build_quantization_rules()`, next to the model, importing
+only `autoware_ml/quantization/rules.py` — no ModelOpt behind it); every stage binds them to
+the config through `QuantizationPlan.for_model(model, config)`, so PTQ, QAT and the loader
+build the same tree. Placement is the kind table plus `skip_quantize`; there is no other
+knob.
 
 ### Calibration
 
