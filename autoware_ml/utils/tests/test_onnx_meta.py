@@ -162,3 +162,23 @@ def test_stamp_rejects_reserved_metainfo_keys(tmp_path) -> None:
             export_git_sha="be5b967",
             metainfo={"release": "v9.9.9"},
         )
+
+
+def test_stamp_keeps_metadata_written_by_earlier_passes(tmp_path) -> None:
+    """A stage transform's runtime contract must survive the identity stamp that follows it."""
+    path = tmp_path / "stage.onnx"
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", ["x"], ["y"])],
+        "g",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1])],
+    )
+    model = onnx.helper.make_model(graph)
+    onnx.helper.set_model_props(model, {"rulebook_stages": "[]"})
+    onnx.save(model, str(path))
+
+    stamp_onnx_meta(path, config_name="cfg", module="stage", release=None, export_git_sha="abc")
+
+    props = {prop.key: prop.value for prop in onnx.load(str(path)).metadata_props}
+    assert props["rulebook_stages"] == "[]"
+    assert props["module"] == "stage"

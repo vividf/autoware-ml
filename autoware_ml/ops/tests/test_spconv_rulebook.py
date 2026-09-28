@@ -33,6 +33,7 @@ if IS_SPCONV_AVAILABLE:
         COORS_PERMUTATION_METADATA_KEY,
         RULEBOOK_SLOTS,
         STAGES_METADATA_KEY,
+        DO_SORT_METADATA_KEY,
         embed_rulebook_metadata,
         precompute_rulebooks,
         rulebook_dynamic_axes,
@@ -129,7 +130,9 @@ def test_metadata_carries_the_geometry_and_the_coordinate_order(tmp_path):
     onnx.helper.set_model_props(model, {"unrelated": "kept"})
     onnx.save(model, str(path))
 
-    embed_rulebook_metadata(path, stages=stages, coors_permutation=encoder.coors_permutation)
+    embed_rulebook_metadata(
+        path, stages=stages, coors_permutation=encoder.coors_permutation, do_sort=True
+    )
 
     props = {prop.key: prop.value for prop in onnx.load(str(path)).metadata_props}
     assert props["unrelated"] == "kept"
@@ -137,6 +140,7 @@ def test_metadata_carries_the_geometry_and_the_coordinate_order(tmp_path):
     assert [entry["onnx_base"] for entry in recorded] == [stage.onnx_base for stage in stages]
     assert recorded[0] == {
         "onnx_base": "rulebook/spconv1",
+        "algo": int(stages[0].algo.value),
         "ksize": [3, 3, 3],
         "stride": [2, 2, 2],
         "padding": [1, 1, 1],
@@ -145,6 +149,7 @@ def test_metadata_carries_the_geometry_and_the_coordinate_order(tmp_path):
     }
     # coors is [z, y, x]; the convolutions run on [y, x, z].
     assert json.loads(props[COORS_PERMUTATION_METADATA_KEY]) == [1, 2, 0]
+    assert json.loads(props[DO_SORT_METADATA_KEY]) is True
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="spconv kernels need CUDA")

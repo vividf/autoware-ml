@@ -54,6 +54,13 @@ from spconv.pytorch.cppcore import (
 from spconv.tools import CUDAKernelTimer
 from torch.autograd import Function
 from torch.onnx.symbolic_helper import _get_tensor_sizes
+from autoware_ml.ops.spconv.contract import (
+    GET_INDICE_PAIRS_IMPLICIT_GEMM_OP,
+    GET_INDICE_PAIRS_OP,
+    IMPLICIT_GEMM_OP,
+    INDICE_CONV_OP,
+    qualified,
+)
 
 
 def _kernel_volume(kernel_size: Sequence[int]) -> int:
@@ -182,7 +189,7 @@ class GetIndicePairs(Function):
             ONNX outputs representing sparse output indices and pairing metadata.
         """
         outputs = g.op(
-            "autoware::GetIndicePairs",
+            qualified(GET_INDICE_PAIRS_OP),
             indices,
             batch_size_i=batch_size,
             spatial_shape_i=spatial_shape,
@@ -311,7 +318,7 @@ class IndiceConvFunction(Function):
         """
 
         output = g.op(
-            "autoware::IndiceConv",
+            qualified(INDICE_CONV_OP),
             features,
             filters,
             indice_pairs,
@@ -446,7 +453,7 @@ class GetIndicePairsImplicitGemm(Function):
             ONNX outputs representing implicit-GEMM pairing metadata.
         """
         outputs = g.op(
-            "autoware::GetIndicePairsImplicitGemm",
+            qualified(GET_INDICE_PAIRS_IMPLICIT_GEMM_OP),
             indices,
             batch_size_i=batch_size,
             spatial_shape_i=spatial_shape,
@@ -622,7 +629,7 @@ class ImplicitGemm(Function):
         """
 
         output = g.op(
-            "autoware::ImplicitGemm",
+            qualified(IMPLICIT_GEMM_OP),
             features,
             filters,
             pair_fwd,
