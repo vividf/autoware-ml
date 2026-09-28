@@ -291,16 +291,6 @@ class BEVFusionDetectionModel(BaseModel):
     shared Autoware-ML training, prediction, and export interfaces.
     """
 
-    #: Cross-backend comparison of the packed graph outputs is meaningless by construction:
-    #: the graph selects the top-num_proposals queries, and the zero-padded heatmap borders
-    #: produce mass ties, so backends legitimately pick different near-zero-score proposals
-    #: (high-score proposals align to 0.038 while the positional bbox_pred diff is 159).
-    #: Per-backend evaluation (deploy.evaluation) is the gate.
-    verification_caveat = (
-        "the graph's top-k proposal selection makes the packed outputs positionally "
-        "incomparable across backends; compare per-backend metrics instead."
-    )
-
     def __init__(
         self,
         pts_voxel_encoder: nn.Module | None,
@@ -810,17 +800,9 @@ class BEVFusionDetectionModel(BaseModel):
                 "bevfusion_lidar",
                 module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
                 inputs=("voxels", "coors", "num_points_per_voxel"),
+                # The packed outputs are the keys build_eval_output decodes; the voxel
+                # axes stay dynamic through deploy.onnx.modules.bevfusion_lidar.
                 outputs=("bbox_pred", "score", "label_pred"),
-                output_fields=(
-                    ("bbox_pred", "bbox_pred"),
-                    ("score", "score"),
-                    ("label_pred", "label_pred"),
-                ),
-                onnx_dynamic_axes={
-                    "voxels": {0: "voxels_num"},
-                    "coors": {0: "voxels_num"},
-                    "num_points_per_voxel": {0: "voxels_num"},
-                },
                 torch_fallback_backends=(Backend.ONNX,),
             ),
         )
