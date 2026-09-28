@@ -984,11 +984,10 @@ def build_seg_head_stage(model: PTv3BaseModel, seg3d_head: nn.Module) -> GraphSt
         module=module,
         inputs=tuple(seg_head_export_input_names(stage_count, head.dec_depths)),
         outputs=output_names,
-        onnx_dynamic_axes=dynamic_axes,
-        torch_fallback_backends=(Backend.ONNX,),
         # The graph emits the argmax and the softmax scores; build_eval_output takes
         # them under these names (no second softmax).
-        output_fields=tuple((name, name) for name in output_names),
+        onnx_dynamic_axes=dynamic_axes,
+        torch_fallback_backends=(Backend.ONNX,),
     )
 
 

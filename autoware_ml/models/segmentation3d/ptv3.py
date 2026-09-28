@@ -27,7 +27,6 @@ from typing import Any
 import torch
 
 from autoware_ml.deployment.stages import Stage
-from autoware_ml.models.base import BaseModel
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3SegDecoderHead,
@@ -199,7 +198,10 @@ class PTv3SegmentationModel(PTv3BaseModel):
         return segmentation_eval_output(outputs, batch)
 
     def build_stages(self) -> Sequence[Stage]:
-        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads."""
+        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads.
+
+        The export specs derive from this declaration (:meth:`BaseModel.build_export_specs`).
+        """
         return build_ptv3_stages(self, build_seg_head_stage(self, self.seg3d_head))
 
     def predict_outputs(
@@ -244,7 +246,3 @@ class PTv3SegmentationModel(PTv3BaseModel):
             dynamic_axes=dynamic_axes,
             supported_stages=self.EXPORT_SUPPORTED_STAGES,
         )
-
-    def build_export_specs(self, batch: Mapping[str, torch.Tensor]) -> dict[str, ExportSpec]:
-        """``ptv3_encoder`` + ``ptv3_seg3d_head`` export specs, derived from :meth:`build_stages`."""
-        return BaseModel.build_export_specs(self, batch)
