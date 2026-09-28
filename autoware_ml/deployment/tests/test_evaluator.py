@@ -24,10 +24,14 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from autoware_ml.deployment.evaluation.evaluator import (
+    MODEL_STAGE,
+    evaluate_backend,
+    flatten_results,
+)
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.deployment.tests.toy_batch import ToyBatch
-from autoware_ml.evaluation.evaluator import MODEL_STAGE, evaluate_backend, flatten_results
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor

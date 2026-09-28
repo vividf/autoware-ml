@@ -45,7 +45,7 @@ class TestOutputComparator:
         assert not summary.passed
         assert "tolerance" in (summary.reason or "")
 
-    def test_integer_outputs_report_mismatch_ratio_without_gating(self):
+    def test_integer_outputs_report_the_mismatch_ratio_and_pass_under_the_gate(self):
         # Class labels are decisions over the float outputs: a few flips at near-tie
         # points must not fail the scenario, but the ratio is reported for the log.
         labels_ref = np.zeros((40,), dtype=np.int64)
