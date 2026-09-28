@@ -17,8 +17,8 @@
 :func:`evaluate_backend` is the one loop. It is parameterized by a
 :class:`~autoware_ml.deployment.pipeline.StagedPipeline` (which already knows its
 backend), preprocesses through the model's ``on_after_batch_transfer`` (the one place
-preprocessing runs), reassembles the final graph outputs into what ``forward()`` returns,
-decodes through the model's ``build_eval_output`` and scores with fresh clones of its own
+preprocessing runs), hands the backend's model outputs (``model_output_names``) to the
+model's ``build_deployed_eval_output`` and scores with fresh clones of its own
 metric suites — so a full-split ``pytorch`` run reproduces ``trainer.test`` and a
 ``tensorrt`` run differs from it only by the backend.
 """
@@ -34,16 +34,11 @@ from typing import Any
 import torch
 
 from autoware_ml.deployment.pipeline import StagedPipeline
-from autoware_ml.evaluation.latency import LatencyStats
-from autoware_ml.evaluation.report import (
-    check_required_keys,
-    collect_suite_results,
-    is_headline,
-    latency_key,
-)
+from autoware_ml.deployment.evaluation.latency import LatencyStats
+from autoware_ml.deployment.evaluation.report import is_headline, latency_key, metric_key
+from autoware_ml.metrics.reporting import check_required_keys, collect_suite_results
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.types.backend import Backend
-from autoware_ml.utils.deploy import move_to_device
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +94,7 @@ def evaluate_backend(
     """Score one backend against ground truth and collect its latency breakdown.
 
     Args:
-        model: Model exposing ``on_after_batch_transfer``, ``build_eval_output``,
+        model: Model exposing ``on_after_batch_transfer``, ``build_deployed_eval_output``,
             ``clone_metrics`` and ``get_log_batch_size`` (:class:`BaseModel`).
         dataloader: Batches of the split to evaluate, with ground truth.
         pipeline: Backend pipeline built from the model's stages (carries its backend).
@@ -128,7 +123,7 @@ def evaluate_backend(
 
         times: dict[str, float] = {}
         start = time.perf_counter()
-        batch = model.on_after_batch_transfer(move_to_device(batch, device), dataloader_idx=0)
+        batch = model.on_after_batch_transfer(batch.to_device(device), dataloader_idx=0)
         _sync(device)
         times[PREPROCESS_STAGE] = (time.perf_counter() - start) * 1000.0
 
@@ -140,9 +135,11 @@ def evaluate_backend(
 
         start = time.perf_counter()
         outputs = pipeline.assemble(result, device=device)
-        eval_out = model.build_eval_output(batch, outputs)
+        eval_out = model.build_deployed_eval_output(batch, outputs)
         if index == 0:
-            check_required_keys(suites, eval_out, producer=type(model).__name__)
+            check_required_keys(
+                suites, eval_out, producer=f"{type(model).__name__}.build_deployed_eval_output"
+            )
         for suite in suites:
             suite.update(eval_out)
         _sync(device)
@@ -164,7 +161,11 @@ def evaluate_backend(
         backend=pipeline.backend,
         device=str(pipeline.device),
         split=stage.value,
-        metrics=collect_suite_results(suites, stage, backend=pipeline.backend),
+        metrics=collect_suite_results(
+            suites,
+            stage,
+            key_of=lambda prefix, name: metric_key(stage.value, pipeline.backend, prefix, name),
+        ),
         latency={
             name: LatencyStats.from_samples(samples) for name, samples in stage_samples.items()
         },

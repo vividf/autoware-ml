@@ -183,20 +183,13 @@ deploy:
   # legitimately pick different near-zero-score proposals (measured 2026-09-01: high-score
   # proposals align to 0.038 while the positional bbox_pred diff is 159). deploy.verification
   # therefore stays off for this model (enabling it fails on the first batch);
-  # deploy.evaluation (mAP per backend) is the comparison.
-  verification:
-    enabled: false
-    scenarios: []
+  # deploy.evaluation (mAP per backend) is the comparison. Everything not set here keeps
+  # the defaults of configs/defaults/modules/deploy.yaml (both opt-in).
   evaluation:
-    enabled: false
-    num_samples: -1
-    num_warmup: 2
     backends:
-      pytorch: { enabled: true, device: cuda }
       # Plugin ops have no ONNX Runtime implementation: this column would be the PyTorch
       # numbers under another name (the framework stars it), so it stays off.
-      onnx: { enabled: false, device: cuda }
-      tensorrt: { enabled: true, device: cuda }
+      onnx: { enabled: false }
 
 data_preprocessing:
   pipeline:

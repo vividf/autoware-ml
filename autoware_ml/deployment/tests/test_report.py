@@ -20,10 +20,19 @@ import logging
 from dataclasses import replace
 
 import pytest
+import torch
 
-from autoware_ml.evaluation.evaluator import EvaluationResult, log_backend_report, log_comparison
-from autoware_ml.evaluation.report import is_headline, latency_key, metric_key
+from autoware_ml.deployment.evaluation.evaluator import (
+    EvaluationResult,
+    log_backend_report,
+    log_comparison,
+)
+from autoware_ml.deployment.evaluation.report import is_headline, latency_key, metric_key
+from autoware_ml.metrics.base import EvalStage
+from autoware_ml.metrics.detection3d.mean_ap import MeanAP
+from autoware_ml.metrics.detection3d.nds import Nds
 from autoware_ml.metrics.detection3d.suite import Detection3DMetricSuite
+from autoware_ml.metrics.segmentation3d.iou import IoU
 from autoware_ml.metrics.segmentation3d.suite import Segmentation3DConfusionMatrixMetricSuite
 from autoware_ml.types.backend import Backend
 
@@ -33,7 +42,7 @@ def test_keys_carry_split_backend_prefix_and_name() -> None:
         metric_key("test", Backend.TENSORRT, "det3d", "mAP_0m_121m")
         == "test/tensorrt/det3d/mAP_0m_121m"
     )
-    assert metric_key("val", "onnx", "", "loss") == "val/onnx/loss"
+    assert metric_key("val", "onnx", "seg", "loss") == "val/onnx/seg/loss"
     assert latency_key(Backend.ONNX, "head_mean_ms") == "latency/onnx/head_mean_ms"
 
 
@@ -46,16 +55,60 @@ def test_keys_carry_split_backend_prefix_and_name() -> None:
         ("test/tensorrt/det3d/mAP_car", False),
         ("test/tensorrt/det3d/mAPH", False),
         ("test/tensorrt/det3d/mAPH_0m_121m", False),
+        ("test/tensorrt/det3d/map_based_nds", True),
+        ("test/tensorrt/det3d/map_based_nds_0m_50m", True),
+        ("test/tensorrt/det3d/mapH_based_nds", False),
         ("test/tensorrt/seg3d/mIoU", False),
     ],
 )
 def test_headline_matches_the_declared_name_up_to_its_range_suffix(key, expected) -> None:
-    assert is_headline(key, ("mAP", "NDS")) is expected
+    assert is_headline(key, ("mAP", "map_based_nds")) is expected
 
 
 def test_suites_declare_their_headline_metrics() -> None:
-    assert Detection3DMetricSuite.headline_metrics == ("mAP", "NDS")
+    assert Detection3DMetricSuite.headline_metrics == ("mAP", "map_based_nds")
     assert Segmentation3DConfusionMatrixMetricSuite.headline_metrics == ("mIoU", "fwIoU")
+
+
+def _box(x: float) -> list[float]:
+    return [x, 0.0, 0.0, 4.0, 2.0, 1.5, 0.0, 0.0, 0.0]
+
+
+def test_declared_headlines_are_keys_the_suites_report() -> None:
+    """A headline no component emits never reaches a report: ``NDS`` was declared while
+    the Nds metric reports ``map_based_nds``, so NDS was missing from every deploy log."""
+    detection = Detection3DMetricSuite(components=[MeanAP(), Nds()], class_names=("car",))
+    detection.update(
+        {
+            "predictions": [
+                {
+                    "bboxes_3d": torch.tensor([_box(10.0)]),
+                    "scores_3d": torch.tensor([0.9]),
+                    "labels_3d": torch.tensor([0]),
+                }
+            ],
+            "gt_boxes": [torch.tensor([_box(10.0)])],
+            "gt_labels": [torch.tensor([0])],
+        }
+    )
+    segmentation = Segmentation3DConfusionMatrixMetricSuite(
+        components=[IoU()], num_classes=2, class_names=("road", "car")
+    )
+    segmentation.update(
+        {
+            "seg_frames": [
+                {
+                    "pred": torch.tensor([0, 1]),
+                    "target": torch.tensor([0, 1]),
+                    "coord": torch.zeros((2, 3)),
+                }
+            ]
+        }
+    )
+    for suite in (detection, segmentation):
+        keys = suite.result(EvalStage.TEST)
+        for name in suite.headline_metrics:
+            assert any(is_headline(key, (name,)) for key in keys), f"{type(suite).__name__}: {name}"
 
 
 def _result(backend: Backend, headline: tuple[str, ...]) -> EvaluationResult:
@@ -77,7 +130,7 @@ def _result(backend: Backend, headline: tuple[str, ...]) -> EvaluationResult:
 
 
 def test_report_leads_with_the_declared_metrics_only(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_backend_report(_result(Backend.PYTORCH, ("mAP",)))
     assert "det3d/mAP_0m_121m" in caplog.text
     assert "mAP_car" not in caplog.text and "mAPH" not in caplog.text and "mIoU" not in caplog.text
@@ -85,7 +138,7 @@ def test_report_leads_with_the_declared_metrics_only(caplog) -> None:
 
 def test_comparison_table_rows_come_from_the_shared_headlines(caplog) -> None:
     results = [_result(Backend.PYTORCH, ("mIoU",)), _result(Backend.TENSORRT, ("mIoU",))]
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_comparison(results)
     assert "test/seg3d/mIoU" in caplog.text
     assert "det3d/mAP" not in caplog.text
@@ -95,7 +148,7 @@ def test_fallback_stages_are_visible_in_report_and_comparison(caplog) -> None:
     """A backend whose stages ran in torch must say so — never a silent pytorch copy."""
     starred = replace(_result(Backend.ONNX, ("mIoU",)), fallback_stages=("encoder", "head"))
     clean = _result(Backend.TENSORRT, ("mIoU",))
-    with caplog.at_level(logging.INFO, logger="autoware_ml.evaluation.evaluator"):
+    with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):
         log_backend_report(starred)
         log_comparison([starred, clean])
     assert "encoder, head" in caplog.text

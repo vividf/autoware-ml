@@ -26,7 +26,7 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
 from autoware_ml.deployment.post_export import run_post_export
-from autoware_ml.quantization.loader import load_model_weights
+from autoware_ml.utils.checkpoints import apply_matching_weights
 from autoware_ml.utils.deploy import (
     build_tensorrt_engine,
     export_to_onnx,
@@ -38,6 +38,11 @@ from autoware_ml.utils.deploy import (
     should_modify_graph,
     supports_export_stage,
     validate_cuda_available,
+)
+from autoware_ml.utils.onnx_precision import (
+    convert_onnx_precision,
+    resolve_onnx_precision,
+    should_convert_precision,
 )
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_RUN_ID_ENV,
@@ -54,9 +59,6 @@ from autoware_ml.utils.mlflow_helpers import (
 )
 from autoware_ml.utils.onnx_meta import release_to_model_version, stamp_onnx_meta
 from autoware_ml.utils.onnx_precision import (
-    convert_onnx_precision,
-    resolve_onnx_precision,
-    should_convert_precision,
     validate_module_onnx_precision,
 )
 from autoware_ml.utils.runtime import (
@@ -208,10 +210,15 @@ def main(cfg: DictConfig) -> None:
         logger.info(
             "Loading matching weights from %d checkpoint(s): %s", len(weight_paths), weight_paths
         )
-        # A quantized checkpoint describes itself: the identical quantized module tree is
-        # rebuilt from its embedded description before the weights load. Nothing here
-        # reads a `quantization` config section.
-        load_model_weights(model, weight_paths, device, set_eval=True, enforce_full_coverage=True)
+        apply_matching_weights(
+            model,
+            weight_paths,
+            map_location=device,
+            device=device,
+            set_eval=True,
+            enforce_full_coverage=True,
+            logger=logger,
+        )
 
         export_git_sha = get_git_sha()
         logger.info("Preparing export inputs...")
@@ -301,6 +308,9 @@ def main(cfg: DictConfig) -> None:
             output_dir=output_dir,
             device=device,
             onnx_paths=shipped_onnx_paths,
+            plugin_libraries=tuple(
+                str(p) for p in (deploy_cfg.tensorrt.get("plugin_libraries") or ())
+            ),
             log_metric=(
                 (lambda key, value: mlflow_client.log_metric(deploy_run_id, key, value))
                 if mlflow_client is not None and deploy_run_id is not None
