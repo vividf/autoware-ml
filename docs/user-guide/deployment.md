@@ -260,7 +260,7 @@ def build_stages(self):
                    outputs=("pillar_features",)),
         TorchStage("scatter", run=...),
         GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
-                   outputs=("heatmap", "reg", ...), output_fields=(("heatmap", "heatmap"), ...)),
+                   outputs=("heatmap", "reg", ...)),  # the final stage's outputs are forward()'s keys
     )
 ```
 
