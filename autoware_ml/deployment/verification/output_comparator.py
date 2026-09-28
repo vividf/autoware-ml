@@ -42,14 +42,14 @@ from typing import Any
 import numpy as np
 import torch
 
-#: Headroom multiplier for the gate suggested on a verification failure. Observed
-#: max_diff varies a little run to run (kernel/tactic nondeterminism), so the suggested
-#: gate leaves margin above one observation without becoming a rubber stamp.
 #: Fraction of an integer output (argmax labels, indices) allowed to differ between two
 #: backends. Labels flip at near-ties (measured 0.03 % fp16, 0.3-0.4 % INT8 on PTv3); a
 #: wiring or class-order mistake flips most of them.
 DECISION_MISMATCH_TOLERANCE = 0.05
 
+#: Headroom multiplier for the gate suggested on a verification failure. Observed
+#: max_diff varies a little run to run (kernel/tactic nondeterminism), so the suggested
+#: gate leaves margin above one observation without becoming a rubber stamp.
 SUGGESTED_GATE_HEADROOM = 1.25
 
 
