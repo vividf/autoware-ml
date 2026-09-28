@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared TensorRT engine runner (torch-native I/O).
+"""TensorRT engine runner (torch-native I/O) for one graph stage.
 
-One battle-tested implementation of the TensorRT run loop, reused by every
-per-model deployment pipeline so the GPU plumbing cannot drift between
-backends. The runner uses torch CUDA tensors as device buffers: inputs that already live on the GPU are bound
-in place (no host round-trip) and outputs are returned as CUDA tensors,
-which is exactly what the downstream torch stages (scatter, decode) want.
+The ``tensorrt`` backend of :class:`~autoware_ml.deployment.pipeline.StagedPipeline`
+runs every exportable stage through this class. It uses torch CUDA tensors as device
+buffers: inputs that already live on the GPU are bound in place (no host round-trip)
+and outputs are returned as CUDA tensors, which is what the downstream glue stages
+(scatter, decode) want.
 
 Timing brackets only ``execute_async_v3`` with CUDA events on the current
 torch stream, so the reported time is the engine's pure GPU compute.
@@ -39,17 +39,11 @@ from autoware_ml.deployment.backends.tensorrt_builder import load_tensorrt_plugi
 logger = logging.getLogger(__name__)
 
 
-def load_trt_engine(
-    engine_path: str | Path,
-    *,
-    component_name: str | None = None,
-    plugin_libraries: Sequence[str] = (),
-):
+def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] = ()):
     """Deserialize a TensorRT engine and create its execution context, failing loud.
 
     Args:
         engine_path: Path to the serialized ``.engine`` file.
-        component_name: Optional component label for error messages.
         plugin_libraries: Custom TensorRT plugin ``.so`` paths the engine's ops come from.
 
     Returns:
@@ -61,7 +55,7 @@ def load_trt_engine(
     """
 
     engine_path = Path(engine_path)
-    label = component_name or engine_path.name
+    label = engine_path.name
     if not engine_path.exists():
         raise FileNotFoundError(f"TensorRT engine not found: {engine_path}")
 

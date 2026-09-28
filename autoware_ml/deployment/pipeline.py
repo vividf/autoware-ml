@@ -47,13 +47,14 @@ from autoware_ml.deployment.stages import (
     artifact_path,
     final_stage,
     graph_stages,
+    run_graph_stage,
     validate_stages,
 )
 from autoware_ml.types.backend import Backend
 
 logger = logging.getLogger(__name__)
 
-#: Turns the final stage's field-keyed tensors into the model's ``forward()`` output type.
+#: Turns the final stage's name-keyed tensors into the model's ``forward()`` output type.
 AssembleFn = Callable[[dict[str, torch.Tensor]], Any]
 
 
@@ -115,15 +116,8 @@ class _ModuleRunner:
         args = tuple(inputs[name].to(self.device) for name in self.stage.inputs)
         times: dict[str, float] = {}
         with cuda_synced_timer(times, "run", self.device):
-            raw = self.module(*args)
-        if isinstance(raw, torch.Tensor):
-            raw = (raw,)
-        if len(raw) != len(self.stage.outputs):
-            raise ValueError(
-                f"GraphStage {self.stage.name!r} returned {len(raw)} tensor(s) but declares "
-                f"outputs {list(self.stage.outputs)}."
-            )
-        return dict(zip(self.stage.outputs, raw)), times["run"]
+            outputs = run_graph_stage(self.stage, args)
+        return outputs, times["run"]
 
 
 def normalize_device(device: str | torch.device) -> torch.device:
@@ -172,9 +166,9 @@ class StagedPipeline:
         device: Device the exportable stages execute on; glue stages hand their results
             over on this device.
         artifacts_dir: Directory holding ``<stage>.onnx`` / ``.engine`` (non-pytorch backends).
-        assemble: Turns the final stage's field-keyed tensors into the model's ``forward()``
-            output type. ``None`` returns the field dict itself — right for models whose
-            ``forward`` returns a ``dict``.
+        assemble: Turns the final stage's name-keyed tensors into the model's ``forward()``
+            output type. ``None`` returns the dict itself — right for models whose
+            ``forward`` returns a ``dict`` keyed by the final stage's output names.
     """
 
     def __init__(
@@ -258,16 +252,16 @@ class StagedPipeline:
     def assemble(self, result: PipelineResult, device: torch.device | None = None) -> Any:
         """Turn a result into what the model's ``forward()`` returns (what metrics consume).
 
-        The final stage's ``output_fields`` name the key each ONNX output lands under;
-        the ``assemble`` hook (or the dict itself) then gives the forward output type.
+        The final stage's output names are the forward output keys; the ``assemble``
+        hook (or the dict itself) then gives the forward output type.
 
         Args:
             result: Output of :meth:`infer`.
             device: Optional device to move the tensors to first (e.g. the metrics device).
         """
         fields: dict[str, torch.Tensor] = {}
-        for onnx_name, field_name in self.final_stage.output_fields:
-            tensor = result.outputs[onnx_name]
+        for name in self.output_names:
+            tensor = result.outputs[name]
             if device is not None:
                 tensor = tensor.to(device)
             # Own copy: artifact runners reuse their output buffers on the next run, and
@@ -276,7 +270,7 @@ class StagedPipeline:
             tensor = tensor.detach().clone()
             if tensor.is_floating_point():
                 tensor = tensor.float()
-            fields[field_name] = tensor.contiguous()
+            fields[name] = tensor.contiguous()
         return fields if self._assemble is None else self._assemble(fields)
 
 

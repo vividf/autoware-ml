@@ -140,6 +140,29 @@ def test_stage_declared_axes_land_in_the_spec_and_fallback_keeps_export_targets(
     assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
 
 
+def test_derived_spec_module_is_a_bn_folded_copy() -> None:
+    """Deployed graphs carry no BatchNorm; the model's own module stays unfolded."""
+    torch.manual_seed(0)
+    block = nn.Sequential(nn.Conv2d(2, 2, kernel_size=1), nn.BatchNorm2d(2)).eval()
+    with torch.no_grad():
+        block[1].running_mean.uniform_(-1, 1)
+        block[1].running_var.uniform_(0.5, 2)
+        block[1].weight.uniform_(0.5, 2)
+        block[1].bias.uniform_(-1, 1)
+    stages = (
+        TorchStage("seed", run=lambda ctx: {"x": ctx.batch["x"]}),
+        GraphStage("block", module=block, inputs=("x",), outputs=("y",)),
+    )
+    x = torch.randn(1, 2, 3, 3)
+    spec = derive_export_specs(stages, {"x": x}, torch.device("cpu"))["block"]
+
+    assert spec.module is not block
+    assert not any(isinstance(m, nn.BatchNorm2d) for m in spec.module.modules())
+    assert any(isinstance(m, nn.BatchNorm2d) for m in block.modules())
+    with torch.no_grad():
+        torch.testing.assert_close(spec.module(x), block(x))
+
+
 def test_models_without_a_stage_graph_keep_the_end_to_end_default() -> None:
     model = _PlainModel()
     assert model.build_stages() is None

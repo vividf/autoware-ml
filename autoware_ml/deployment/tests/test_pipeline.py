@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import os
 
-import onnx
 import pytest
 import torch
 from torch import nn
@@ -49,13 +48,7 @@ def _toy_stages():
         TorchStage("prep", run=lambda ctx: {"x": ctx.batch["x"].float()}),
         GraphStage("encoder", module=_Double(), inputs=("x",), outputs=("y",)),
         TorchStage("glue", run=lambda ctx: {"z": ctx["y"].to(ctx.device) + 0.5}),
-        GraphStage(
-            "head",
-            module=_SplitHead(),
-            inputs=("z",),
-            outputs=("plus", "minus"),
-            output_fields=(("plus", "a"), ("minus", "b")),
-        ),
+        GraphStage("head", module=_SplitHead(), inputs=("z",), outputs=("plus", "minus")),
     )
 
 
@@ -72,21 +65,21 @@ class TestStagedPipeline:
         assert set(result.stage_times_ms) == {"prep", "encoder", "glue", "head"}
         assert set(context.tensors) == {"x", "y", "z", "plus", "minus"}
 
-    def test_assemble_maps_onnx_names_to_forward_output_keys(self):
+    def test_assemble_keys_by_the_final_stage_output_names(self):
         pipeline = StagedPipeline(
             _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
         )
         result = pipeline.infer({"x": torch.tensor([1.0])})
         assembled = pipeline.assemble(result)
-        assert set(assembled) == {"a", "b"}
-        assert assembled["a"].item() == pytest.approx(3.5)
+        assert set(assembled) == {"plus", "minus"}
+        assert assembled["plus"].item() == pytest.approx(3.5)
 
     def test_assemble_hook_builds_the_forward_output_type(self):
         pipeline = StagedPipeline(
             _toy_stages(),
             backend="pytorch",
             device=torch.device("cpu"),
-            assemble=lambda fields: (fields["a"], fields["b"]),
+            assemble=lambda fields: (fields["plus"], fields["minus"]),
         )
         result = pipeline.infer({"x": torch.tensor([1.0])})
         a, b = pipeline.assemble(result)
@@ -102,13 +95,7 @@ class TestStagedPipeline:
 
     def test_graph_stage_output_arity_is_checked(self):
         stages = list(_toy_stages())
-        stages[3] = GraphStage(
-            "head",
-            module=_Double(),
-            inputs=("z",),
-            outputs=("plus", "minus"),
-            output_fields=(("plus", "a"),),
-        )
+        stages[3] = GraphStage("head", module=_Double(), inputs=("z",), outputs=("plus", "minus"))
         pipeline = StagedPipeline(stages, backend="pytorch", device=torch.device("cpu"))
         with pytest.raises(ValueError, match="returned 1 tensor"):
             pipeline.infer({"x": torch.tensor([1.0])})
@@ -215,7 +202,3 @@ class TestAvailableBackends:
             available = available_backends(_toy_stages(), tmp_path)
         assert Backend.TENSORRT in available
         assert "STALE TENSORRT ENGINE" in caplog.text
-
-
-def test_onnx_helper_is_importable_without_a_gpu() -> None:
-    assert onnx.__version__

@@ -95,6 +95,28 @@ def test_seg_export_specs_are_derived_and_keep_the_split_contract() -> None:
 
 
 @REQUIRES_SPARSE_CUDA
+def test_derived_export_modules_fold_every_adjacent_batchnorm() -> None:
+    """PointSequential declares in-order application, so its Linear / cpe + BN pairs fold.
+
+    The one BatchNorm that legitimately survives is the pooling block's ``down.norm``: a
+    segment reduction sits between its projection and the norm, so they are not a pair.
+    """
+    model = build_seg_model().cuda().eval()
+    batch = move_batch_to_device(build_inputs(), torch.device("cuda"))
+    specs = model.build_export_specs(batch)
+    for name, spec in specs.items():
+        surviving = [
+            module_name
+            for module_name, module in spec.module.named_modules()
+            if isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
+        ]
+        unexpected = [m for m in surviving if ".down.norm." not in m]
+        assert not unexpected, f"{name}: BatchNorm survived the export fold: {unexpected}"
+    # The training model itself keeps its BatchNorm layers.
+    assert any(isinstance(m, torch.nn.modules.batchnorm._BatchNorm) for m in model.modules())
+
+
+@REQUIRES_SPARSE_CUDA
 def test_staged_pipeline_reproduces_the_hand_built_export_path() -> None:
     """The stage graph runs the same export modules on the same tensors as the export
     context does, so the staged pipeline and the hand-built split export agree exactly.
