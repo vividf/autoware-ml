@@ -400,6 +400,17 @@ autoware-ml deploy \
     --weights mlruns/my_task/my_model/my_config/<run_id>/artifacts/checkpoints/last.ckpt
 ```
 
+### Declaring the deployment as a stage graph
+
+A model with a single exportable graph needs nothing beyond `forward()`: `deploy` exports
+it as `end_to_end`. A model whose deployment is several graphs with PyTorch glue between
+them (pillar decoration, BEV scatter, point serialization ...) declares that split once in
+`build_stages()` — an ordered list of `TorchStage` (glue) and `GraphStage` (one ONNX /
+TensorRT artifact each) over named tensors. The export specs are derived from it, and the
+same declaration is what cross-backend verification, per-backend evaluation and
+quantization run on. See [Deployment › Stage graph](../user-guide/deployment.md#stage-graph-verification-and-evaluation);
+`autoware_ml/models/detection3d/centerpoint.py` is the smallest real example.
+
 ## Common Patterns
 
 ### Multiple Inputs
