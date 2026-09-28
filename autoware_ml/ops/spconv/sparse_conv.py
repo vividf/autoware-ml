@@ -225,12 +225,6 @@ class SparseConvolution(SparseConvolutionBase):
                     f"Precomputed rulebook for indice key '{self.indice_key}' has "
                     f"{attribute}={actual}, this layer expects {expected}."
                 )
-        if data.indices is not None and data.indices.shape[0] != input_tensor.indices.shape[0]:
-            raise ValueError(
-                f"Precomputed rulebook for indice key '{self.indice_key}' was generated for "
-                f"{data.indices.shape[0]} input voxels, this layer sees "
-                f"{input_tensor.indices.shape[0]}."
-            )
 
     def _finalize_output_tensor(
         self,

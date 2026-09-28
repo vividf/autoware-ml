@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import pytest
 import torch
-from spconv.pytorch import SparseSequential
 from torch import nn
 
-from autoware_ml.models.detection3d.encoders.sparse import SparseConv3d as NativeSparseConv3d
-from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
-from autoware_ml.models.detection3d.encoders.sparse import SubMConv3d as NativeSubMConv3d
-from autoware_ml.models.detection3d.encoders.voxel import HardSimpleVoxelSinCosEncoder
-from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
-from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d
-from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
+spconv_pytorch = pytest.importorskip("spconv.pytorch", reason="SparseEncoder requires spconv")
+SparseSequential = spconv_pytorch.SparseSequential
+
+from autoware_ml.models.detection3d.encoders.sparse import SparseConv3d as NativeSparseConv3d  # noqa: E402
+from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder  # noqa: E402
+from autoware_ml.models.detection3d.encoders.sparse import SubMConv3d as NativeSubMConv3d  # noqa: E402
+from autoware_ml.models.detection3d.encoders.voxel import HardSimpleVoxelSinCosEncoder  # noqa: E402
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE  # noqa: E402
+from autoware_ml.ops.spconv.sparse_conv import SparseConv3d as ExportableSparseConv3d  # noqa: E402
+from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d  # noqa: E402
 
 _MIN = [-122.4, -122.4, -3.0, 0.0]
 _MAX = [122.4, 122.4, 5.0, 255.0]

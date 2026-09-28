@@ -801,6 +801,7 @@ class BEVFusionDetectionModel(BaseModel):
                     embed_rulebook_metadata,
                     stages=rulebook_stages,
                     coors_permutation=encoder.coors_permutation,
+                    do_sort=encoder.export_do_sort,
                 )
             )
         stages: list[Stage] = [TorchStage("fetch_voxels", run=fetch_voxels)]

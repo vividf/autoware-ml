@@ -140,6 +140,27 @@ def test_stage_declared_axes_land_in_the_spec_and_fallback_keeps_export_targets(
     assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
 
 
+def test_stage_onnx_transforms_land_in_the_spec_in_order() -> None:
+    def fuse(path):
+        return path
+
+    def stamp(path):
+        return path
+
+    stages = (
+        TorchStage("seed", run=lambda ctx: {"x": ctx.batch["x"]}),
+        GraphStage(
+            "sparse",
+            module=nn.Identity(),
+            inputs=("x",),
+            outputs=("y",),
+            onnx_transforms=(fuse, stamp),
+        ),
+    )
+    specs = derive_export_specs(stages, {"x": torch.ones(3, 2)}, torch.device("cpu"))
+    assert specs["sparse"].onnx_transforms == (fuse, stamp)
+
+
 def test_derived_spec_module_is_a_bn_folded_copy() -> None:
     """Deployed graphs carry no BatchNorm; the model's own module stays unfolded."""
     torch.manual_seed(0)

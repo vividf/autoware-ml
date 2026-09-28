@@ -116,6 +116,11 @@ class GraphStage:
             model where every tensor is indexed by a point count, say. Becomes the
             derived spec's ``dynamic_axes``; a ``dynamic_axes`` under
             ``deploy.onnx.modules.<name>`` applies when the stage declares none.
+        onnx_transforms: Rewrites applied to this stage's exported ``.onnx``, in order,
+            each taking and returning the file path. For fusions intrinsic to the
+            deployed form of this graph — folding a bias and an activation into a
+            runtime plugin node, say — not for user-configurable graph surgery, which
+            belongs in ``deploy.onnx.modify_graph``.
     """
 
     name: str
@@ -124,6 +129,7 @@ class GraphStage:
     outputs: tuple[str, ...]
     torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.inputs or not self.outputs:

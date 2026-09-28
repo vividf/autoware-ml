@@ -65,6 +65,10 @@ INPUT_NAMESPACE = "rulebook"
 STAGES_METADATA_KEY = "rulebook_stages"
 #: ONNX ``metadata_props`` key carrying the ``coors`` -> convolution-coordinate column order.
 COORS_PERMUTATION_METADATA_KEY = "rulebook_coors_permutation"
+#: ONNX ``metadata_props`` key: whether the pair masks were argsorted (``export_do_sort``);
+#: the runtime's rulebooks must be generated the same way or the pairs feed the graph in
+#: another order.
+DO_SORT_METADATA_KEY = "rulebook_do_sort"
 
 
 @dataclass(frozen=True)
@@ -120,9 +124,14 @@ class DownsampleStage:
         return tuple(self.input_name(slot) for slot in RULEBOOK_SLOTS)
 
     def metadata(self) -> dict[str, object]:
-        """The stage as the runtime reads it from ``rulebook_stages`` (spconv's key names)."""
+        """The stage as the runtime reads it from ``rulebook_stages`` (spconv's key names).
+
+        ``algo`` is spconv's ``ConvAlgo`` value: the rulebook layout depends on it, so the
+        runtime must generate with the same one.
+        """
         return {
             "onnx_base": self.onnx_base,
+            "algo": int(self.algo.value),
             "ksize": list(self.kernel_size),
             "stride": list(self.stride),
             "padding": list(self.padding),
@@ -306,6 +315,7 @@ def embed_rulebook_metadata(
     *,
     stages: Iterable[DownsampleStage],
     coors_permutation: Iterable[int],
+    do_sort: bool,
 ) -> Path:
     """Stage transform: record the rulebook geometry in the exported graph's metadata.
 
@@ -319,6 +329,7 @@ def embed_rulebook_metadata(
         stages: From :func:`downsample_stages`.
         coors_permutation: For each convolution spatial column, the ``coors`` column it comes
             from — ``(1, 2, 0)`` maps ``coors = [z, y, x]`` onto ``[y, x, z]``.
+        do_sort: The encoder's ``export_do_sort`` the graph was exported with.
 
     Returns:
         The same path.
@@ -332,6 +343,7 @@ def embed_rulebook_metadata(
     props[COORS_PERMUTATION_METADATA_KEY] = meta_value_to_str(
         [int(column) for column in coors_permutation]
     )
+    props[DO_SORT_METADATA_KEY] = meta_value_to_str(bool(do_sort))
     onnx.helper.set_model_props(model, props)
     onnx.save(model, str(onnx_path))
     logger.info(

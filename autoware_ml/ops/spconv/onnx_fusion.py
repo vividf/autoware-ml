@@ -36,15 +36,16 @@ from pathlib import Path
 import onnx
 from onnx import helper
 
+from autoware_ml.ops.spconv.contract import (
+    ACT_RELU,
+    AUTOWARE_DOMAIN,
+    IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
+    IMPLICIT_GEMM_OP,
+)
+
 logger = logging.getLogger(__name__)
 
-IMPLICIT_GEMM_OP = "ImplicitGemm"
-AUTOWARE_DOMAIN = "autoware"
-#: Mirrors the plugin's activation enum (cumm ``tv::gemm::Activation``).
-ACT_NONE = 0
-ACT_RELU = 1
-#: The plugin's optional bias is its sixth input.
-_INPUTS_WITHOUT_BIAS = 5
+_INPUTS_WITHOUT_BIAS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 _STANDARD_DOMAINS = ("", "ai.onnx")
 
 

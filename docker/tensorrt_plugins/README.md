@@ -1,7 +1,7 @@
 # TensorRT plugins for sparse-convolution graphs
 
-Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_sparse`
-stage today) export ONNX nodes in the `autoware` domain —
+Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_lidar`
+graph, PTv3's `ptv3_encoder` / `ptv3_seg3d_head` graphs) export ONNX nodes in the `autoware` domain —
 `autoware::GetIndicePairsImplicitGemm` and `autoware::ImplicitGemm`. TensorRT has no
 implementation for them, so an engine build fails with
 
@@ -50,22 +50,6 @@ PLUGINS_SRC=/path/to/autoware.universe/perception/autoware_tensorrt_plugins \
 
 Without `PLUGINS_SRC` the script clones `autoware_universe@main`; `PLUGINS_REPO` /
 `PLUGINS_REF` select a different source (a feature branch for an A/B build, say).
-
-### Sparse INT8
-
-A deploy config whose sparse tower is quantized (`*_int8_spconv`) exports `ImplicitGemm`
-nodes with `precision=1` plus `channel_scale` / `bias_scaled` inputs. Upstream `main` has no
-INT8 path in that plugin yet, so build from the branch that does:
-
-```bash
-PLUGINS_REPO=https://github.com/vividf/autoware.universe.git \
-PLUGINS_REF=feat/tensorrt-plugins-implicit-gemm-int8 \
-  bash docker/tensorrt_plugins/build_plugin.sh
-```
-
-`build_plugin.sh` says which of the two paths the source it used exposes (`do_sort`,
-`precision`), and `CMakeLists.txt` compiles `quantize_ops/quantize_features.cu` when the
-source has it.
 
 ## Two traps worth knowing
 
