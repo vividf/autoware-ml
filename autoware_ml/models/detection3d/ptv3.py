@@ -32,7 +32,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     stage_voxel_axis_name,
 )
 from autoware_ml.quantization.rules import QuantRules
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 from autoware_ml.utils.point_cloud.batching import offset_to_batch
 from autoware_ml.utils.point_cloud.structures import Point
 
@@ -356,7 +356,7 @@ def build_det_head_export_spec(
         input_param_names=det_head_export_input_names(context.stage_count),
         output_names=list(output_names),
         dynamic_axes=det_head_export_dynamic_axes(context.stage_count),
-        supported_stages=PTv3BaseModel.EXPORT_SUPPORTED_STAGES,
+        supported_targets=PTv3BaseModel.EXPORT_SUPPORTED_TARGETS,
     )
 
 
@@ -543,7 +543,7 @@ class PTv3DetectionModel(PTv3BaseModel):
             input_param_names=input_param_names,
             output_names=self.get_export_output_names(),
             dynamic_axes=build_ptv3_input_dynamic_axes(input_param_names),
-            supported_stages=self.EXPORT_SUPPORTED_STAGES,
+            supported_targets=self.EXPORT_SUPPORTED_TARGETS,
         )
 
     def build_quantization_rules(self) -> QuantRules:

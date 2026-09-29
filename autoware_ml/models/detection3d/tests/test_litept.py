@@ -306,7 +306,7 @@ def test_exported_encoder_graph_declares_a_subset_of_the_contract(tmp_path) -> N
     import onnx
     from omegaconf import OmegaConf
 
-    from autoware_ml.utils.deploy import export_to_onnx
+    from autoware_ml.deployment.export import export_to_onnx
 
     onnx_cfg = OmegaConf.create(
         {"opset_version": 17, "dynamo": False, "do_constant_folding": False}

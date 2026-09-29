@@ -17,7 +17,7 @@
 :func:`derive_export_specs` is what :meth:`BaseModel.build_export_specs` returns for a
 model that declares ``build_stages()``: the stage graph runs once in PyTorch on the
 example batch, and every :class:`~autoware_ml.deployment.stages.GraphStage` becomes one
-:class:`~autoware_ml.utils.deploy.ExportSpec` whose trace inputs are the context tensors
+:class:`~autoware_ml.deployment.export.ExportSpec` whose trace inputs are the context tensors
 it declares as inputs. The export loop in ``scripts/deploy.py`` consumes the result
 exactly like a hand-written mapping.
 """
@@ -37,7 +37,7 @@ from autoware_ml.deployment.stages import (
     run_stages_in_torch,
 )
 from autoware_ml.utils.bn_fusion import bn_folded_copy
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 
 
 def export_spec_for_stage(stage: GraphStage, context: StageContext) -> ExportSpec:

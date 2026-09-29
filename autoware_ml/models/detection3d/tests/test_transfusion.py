@@ -30,7 +30,7 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
 from autoware_ml.models.detection3d.transfusion import TransFusionDetectionModel
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.sparse_conv import SubMConv3d as ExportableSubMConv3d
-from autoware_ml.utils.onnx_precision import validate_module_onnx_precision
+from autoware_ml.deployment.onnx.convert import validate_module_onnx_precision
 
 # Scaled-down mirror of tasks/detection3d/transfusion/base.yaml: an 8 m range
 # with 0.25 m voxels gives a 32x32x40 grid, and the SparseEncoder's three

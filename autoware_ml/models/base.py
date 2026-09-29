@@ -38,7 +38,7 @@ from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.base import DataPreprocessing
 from autoware_ml.quantization.rules import QuantRules
-from autoware_ml.utils.deploy import ExportSpec, infer_export_spec
+from autoware_ml.deployment.export import ExportSpec, infer_export_spec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
 
 
@@ -381,7 +381,7 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
             args=raw_spec.args,
             input_param_names=raw_spec.input_param_names,
             output_names=self.get_export_output_names(),
-            supported_stages=raw_spec.supported_stages,
+            supported_targets=raw_spec.supported_targets,
         )
 
     def build_quantization_rules(self) -> QuantRules | None:

@@ -103,7 +103,7 @@ def test_specs_are_derived_one_per_graph_stage_in_order() -> None:
     assert encoder.module is model.encoder
     assert head.module is model.head
     assert encoder.dynamic_axes is None
-    assert encoder.supported_stages == frozenset({"onnx", "tensorrt"})
+    assert encoder.supported_targets == frozenset({"onnx", "tensorrt"})
 
 
 def test_trace_inputs_are_the_context_tensors_the_glue_produced() -> None:
@@ -137,7 +137,7 @@ def test_stage_declared_axes_land_in_the_spec_and_fallback_keeps_export_targets(
     spec = specs["points"]
     assert spec.dynamic_axes == {"x": {0: "num_points"}, "y": {0: "num_points"}}
     # A runtime fallback says where the artifact is *run*, not whether it is exported.
-    assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
+    assert spec.supported_targets == frozenset({"onnx", "tensorrt"})
 
 
 def test_stage_onnx_transforms_land_in_the_spec_in_order() -> None:
