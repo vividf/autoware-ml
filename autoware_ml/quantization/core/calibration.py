@@ -38,7 +38,6 @@ from torch import nn
 from tqdm import tqdm
 
 from autoware_ml.quantization.config import CalibrationConfig
-from autoware_ml.utils.deploy import move_to_device
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,7 @@ class Calibrator:
         model: Model whose tree the quantization plan already prepared.
 
     Example:
-        >>> model.build_quantization_plan(config).prepare(model)  # Insert Q/DQ nodes
+        >>> QuantizationPlan.for_model(model, config).prepare(model)  # Insert Q/DQ nodes
         >>> Calibrator(model).calibrate(dataloader, num_batches=100,
         ...                             calibration=config.calibration,
         ...                             forward_fn=default_calib_forward)
@@ -184,11 +183,10 @@ def default_calib_forward(model: nn.Module, batch: Any) -> None:
     """Default calibration forward for a :class:`~autoware_ml.models.base.BaseModel`.
 
     The batch goes through ``on_after_batch_transfer`` (the one place preprocessing
-    runs) and the forward receives the arguments its signature names, exactly like
-    Lightning's steps. No loss, no logging — statistics collection only needs the
-    activations. Shared by PTQ and the QAT callback.
+    runs) and the forward receives the arguments the model's ``forward_inputs`` picks,
+    exactly like Lightning's steps. No loss, no logging — statistics collection only
+    needs the activations. Shared by PTQ and the QAT callback.
     """
     device = next(model.parameters()).device
-    batch = model.on_after_batch_transfer(move_to_device(batch, device), dataloader_idx=0)
-    forward_inputs = {key: batch[key] for key in model.forward_signature.parameters if key in batch}
-    model(**forward_inputs)
+    batch_inputs = model.on_after_batch_transfer(batch.to_device(device), dataloader_idx=0)
+    model(**model.forward_inputs(batch_inputs))

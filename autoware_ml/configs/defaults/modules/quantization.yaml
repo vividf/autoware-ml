@@ -10,7 +10,6 @@ quantization:
   default_precision: int8
   # Modules (glob patterns over named_modules) left un-quantized, whole subtree included.
   skip_quantize: []
-  disable_recipes: []
   dry_run: false
   # Activation amax method: mse (default) | entropy | percentile | max | smoothquant.
   calibration:

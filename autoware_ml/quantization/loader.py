@@ -15,8 +15,8 @@
 """Loading a self-describing quantized checkpoint into a freshly built model.
 
 The loader rebuilds the *identical* quantized module tree the quantize stage built
-— from the config embedded in the checkpoint, via the model's own
-``build_quantization_plan`` — verifies it against the embedded placement record, and
+— from the config embedded in the checkpoint, via the model's declared rules
+(``QuantizationPlan.for_model``) — verifies it against the embedded placement record, and
 only then loads the weights, so the calibrated ``state_dict`` lines up by construction.
 It never branches on ``mode``: a QAT checkpoint loads exactly like a PTQ one.
 """
@@ -30,9 +30,12 @@ from pathlib import Path
 import torch
 
 from autoware_ml.quantization.checkpoint import QuantizationDescription
-
-# modelopt (through quantization.core) is imported only on the quantized path, so a plain
-# FP checkpoint's deploy / test never pays for it.
+from autoware_ml.quantization.core.quantizer_state import (
+    disable_quantizers_in,
+    validate_quantizer_amax,
+)
+from autoware_ml.quantization.core.replace import expand_skip_quantize
+from autoware_ml.quantization.plan import QuantizationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +95,7 @@ def load_quantized_model(
 
     Steps (mirroring the quantize stage, so state_dict keys match exactly):
 
-    1. ``model.build_quantization_plan(description.config).prepare(model)`` — the SAME
+    1. ``QuantizationPlan.for_model(model, description.config).prepare(model)`` — the SAME
        plan the quantize stage built (BN fuse + Q/DQ insert), recording every placement.
     2. Verify the rebuilt placement record against the checkpoint's embedded one — tree
        drift is a hard failure here instead of a silent weight mis-map.
@@ -117,19 +120,12 @@ def load_quantized_model(
     config = description.config
     logger.info(
         "Rebuilding the quantized tree from the checkpoint's description "
-        "(mode=%s, fuse_bn=%s, skip_quantize=%s, disable_recipes=%s)",
+        "(mode=%s, fuse_bn=%s, skip_quantize=%s)",
         config.mode,
         config.fuse_bn,
         list(config.skip_quantize),
-        list(config.disable_recipes),
     )
-    from autoware_ml.quantization.core.quantizer_state import (
-        disable_quantizers_in,
-        validate_quantizer_amax,
-    )
-    from autoware_ml.quantization.core.replace import expand_skip_quantize
-
-    plan = model.build_quantization_plan(config)
+    plan = QuantizationPlan.for_model(model, config)
     plan.prepare(model)
     plan.placement_record.verify_matches(
         description.placement_record, source="the checkpoint's embedded placement record"
