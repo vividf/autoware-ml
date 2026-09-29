@@ -51,11 +51,16 @@ from pathlib import Path
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper
+from onnx import numpy_helper
 from torch import nn
 
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
-from autoware_ml.ops.spconv.onnx_fusion import AUTOWARE_DOMAIN, IMPLICIT_GEMM_OP
+from autoware_ml.ops.spconv.contract import (
+    AUTOWARE_DOMAIN,
+    IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
+    IMPLICIT_GEMM_OP,
+)
+from autoware_ml.ops.spconv.onnx_fusion import replace_attribute
 
 if IS_SPCONV_AVAILABLE:
     # Guarded at the top: spconv is the framework's one optional dependency.
@@ -69,7 +74,7 @@ PRECISION_INT8 = 1
 #: Signed 8-bit symmetric quantization: amax maps to 127.
 _INT8_MAX = 127.0
 #: The five sparse tensors every ImplicitGemm node carries; a sixth is the folded bias.
-_SPARSE_INPUTS = 5
+_SPARSE_INPUTS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 
 
 @dataclass(frozen=True)
@@ -171,13 +176,6 @@ def _stem_of(initializer_name: str, stems: frozenset[str]) -> str | None:
     return matched[0]
 
 
-def _set_attribute(node: onnx.NodeProto, name: str, value: float) -> None:
-    kept = [attribute for attribute in node.attribute if attribute.name != name]
-    del node.attribute[:]
-    node.attribute.extend(kept)
-    node.attribute.append(helper.make_attribute(name, value))
-
-
 def quantize_implicit_gemm_nodes(
     model: onnx.ModelProto, scales: dict[str, SparseLayerScales]
 ) -> tuple[int, int]:
@@ -247,8 +245,9 @@ def quantize_implicit_gemm_nodes(
         else:
             bias = np.zeros(out_channels, dtype=np.float32)
 
-        # New FP32 initializers: the plugin reads both as float*, and they are created after
-        # the precision pass has run, so the FP16 cast leaves them alone by construction.
+        # New FP32 initializers: the plugin reads both as float*. This transform runs before
+        # the precision cast (deploy.py applies stage transforms first); the cast keeps
+        # these slots fp32 by the contract's IMPLICIT_GEMM_FP32_INPUT_SLOTS.
         channel_scale_name = f"{stem.replace('.', '_')}_channel_scale"
         bias_scaled_name = f"{stem.replace('.', '_')}_bias_scaled"
         graph.initializer.append(
@@ -258,9 +257,9 @@ def quantize_implicit_gemm_nodes(
 
         del node.input[_SPARSE_INPUTS:]
         node.input.extend([channel_scale_name, bias_scaled_name])
-        _set_attribute(node, "precision", PRECISION_INT8)
-        _set_attribute(node, "input_scale", float(layer.input_scale))
-        _set_attribute(node, "output_scale", 1.0)
+        replace_attribute(node, "precision", PRECISION_INT8)
+        replace_attribute(node, "input_scale", float(layer.input_scale))
+        replace_attribute(node, "output_scale", 1.0)
         converted.add(stem)
         logger.debug(
             "Sparse INT8: %s -> precision=1 input_scale=%.6f channel_scale[%d]",

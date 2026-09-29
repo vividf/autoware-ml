@@ -31,7 +31,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     build_ptv3_stages,
     stage_voxel_axis_name,
 )
-from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import offset_to_batch
 from autoware_ml.utils.point_cloud.structures import Point

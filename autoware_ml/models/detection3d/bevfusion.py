@@ -40,7 +40,7 @@ from autoware_ml.models.detection3d.feature_extractors import (
 )
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
-from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
@@ -144,7 +144,9 @@ BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
         "pts_middle_encoder": {"spconv": "int8"},
         "pts_backbone": ("conv",),
         "pts_neck": ("conv",),
-        "bbox_head": {"conv": None, "linear": "fp8"},
+        # The head's shared conv and heatmap head (Conv2d); its decoder is skipped by every
+        # shipped config and its Conv1d prediction heads are not a replaceable kind.
+        "bbox_head": ("conv",),
     },
 )
 
