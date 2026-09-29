@@ -18,7 +18,7 @@
 training, epoch-0 calibration, skip_quantize quantizer disable, embedding the
 quantization description into every saved checkpoint, and the end-of-training
 status log. The plan itself comes from the model's own
-``build_quantization_plan`` — the same plan every other stage builds, so the
+``QuantizationPlan.for_model`` — the same plan every other stage builds, so the
 QAT tree is identical by construction.
 
 The QAT method is frozen-amax STE fine-tuning: calibrated scales stay fixed
@@ -54,6 +54,7 @@ from autoware_ml.quantization.core.quantizer_state import (
     validate_quantizer_amax,
 )
 from autoware_ml.quantization.core.replace import expand_skip_quantize
+from autoware_ml.quantization.plan import QuantizationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class QATCallback(L.Callback):
             )
 
         logger.info("QATCallback: fusing BatchNorm + inserting Q/DQ via the model plan...")
-        plan = pl_module.build_quantization_plan(self.config)
+        plan = QuantizationPlan.for_model(pl_module, self.config)
         plan.prepare(pl_module)
         self.placement_record = plan.placement_record
         pl_module.train()
