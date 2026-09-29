@@ -46,3 +46,9 @@ IMPLICIT_GEMM_BIAS_SLOT = 5
 #: ``ImplicitGemm.act_type`` values — the plugin mirrors cumm's ``tv::gemm::Activation``.
 ACT_NONE = 0
 ACT_RELU = 1
+
+#: The INT8 form (``precision = 1``) has seven inputs: slot 5 ``channel_scale`` and slot 6
+#: ``bias_scaled``, both read by the plugin as ``float*``. A precision cast must leave
+#: them fp32 whatever it does to the rest of the graph.
+IMPLICIT_GEMM_INT8_INPUTS = 7
+IMPLICIT_GEMM_FP32_INPUT_SLOTS: dict[int, tuple[int, ...]] = {IMPLICIT_GEMM_INT8_INPUTS: (5, 6)}

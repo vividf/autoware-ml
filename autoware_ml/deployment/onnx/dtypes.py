@@ -32,7 +32,7 @@ from onnx import TensorProto, helper, shape_inference
 #: ``QuantizeLinear``, whose float8 form it never emits).
 from autoware_ml.deployment.onnx.inspect import DEQUANTIZE_OPS, QDQ_OPS, QUANTIZE_OPS  # noqa: E402
 
-__all__ = ["DEQUANTIZE_OPS", "QDQ_OPS", "QUANTIZE_OPS", "is_float", "settled_tensor_types"]
+__all__ = ["DEQUANTIZE_OPS", "QDQ_OPS", "QUANTIZE_OPS", "is_float", "tensor_types"]
 
 _FLOAT_TYPES = (TensorProto.FLOAT, TensorProto.FLOAT16)
 
