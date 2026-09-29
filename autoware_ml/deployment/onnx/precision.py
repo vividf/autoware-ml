@@ -40,6 +40,11 @@ from autoware_ml.deployment.onnx.dtypes import (
     tensor_types,
 )
 from autoware_ml.deployment.onnx.inspect import onnx_custom_op_domains, onnx_has_qdq
+from autoware_ml.ops.spconv.contract import (
+    AUTOWARE_DOMAIN,
+    IMPLICIT_GEMM_FP32_INPUT_SLOTS,
+    IMPLICIT_GEMM_OP,
+)
 
 __all__ = ["cast_graph_to_fp16", "onnx_custom_op_domains", "onnx_has_qdq"]
 
@@ -48,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 def _assign_missing_node_names(graph) -> None:
-    """Give every node a unique name (the converter's node_block_list matches by name)."""
+    """Give every node a unique name (the island bookkeeping below is keyed by node name)."""
     taken = {node.name for node in graph.node if node.name}
     for index, node in enumerate(graph.node):
         if not node.name:
@@ -67,7 +72,7 @@ def _assign_missing_node_names(graph) -> None:
 #: scales and evaluate identically under fp16-typed Q/DQ. Hence the split is by op type,
 #: not by node name or scale threshold — both were tried and are unreliable (a name list
 #: missed two culprits; 15 of PTv3's 19 head Gemms are subnormal yet only 6 misbehave).
-#: Evidence: work_dirs/reviews/fp16-typed-qdq-nogo.md, uniform-fp16-exception-rule.md.
+#: (Measured on PTv3's head: 15 of 19 Gemms have subnormal combined scales, 6 misbehave.)
 _LINEAR_OPS = frozenset({"Gemm", "MatMul"})
 
 #: Ops TensorRT's parser only accepts with fp32 (or integer) inputs — an fp16 ``Range``
@@ -123,7 +128,7 @@ assert not _MISSING_SLOT_ENTRIES, (
 #: scales with the sea makes the engine build fail with "could not find any supported
 #: formats consistent with input types".
 _PLUGIN_FP32_INPUT_SLOTS: dict[tuple[str, str], dict[int, tuple[int, ...]]] = {
-    ("autoware", "ImplicitGemm"): {7: (5, 6)},
+    (AUTOWARE_DOMAIN, IMPLICIT_GEMM_OP): IMPLICIT_GEMM_FP32_INPUT_SLOTS,
 }
 
 
