@@ -14,7 +14,7 @@
 
 """Tests for the plan layer (rules validation, placement-record round-trip, decision recording).
 
-The one ``prepare`` test uses a model whose submodule rules/recipes match nothing
+The one ``prepare`` test uses a model whose submodule rules match nothing
 quantizable, so only the BN-fuse and skip_quantize decisions are exercised.
 """
 
@@ -27,8 +27,8 @@ from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.plan import (
     PlacementRecord,
     QuantizationPlan,
-    QuantRules,
 )
+from autoware_ml.quantization.rules import QuantRules
 
 
 def _record(*entries: tuple) -> PlacementRecord:
@@ -40,21 +40,13 @@ def _record(*entries: tuple) -> PlacementRecord:
 
 class TestQuantRules:
     def test_valid_rules_pass(self):
-        rules = QuantRules(
-            quantize_submodules={"pts_backbone": ("conv", "linear")}, recipes=("residual_add",)
-        )
+        rules = QuantRules(quantize_submodules={"pts_backbone": ("conv", "linear")})
         assert rules.quantize_submodules["pts_backbone"] == ("conv", "linear")
 
     def test_unknown_kind_rejected(self):
         with pytest.raises(ValueError, match="unknown module kind"):
             QuantRules(quantize_submodules={"pts_backbone": ("conv3d",)})
 
-    def test_unknown_recipe_rejected(self):
-        with pytest.raises(ValueError, match="unknown recipe"):
-            QuantRules(quantize_submodules={}, recipes=("attention",))
-
-
-class TestRecordRoundTrip:
     def test_json_dict_round_trip(self):
         record = _record(
             (
@@ -131,11 +123,10 @@ class TestPrepareRecordsDecisions:
                 "enabled": True,
                 "mode": "ptq",
                 "skip_quantize": ["some_tower"],
-                "disable_recipes": ["residual_add", "maxpool"],
                 "ptq": {"calibrate_samples": 4},
             }
         )
-        # Submodule rules/recipes that match nothing on this model: only the
+        # Submodule rules that match nothing on this model: only the
         # fuse_bn and skip_quantize transforms run.
         plan = QuantizationPlan(
             rules=QuantRules(quantize_submodules={"absent_submodule": ("conv",)}), config=config

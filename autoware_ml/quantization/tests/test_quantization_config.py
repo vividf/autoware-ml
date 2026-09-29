@@ -41,13 +41,11 @@ class TestQuantizationConfig:
                 "enabled": True,
                 "mode": "ptq",
                 "skip_quantize": ["pts_voxel_encoder"],
-                "disable_recipes": ["residual_add"],
                 "ptq": {"calibrate_samples": 400, "batch_size": 1, "calib_seed": 0},
             }
         )
         assert config.enabled
         assert config.skip_quantize == ("pts_voxel_encoder",)
-        assert config.disable_recipes == ("residual_add",)
         assert config.ptq == PTQConfig(calibrate_samples=400, batch_size=1, calib_seed=0)
 
     def test_typo_guard_rejects_unknown_key(self):

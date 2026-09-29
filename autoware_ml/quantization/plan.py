@@ -37,12 +37,8 @@ transform's home module for its mechanics):
   (:mod:`autoware_ml.utils.bn_fusion`).
 - ``skip_quantize``  — a matched module and its whole subtree stay un-quantized
   (:func:`.core.replace.expand_skip_quantize`).
-- ``replace_module`` — ``nn.Conv2d``/``nn.ConvTranspose2d``/``nn.Linear``
+- ``replace_module`` — ``nn.Conv2d``/``nn.ConvTranspose2d``/``nn.Linear``/sparse conv
   converted in place into its modelopt quantized class (:mod:`.core.replace`).
-- ``wrap_module``    — a pool wrapped so Q/DQ lands on its input
-  (:class:`~.recipes.quant_blocks.QuantBeforePool`).
-- ``convert_block``  — a residual block converted in place into its ``Quant*`` block
-  class, with a ``residual_quantizer`` attached (:mod:`.recipes.attach`).
 
 Stage code (the quantize entrypoints and the deploy loader) holds a plan and calls
 ``prepare`` — it never sees quantization internals. The record covers module-tree
@@ -58,36 +54,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from autoware_ml.quantization.config import (
-    VALID_MODULE_KINDS,
-    VALID_RECIPES,
-    Precision,
-    QuantizationConfig,
-)
+from autoware_ml.quantization.config import Precision, QuantizationConfig
 from autoware_ml.quantization.core.replace import (
     expand_skip_quantize,
     match_skip_quantize_roots,
     replace_quantizable_modules,
 )
-from autoware_ml.quantization.recipes.attach import (
-    RECIPE_ATTACHERS,
-    BlockSpecs,
-    ESEBlockSpec,
-    RecipeContext,
-    ResidualBlockSpec,
-    default_block_specs,
-)
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.bn_fusion import find_conv_bn_pairs, fuse_model_bn
 
 logger = logging.getLogger(__name__)
-
-# Adding a recipe means registering its attacher AND listing it in VALID_RECIPES
-# (the canonical apply order); catch a mismatch at import time, not mid-prepare.
-if set(RECIPE_ATTACHERS) != set(VALID_RECIPES):
-    raise RuntimeError(
-        f"Recipe registry drift: RECIPE_ATTACHERS={sorted(RECIPE_ATTACHERS)} vs "
-        f"VALID_RECIPES={sorted(VALID_RECIPES)}. Register every recipe in both places."
-    )
 
 
 @dataclass(frozen=True)
@@ -97,7 +73,7 @@ class PlacementDecision:
     Attributes:
         module: Dotted module name from the model root.
         transform: One of the transform names (module docstring).
-        reason: Why the transform applies (submodule rule / pattern / recipe match).
+        reason: Why the transform applies (submodule rule / skip pattern).
         detail: Outcome detail (classes swapped, quantizer shared from where, ...).
     """
 
@@ -143,8 +119,9 @@ class PlacementRecord:
     def to_json_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-ready dict.
 
-        Versioning lives one level up: the embedding checkpoint payload carries the
-        single format version for the whole ``quantization`` entry.
+        Versioning lives one level up: the embedding checkpoint payload
+        (:class:`~autoware_ml.quantization.checkpoint.QuantizationDescription`) carries
+        the single ``format`` version for the whole ``quantization`` entry.
         """
         return {"decisions": [asdict(decision) for decision in self.decisions]}
 
@@ -235,82 +212,6 @@ class PlacementRecord:
             logger.info("    %-52s %-16s %s", decision.module, decision.transform, note)
 
 
-@dataclass(frozen=True)
-class QuantRules:
-    """A model's quantization declaration: what gets quantized, which recipes apply.
-
-    Per-submodule module kinds are architecture facts and belong in the model's
-    rules, not in config; config (``skip_quantize`` / ``disable_recipes``) only
-    subtracts from what the rules declare.
-
-    Attributes:
-        quantize_submodules: Top-level model attribute name -> module kinds to
-            replace inside it. Two spellings:
-
-            - ``("conv", "linear")`` — every kind at the config's
-              ``default_precision`` (the common case);
-            - ``{"conv": "int8", "linear": "fp8"}`` — per-kind precision, for a model
-              whose layer families tolerate different precisions. A kind mapped to
-              ``None`` follows ``default_precision``.
-
-            A submodule absent on the model is skipped silently, so one rules object
-            can serve model variants.
-        recipes: Architecture recipes to attach (subset of :data:`VALID_RECIPES`;
-            default: all). Recipes are class-gated: each fires only where the
-            architecture has that block, so zero matches are normal. Applied in
-            canonical :data:`VALID_RECIPES` order regardless of declaration order.
-            Recipe quantizers always follow ``default_precision`` (they are
-            activation-side glue shared with the conv inputs, not per-kind weights).
-        residual_blocks: Extra :class:`~.recipes.attach.ResidualBlockSpec` rows for the
-            ``residual_add`` recipe — the residual blocks this model owns (mmpretrain
-            ``ConvNeXtBlock``, VoVNet ``_OSA_module`` ...), matched before the repo-wide
-            defaults (:func:`~.recipes.attach.default_block_specs`).
-        ese_blocks: :class:`~.recipes.attach.ESEBlockSpec` rows for the ``ese`` recipe
-            (VoVNet ``eSEModule``).
-    """
-
-    quantize_submodules: Mapping[str, tuple[str, ...] | Mapping[str, str | None]]
-    recipes: tuple[str, ...] = VALID_RECIPES
-    residual_blocks: tuple[ResidualBlockSpec, ...] = ()
-    ese_blocks: tuple[ESEBlockSpec, ...] = ()
-
-    def __post_init__(self) -> None:
-        for submodule_name, kinds in self.quantize_submodules.items():
-            unknown = set(kinds) - set(VALID_MODULE_KINDS)
-            if unknown:
-                raise ValueError(
-                    f"QuantRules submodule {submodule_name!r} declares unknown module kind(s) "
-                    f"{sorted(unknown)}; valid kinds: {list(VALID_MODULE_KINDS)}."
-                )
-            if isinstance(kinds, Mapping):
-                for precision_name in kinds.values():
-                    if precision_name is not None:
-                        Precision(precision_name)  # raises ValueError on an unknown precision
-        unknown_recipes = set(self.recipes) - set(VALID_RECIPES)
-        if unknown_recipes:
-            raise ValueError(
-                f"QuantRules declares unknown recipe(s) {sorted(unknown_recipes)}; "
-                f"valid recipes: {list(VALID_RECIPES)}."
-            )
-
-    def resolved_kinds(
-        self, submodule_name: str, default_precision: Precision
-    ) -> Mapping[str, Precision]:
-        """The submodule's kinds with every precision resolved.
-
-        Args:
-            submodule_name: Key of :attr:`quantize_submodules`.
-            default_precision: Config precision used for kinds without their own.
-        """
-        kinds = self.quantize_submodules[submodule_name]
-        if isinstance(kinds, Mapping):
-            return {
-                kind: (Precision(name) if name is not None else default_precision)
-                for kind, name in kinds.items()
-            }
-        return {kind: default_precision for kind in kinds}
-
-
 class QuantizationPlan:
     """Rules + config bound together; ``prepare`` builds the tree and the record.
 
@@ -331,6 +232,25 @@ class QuantizationPlan:
         #: Placement record of the last :meth:`prepare` call (``None`` until then).
         self.placement_record: PlacementRecord | None = None
 
+    @classmethod
+    def for_model(cls, model: Any, config: QuantizationConfig) -> QuantizationPlan:
+        """Bind a model's declared rules to a parsed ``quantization`` config.
+
+        The one constructor every stage uses — PTQ, QAT and the deploy / test loader —
+        so the same model and config always build the same quantized module tree.
+
+        Raises:
+            NotImplementedError: When the model declares no quantization rules
+                (``build_quantization_rules()`` returns ``None``).
+        """
+        rules = model.build_quantization_rules()
+        if rules is None:
+            raise NotImplementedError(
+                f"{type(model).__name__} declares no quantization rules "
+                "(build_quantization_rules returned None), so it cannot be quantized."
+            )
+        return cls(rules=rules, config=config)
+
     def prepare(self, model: Any) -> Any:
         """Fuse BN and insert Q/DQ in place, recording every decision.
 
@@ -344,8 +264,6 @@ class QuantizationPlan:
         2. ``skip_quantize`` resolution into a concrete skip set (subtree match).
         3. Module replacement per :attr:`rules.quantize_submodules` (minus the
            skip set).
-        4. Architecture recipes in canonical order, minus
-           ``config.disable_recipes``, scoped to the submodules of step 3.
 
         The activation calibrator kind (histogram vs max) follows
         ``config.calibration``; it changes no state_dict key, so a checkpoint
@@ -367,8 +285,7 @@ class QuantizationPlan:
                 "match the exported weights. Keep fuse_bn=true."
             )
         skip_names = self._resolve_skip_quantize(model, record)
-        roots = self._replace_modules(model, skip_names, record)
-        self._apply_recipes(model, roots, skip_names, record)
+        self._replace_modules(model, skip_names, record)
         self.placement_record = record
         record.log_summary()
         return model
@@ -399,22 +316,14 @@ class QuantizationPlan:
             )
         return expand_skip_quantize(model, self.config.skip_quantize, log=False)
 
-    def _replace_modules(
-        self, model: Any, skip_names: set[str], record: PlacementRecord
-    ) -> tuple[str, ...]:
-        """Step 3: convert the declared module kinds under each declared submodule.
-
-        Returns:
-            The declared submodule names present on the model — the recipe scope.
-        """
+    def _replace_modules(self, model: Any, skip_names: set[str], record: PlacementRecord) -> None:
+        """Step 3: convert the declared module kinds under each declared submodule."""
         default_precision = self.config.default_precision
         calibrator = self.config.calibration.activation_calibrator
-        roots: list[str] = []
         for submodule_name in self.rules.quantize_submodules:
             submodule = getattr(model, submodule_name, None)
             if submodule is None:
                 continue  # one rules object serves model variants
-            roots.append(submodule_name)
             by_precision: dict[Precision, list[str]] = {}
             for kind, precision in self.rules.resolved_kinds(
                 submodule_name, default_precision
@@ -443,24 +352,3 @@ class QuantizationPlan:
                     precision=precision,
                     calibrator=calibrator,
                 )
-        return tuple(roots)
-
-    def _apply_recipes(
-        self, model: Any, roots: tuple[str, ...], skip_names: set[str], record: PlacementRecord
-    ) -> None:
-        """Step 4: architecture recipes in canonical order, scoped to ``roots``."""
-        context = RecipeContext(
-            precision=self.config.default_precision,
-            calibrator=self.config.calibration.activation_calibrator,
-            roots=roots,
-            skip_names=frozenset(skip_names),
-            specs=BlockSpecs(
-                residual=tuple(self.rules.residual_blocks), ese=tuple(self.rules.ese_blocks)
-            )
-            + default_block_specs(),
-            on_apply=record.add,
-        )
-        disabled = set(self.config.disable_recipes)
-        for recipe_name in VALID_RECIPES:
-            if recipe_name in self.rules.recipes and recipe_name not in disabled:
-                RECIPE_ATTACHERS[recipe_name](model, context)

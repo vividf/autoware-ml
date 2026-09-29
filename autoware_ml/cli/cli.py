@@ -21,13 +21,13 @@ completion helpers used by the ``autoware-ml`` executable.
 import logging
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated
 
 import click
 import typer
 from click.core import ParameterSource
 from click.shell_completion import CompletionItem
 from typer.core import TyperCommand, TyperGroup
+from typing_extensions import Annotated
 
 from autoware_ml.utils.cli.helpers import (
     complete_config_value,

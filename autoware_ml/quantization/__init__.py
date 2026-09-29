@@ -17,16 +17,13 @@ Quantization framework (model-agnostic).
 
 PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layers:
 
-- :mod:`~autoware_ml.quantization.plan`    — the single interface between deployment
-  stages and quantization: ``QuantRules`` (a model's declaration) + ``QuantizationPlan``
-  (rules bound to config; ``prepare`` builds the tree AND records a ``PlacementRecord``
-  of every placement decision).
+- :mod:`~autoware_ml.quantization.rules`   — ``QuantRules``, a model's declaration; the
+  one module a model imports (no modelopt behind it).
+- :mod:`~autoware_ml.quantization.plan`    — ``QuantizationPlan`` (rules bound to config;
+  ``prepare`` builds the tree AND records a ``PlacementRecord`` of every placement decision).
 - :mod:`~autoware_ml.quantization.core`    — model-agnostic engine on nvidia-modelopt
   (descriptor tables, in-place module conversion through modelopt's ``QuantModuleRegistry``,
   BN fusion, calibration, quantizer state).
-- :mod:`~autoware_ml.quantization.recipes` — architecture-specific Q/DQ placement as
-  matcher+action recipes: quantized block classes selected by ``ResidualBlockSpec`` /
-  ``ESEBlockSpec`` rows (residual blocks, VoVNet eSE), plus the MaxPool input wrapper.
 - :mod:`~autoware_ml.quantization.config`  — typed view of the Hydra ``quantization`` section.
 - :mod:`~autoware_ml.quantization.checkpoint` — self-describing quantized checkpoints (config +
   placement record embedded next to the ``state_dict``; no sidecar files).
@@ -35,18 +32,18 @@ PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layer
   into frozen-amax QAT fine-tuning.
 
 A model's quantization declaration (e.g. CenterPoint's ``QuantRules``) lives next to the model
-and is exposed through the model's ``build_quantization_plan()`` hook — the engine never imports
-a model.
+and is exposed through its ``build_quantization_rules()`` hook — the engine never imports a
+model.
 
 The invariant every stage preserves: the quantize stage (PTQ / QAT) and the loader all build the
-quantized module tree by calling the *same* ``build_quantization_plan(config).prepare(model)``,
+quantized module tree by calling the *same* ``QuantizationPlan.for_model(model, config).prepare(model)``,
 so the calibrated ``state_dict`` and the later ``load_state_dict`` line up by construction —
 and the placement record embedded in the checkpoint lets the loader machine-check that instead
 of trusting it. Because the config travels inside the checkpoint, ``deploy`` and ``test`` need
 no ``quantization`` section at all.
 
 The names exported here are the package's real external API. Deeper internals (descriptor
-tables, the single Conv-BN fold, the block registry) stay importable from their defining
+tables, the single Conv-BN fold) stay importable from their defining
 modules but are deliberately not re-exported.
 """
 
@@ -74,7 +71,8 @@ from .core.replace import (
     replace_quantizable_modules,
 )
 from .loader import load_quantized_model
-from .plan import PlacementDecision, PlacementRecord, QuantizationPlan, QuantRules
+from .plan import PlacementDecision, PlacementRecord, QuantizationPlan
+from .rules import QuantRules
 
 __all__ = [
     # Typed config

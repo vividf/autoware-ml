@@ -71,7 +71,7 @@ class Calibrator:
         model: Model whose tree the quantization plan already prepared.
 
     Example:
-        >>> model.build_quantization_plan(config).prepare(model)  # Insert Q/DQ nodes
+        >>> QuantizationPlan.for_model(model, config).prepare(model)  # Insert Q/DQ nodes
         >>> Calibrator(model).calibrate(dataloader, num_batches=100,
         ...                             calibration=config.calibration,
         ...                             forward_fn=default_calib_forward)

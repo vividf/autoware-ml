@@ -19,6 +19,7 @@ completion can import the Typer app without pulling Hydra and MLflow into the
 startup path.
 """
 
+import __main__
 import os
 import sys
 from collections.abc import Sequence
@@ -31,7 +32,6 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir, initialize_config_module
 from hydra.core.global_hydra import GlobalHydra
 
-import __main__
 from autoware_ml.utils.cli.helpers import adjust_argv, resolve_config_reference, run_lazy_script
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_HYDRA_RUN_DIR_ENV,

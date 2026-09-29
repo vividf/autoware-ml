@@ -22,10 +22,11 @@ framework's descriptors from :mod:`.descriptors`. The converted module keeps its
 identity (``isinstance(m, nn.Conv2d)`` stays true) and gains ``input_quantizer``,
 ``weight_quantizer`` and a disabled ``output_quantizer``.
 
-Architecture-specific placement (residual-add / pool) lives in
-:mod:`autoware_ml.quantization.recipes`; which submodules get which kinds is a model's
-:class:`~autoware_ml.quantization.plan.QuantRules` declaration (e.g. CenterPoint's in
-``models/detection3d/main_modules/centerpoint/quantization.py``).
+Which submodules get which kinds is a model's
+:class:`~autoware_ml.quantization.rules.QuantRules` declaration (e.g. CenterPoint's in
+``models/detection3d/centerpoint.py``). The ``conv`` kind covers ``Conv2d`` /
+``ConvTranspose2d``; ``Conv1d`` heads (TransFusion's prediction branches) stay
+un-quantized until a deployment asks for them.
 """
 
 from __future__ import annotations

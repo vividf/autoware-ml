@@ -21,7 +21,8 @@ import pytest
 from torch import nn
 
 from autoware_ml.quantization.config import Precision, QuantizationConfig
-from autoware_ml.quantization.plan import QuantizationPlan, QuantRules
+from autoware_ml.quantization.plan import QuantizationPlan
+from autoware_ml.quantization.rules import QuantRules
 
 
 class _Body(nn.Module):
@@ -44,30 +45,30 @@ def _config() -> QuantizationConfig:
 
 
 def test_tuple_rules_resolve_every_kind_to_the_default_precision() -> None:
-    rules = QuantRules(quantize_submodules={"body": ("conv", "linear")}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": ("conv", "linear")})
     resolved = rules.resolved_kinds("body", Precision.INT8)
     assert resolved == {"conv": Precision.INT8, "linear": Precision.INT8}
 
 
 def test_mapping_rules_carry_per_kind_precision() -> None:
-    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}})
     resolved = rules.resolved_kinds("body", Precision.INT8)
     assert resolved == {"conv": Precision.INT8, "linear": Precision.FP8}
     # None follows the default.
-    rules = QuantRules(quantize_submodules={"body": {"conv": None}}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": {"conv": None}})
     assert rules.resolved_kinds("body", Precision.FP8) == {"conv": Precision.FP8}
 
 
 def test_unknown_kind_and_unknown_precision_are_rejected() -> None:
     with pytest.raises(ValueError, match="unknown module kind"):
-        QuantRules(quantize_submodules={"body": {"attention": "int8"}}, recipes=())
+        QuantRules(quantize_submodules={"body": {"attention": "int8"}})
     with pytest.raises(ValueError):
-        QuantRules(quantize_submodules={"body": {"conv": "fp42"}}, recipes=())
+        QuantRules(quantize_submodules={"body": {"conv": "fp42"}})
 
 
 def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     model = _Model().eval()
-    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}})
     plan = QuantizationPlan(rules=rules, config=_config())
     plan.prepare(model)
 
@@ -103,7 +104,7 @@ def test_attention_out_proj_is_never_replaced() -> None:
             self.body = _AttnBody()
 
     model = _AttnModel().eval()
-    rules = QuantRules(quantize_submodules={"body": {"linear": "fp8"}}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": {"linear": "fp8"}})
     plan = QuantizationPlan(rules=rules, config=_config())
     plan.prepare(model)
 
@@ -121,7 +122,7 @@ def test_default_precision_records_stay_identical_to_the_pre_feature_format() ->
     """Single-precision trees must produce the exact detail strings existing
     checkpoints embed, or every deployed PTQ checkpoint would fail verify_matches."""
     model = _Model().eval()
-    rules = QuantRules(quantize_submodules={"body": ("conv", "linear")}, recipes=())
+    rules = QuantRules(quantize_submodules={"body": ("conv", "linear")})
     plan = QuantizationPlan(rules=rules, config=_config())
     plan.prepare(model)
     details = [d.detail for d in plan.placement_record.decisions if d.transform == "replace_module"]

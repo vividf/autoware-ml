@@ -14,7 +14,7 @@
 
 """Numerical tests for Conv+BN fusion — the highest-risk math in the package.
 
-Asserts ``fused(x) ≈ bn(conv(x))`` for every fusion ``core/fusion.py`` implements
+Asserts ``fused(x) ≈ bn(conv(x))`` for every fusion ``utils/bn_fusion.py`` implements
 (Conv1d+BN1d, Conv2d+BN2d, ConvTranspose2d+BN2d, Linear+BN1d), with the
 ConvTranspose2d dim-1 scaling and the bias formula covered explicitly.
 

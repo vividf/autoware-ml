@@ -15,9 +15,8 @@
 """Quantizer descriptors (modelopt ``QuantizerAttributeConfig``), keyed by :class:`Precision`.
 
 The single source of *which* descriptor each layer type uses — nothing else in the
-framework spells bit widths. The module-replacement engine (:mod:`.replace`) and the
-architecture recipes (:mod:`..recipes.attach`) request descriptors here with the
-precision the plan hands them.
+framework spells bit widths. The module-replacement engine (:mod:`.replace`) requests
+descriptors here with the precision the plan hands them.
 
 Adding a precision = adding its row to each table below (plus the :class:`Precision`
 enum member). FP8 rows are E4M3 (``num_bits=(4, 3)``): weights per-tensor because
@@ -38,9 +37,8 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 
 from autoware_ml.quantization.config import Precision
 
-#: Activation (input) descriptor arguments, shared by Conv2d / ConvTranspose2d / Linear
-#: inputs AND the recipe quantizers (residual / pool) — sharing the same parameters keeps
-#: their calibration consistent with the conv inputs. Per-tensor. The calibrator kind
+#: Activation (input) descriptor arguments, shared by Conv2d / ConvTranspose2d / Linear /
+#: sparse-conv inputs. Per-tensor. The calibrator kind
 #: (``histogram`` vs ``max``) is the config's choice for INT8 (:func:`input_desc`);
 #: FP8 is always max.
 _INPUT_BITS: Mapping[Precision, Any] = {

@@ -37,7 +37,6 @@ _CONFIG = QuantizationConfig.from_dict(
         "enabled": True,
         "mode": "ptq",
         "skip_quantize": ["pts_voxel_encoder"],
-        "disable_recipes": ["residual_add"],
         "ptq": {"calibrate_samples": 4, "calib_seed": 0},
     }
 )
@@ -131,9 +130,3 @@ class TestRecordVerify:
     def test_drift_raises(self):
         with pytest.raises(RuntimeError, match="drift"):
             _record("b.conv").verify_matches(_record("a.conv"), source="test")
-
-
-class TestDisableRecipesValidation:
-    def test_unknown_recipe_name_is_rejected_instead_of_silently_ignored(self):
-        with pytest.raises(ValueError, match="unknown recipe"):
-            QuantizationConfig.from_dict({"enabled": True, "disable_recipes": ["add"]})

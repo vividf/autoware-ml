@@ -16,7 +16,7 @@
 
 The invariant every quantization stage relies on: the PTQ producer and the deploy / test
 loader build the quantized module tree by calling the model's one
-``build_quantization_plan`` — so two independently prepared models must have identical
+``QuantizationPlan.for_model`` — so two independently prepared models must have identical
 state_dict key sets, and a producer state_dict must load into a loader-prepared tree with
 ``strict=True``. Requires nvidia-modelopt (skipped otherwise).
 """
@@ -33,6 +33,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
 from autoware_ml.models.detection3d.centerpoint import CENTERPOINT_QUANT_RULES  # noqa: E402
 from autoware_ml.models.detection3d.tests.test_centerpoint import _build_model  # noqa: E402
 from autoware_ml.quantization.config import QuantizationConfig  # noqa: E402
+from autoware_ml.quantization.plan import QuantizationPlan  # noqa: E402
 
 _CONFIG = QuantizationConfig.from_dict(
     {
@@ -47,7 +48,7 @@ _CONFIG = QuantizationConfig.from_dict(
 def _prepared():
     torch.manual_seed(0)
     model = _build_model().eval()
-    plan = model.build_quantization_plan(_CONFIG)
+    plan = QuantizationPlan.for_model(model, _CONFIG)
     plan.prepare(model)
     return model, plan
 

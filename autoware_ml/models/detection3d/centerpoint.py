@@ -33,7 +33,7 @@ from autoware_ml.deployment.stages import GraphStage, Stage, StageContext, Torch
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.base import BaseModel
-from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
 
@@ -74,7 +74,7 @@ class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
 
 #: CenterPoint's quantization declaration: which top-level submodules carry which
 #: quantizable module kinds. An architecture fact, so it lives in code; the `quantization`
-#: config only subtracts from it (`skip_quantize` / `disable_recipes`). Submodules absent
+#: config only subtracts from it (`skip_quantize`). Submodules absent
 #: on a variant are skipped, so one rules object serves every CenterPoint composition.
 CENTERPOINT_QUANT_RULES = QuantRules(
     quantize_submodules={

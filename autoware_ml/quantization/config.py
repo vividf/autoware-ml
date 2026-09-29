@@ -15,15 +15,15 @@
 """Typed view of the Hydra ``quantization`` config section.
 
 The single parse of the ``quantization`` dict: entrypoints build this once and pass
-it to the model's ``build_quantization_plan`` — nothing downstream re-parses the raw
+it to ``QuantizationPlan.for_model`` — nothing downstream re-parses the raw
 dict. Defaults are chosen so an absent section yields a fully-disabled config
 (``enabled=False``), leaving non-quantized configs unaffected.
 
 Precision placement is declarative (modelopt-style): everything the plan reaches is
 ``default_precision`` (INT8), and ``skip_quantize`` lists glob patterns (subtree match)
 excluded from quantization — an excluded module's runtime precision follows the deploy
-``onnx.precision`` (fp16 through the deploy precision cast). Architecture recipes are always-on and class-gated;
-``disable_recipes`` opts a config out of one. ``calibration`` picks the amax algorithm.
+``onnx.precision`` (fp16 through the deploy precision cast). ``calibration`` picks the amax
+algorithm.
 
 The FP input checkpoint, the training config, and
 the work directory are NOT config keys here: the checkpoint arrives via ``--weights``,
@@ -45,9 +45,6 @@ logger = logging.getLogger(__name__)
 
 #: Module kinds a submodule rule may request.
 VALID_MODULE_KINDS = ("conv", "linear", "spconv")
-#: Architecture recipes, in the canonical order they are applied. Must stay in sync with
-#: ``recipes.attach.RECIPE_ATTACHERS`` (``plan.py`` checks that at import time).
-VALID_RECIPES = ("residual_add", "ese", "maxpool")
 
 
 class Precision(str, Enum):
@@ -511,10 +508,6 @@ class QuantizationConfig:
     # How activation amax is computed (mse / entropy / percentile / max / smoothquant).
     # Shared by PTQ and the QAT epoch-0 calibration; see CalibrationConfig.
     calibration: CalibrationConfig = CalibrationConfig()
-    # Architecture recipes (residual-add / eSE / maxpool) are attached always, gated by
-    # module class and scoped to the quantized submodules. List a recipe name here to opt
-    # this config out.
-    disable_recipes: tuple[str, ...] = ()
     # Quantize-stage only: build the model, prepare the quantized tree, log the full placement
     # record (which module gets which transform and why), and exit WITHOUT calibrating
     # or training. The way to inspect precision placement before spending GPU time.
@@ -538,7 +531,6 @@ class QuantizationConfig:
             "default_precision",
             "skip_quantize",
             "calibration",
-            "disable_recipes",
             "dry_run",
             "ptq",
             "qat",
@@ -602,13 +594,6 @@ class QuantizationConfig:
                 f"{[p.value for p in Precision]}; skip_quantize opts subtrees out."
             ) from None
         calibration = CalibrationConfig.from_raw(raw.get("calibration"))
-        disable_recipes = cls._str_tuple(raw.get("disable_recipes"))
-        unknown_recipes = sorted(set(disable_recipes) - set(VALID_RECIPES))
-        if unknown_recipes:
-            raise ValueError(
-                f"quantization.disable_recipes names unknown recipe(s) {unknown_recipes}; "
-                f"valid recipes: {list(VALID_RECIPES)}. An unknown name would silently disable nothing."
-            )
         return cls(
             enabled=bool(raw.get("enabled", False)),
             mode=mode,
@@ -616,7 +601,6 @@ class QuantizationConfig:
             default_precision=default_precision,
             skip_quantize=cls._str_tuple(raw.get("skip_quantize")),
             calibration=calibration,
-            disable_recipes=disable_recipes,
             dry_run=bool(raw.get("dry_run", False)),
             ptq=PTQConfig.from_dict(ptq_raw) if ptq_raw is not None else None,
             qat=QATConfig.from_dict(qat_raw) if qat_raw is not None else None,
@@ -636,7 +620,6 @@ class QuantizationConfig:
             "default_precision": self.default_precision.value,
             "skip_quantize": list(self.skip_quantize),
             "calibration": self.calibration.to_dict(),
-            "disable_recipes": list(self.disable_recipes),
             "dry_run": self.dry_run,
             "ptq": self.ptq.to_dict() if self.ptq is not None else None,
             "qat": self.qat.to_dict() if self.qat is not None else None,

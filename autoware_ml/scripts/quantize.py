@@ -53,6 +53,7 @@ from autoware_ml.quantization import (
     validate_quantizer_amax,
 )
 from autoware_ml.quantization.config import QuantizationConfig
+from autoware_ml.quantization.plan import QuantizationPlan
 from autoware_ml.quantization.core.calibration import default_calib_forward
 from autoware_ml.utils.checkpoints import apply_matching_weights
 from autoware_ml.utils.deploy import validate_cuda_available
@@ -130,7 +131,7 @@ def run_ptq(
     if ptq is None:
         raise ValueError("quantization.mode='ptq' requires a quantization.ptq block.")
 
-    plan = model.build_quantization_plan(quantization_config)
+    plan = QuantizationPlan.for_model(model, quantization_config)
     plan.prepare(model)
     model.eval()
     # Expand skip_quantize AFTER prepare — prepare mutates the tree (e.g. Pooling ->
@@ -175,7 +176,7 @@ def log_placement_dry_run(
     model: L.LightningModule, quantization_config: QuantizationConfig
 ) -> None:
     """Prepare the quantized tree on the (weightless, CPU) model and log the placement table."""
-    plan = model.build_quantization_plan(quantization_config)
+    plan = QuantizationPlan.for_model(model, quantization_config)
     plan.prepare(model)
     plan.placement_record.log_table()
     logger.info("quantization.dry_run=true — exiting before calibration.")
