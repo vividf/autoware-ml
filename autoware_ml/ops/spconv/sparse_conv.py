@@ -72,7 +72,11 @@ def resolve_output_spatial_shape(
     dilation: list[int],
     output_padding: list[int],
 ) -> list[int]:
-    """Resolve the sparse spatial shape produced by a convolution layer."""
+    """Resolve the sparse spatial shape produced by a convolution layer.
+
+    Public because the rulebook precompute (:mod:`autoware_ml.ops.spconv.rulebook`) has to
+    cascade the same rule over an encoder's down-sampling layers outside the graph.
+    """
     if subm:
         return spatial_shape
     if transposed:
@@ -188,6 +192,39 @@ class SparseConvolution(SparseConvolutionBase):
                 f"Indice key '{self.indice_key}' already exists in this sparse tensor."
             )
         indice_dict[self.indice_key] = indice_data
+
+    def _check_precomputed_reuse_valid(
+        self,
+        input_tensor: SparseConvTensor,
+        spatial_shape: list[int],
+        data: ImplicitGemmIndiceData,
+    ) -> None:
+        """Reject a precomputed rulebook that was not generated for this layer's geometry.
+
+        Mirrors spconv's ``_check_subm_reuse_valid``: a rulebook is a function of the input
+        coordinates *and* the layer's kernel geometry, so every parameter that shaped it has
+        to match, or the pairs index the wrong neighbours without any error surfacing.
+        """
+        if data.is_subm:
+            raise ValueError(
+                f"Indice key '{self.indice_key}' holds a submanifold rulebook, but this "
+                "layer down-samples; a precomputed rulebook must come from the same layer kind."
+            )
+        for attribute, expected in (
+            ("ksize", list(self.kernel_size)),
+            ("stride", list(self.stride)),
+            ("padding", list(self.padding)),
+            ("dilation", list(self.dilation)),
+            ("spatial_shape", list(spatial_shape)),
+            ("algo", self.algo),
+        ):
+            actual = getattr(data, attribute)
+            actual = list(actual) if isinstance(actual, (list, tuple)) else actual
+            if actual != expected:
+                raise ValueError(
+                    f"Precomputed rulebook for indice key '{self.indice_key}' has "
+                    f"{attribute}={actual}, this layer expects {expected}."
+                )
 
     def _finalize_output_tensor(
         self,
@@ -356,9 +393,16 @@ class SparseConvolution(SparseConvolutionBase):
             )
 
         if self.indice_key is not None and data is not None:
-            if not self.subm:
-                raise RuntimeError("Indice reuse is only supported for subm convolutions.")
-            self._check_subm_reuse_valid(input_tensor, spatial_shape, data)
+            # A submanifold layer reuses the rulebook of the layer that shares its indice key
+            # (spconv's own rule). A down-sampling layer never generates a rulebook that
+            # another layer could reuse, so cached data under its key can only be a rulebook
+            # precomputed outside the graph (autoware_ml.ops.spconv.rulebook): consuming it
+            # here is what removes the layer's GetIndicePairsImplicitGemm node — and with it
+            # the data-dependent output shape TensorRT would otherwise synchronize on.
+            if self.subm:
+                self._check_subm_reuse_valid(input_tensor, spatial_shape, data)
+            else:
+                self._check_precomputed_reuse_valid(input_tensor, spatial_shape, data)
             return _ImplicitGemmExecutionPlan(
                 outids=data.out_indices,
                 pair_fwd=data.pair_fwd,
