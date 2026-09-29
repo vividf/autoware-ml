@@ -21,7 +21,8 @@ Two fp16 paths:
   island-aware whole-graph cast (:func:`autoware_ml.deployment.onnx.precision.cast_graph_to_fp16`):
   the generic converter has no rule keeping a calibrated Q/DQ pair exact and cannot type a
   plugin op. Conv-family Q/DQ go fp16 with the graph; Q/DQ feeding a Gemm/MatMul stay
-  fp32-typed islands; the graph I/O stays fp32.
+  fp32-typed islands; the graph I/O stays fp32. (Un-quantized plugin graphs share the
+  in-house cast too: its plugin slot rules are what keep an INT8 plugin node's scales fp32.)
 - Every other graph takes the onnxconverter-common path of
   :func:`autoware_ml.utils.onnx_precision.convert_onnx_precision`, unchanged.
 
