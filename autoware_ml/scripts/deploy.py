@@ -27,24 +27,24 @@ from omegaconf import DictConfig, OmegaConf
 
 from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.quantization.loader import load_model_weights
-from autoware_ml.utils.deploy import (
+from autoware_ml.deployment.backends.tensorrt_builder import build_engine_from_config
+from autoware_ml.deployment.export import (
     apply_onnx_transforms,
-    build_tensorrt_engine,
     export_to_onnx,
     merge_module_onnx_cfg,
     modify_onnx_graph,
     resolve_export_specs,
-    resolve_output_paths,
-    should_export_stage,
+    should_export_target,
     should_modify_graph,
-    supports_export_stage,
-    validate_cuda_available,
+    supports_export_target,
 )
-from autoware_ml.utils.onnx_precision import (
+from autoware_ml.deployment.onnx.convert import (
     convert_onnx_precision,
     resolve_onnx_precision,
     should_convert_precision,
+    validate_module_onnx_precision,
 )
+from autoware_ml.utils.deploy import resolve_output_paths, validate_cuda_available
 from autoware_ml.utils.mlflow_helpers import (
     AUTOWARE_ML_RUN_ID_ENV,
     build_run_metadata,
@@ -59,9 +59,6 @@ from autoware_ml.utils.mlflow_helpers import (
     write_run_metadata,
 )
 from autoware_ml.utils.onnx_meta import release_to_model_version, stamp_onnx_meta
-from autoware_ml.utils.onnx_precision import (
-    validate_module_onnx_precision,
-)
 from autoware_ml.utils.runtime import (
     configure_torch_runtime,
     get_config_path,
@@ -228,8 +225,8 @@ def main(cfg: DictConfig) -> None:
             module_onnx_path = output_dir / f"{module_name}.onnx"
             module_engine_path = output_dir / f"{module_name}.engine"
 
-            if should_export_stage(deploy_cfg.onnx):
-                if not supports_export_stage(export_spec, "onnx"):
+            if should_export_target(deploy_cfg.onnx):
+                if not supports_export_target(export_spec, "onnx"):
                     raise RuntimeError(
                         f"Module '{module_name}' does not support ONNX export but "
                         "deploy.onnx.enabled=true. Disable the stage or use a supported model."
@@ -287,8 +284,8 @@ def main(cfg: DictConfig) -> None:
                         export_git_sha,
                     )
 
-            if should_export_stage(deploy_cfg.tensorrt):
-                if not supports_export_stage(export_spec, "tensorrt"):
+            if should_export_target(deploy_cfg.tensorrt):
+                if not supports_export_target(export_spec, "tensorrt"):
                     raise RuntimeError(
                         f"Module '{module_name}' does not support TensorRT export but "
                         "deploy.tensorrt.enabled=true. Disable the stage or use a supported model."
@@ -299,7 +296,7 @@ def main(cfg: DictConfig) -> None:
                             f"ONNX file not found: {module_onnx_path}. "
                             "TensorRT export requires a valid ONNX model."
                         )
-                    build_tensorrt_engine(module_onnx_path, deploy_cfg, module_engine_path)
+                    build_engine_from_config(module_onnx_path, deploy_cfg, module_engine_path)
                     tensorrt_exported_paths.append(module_engine_path)
 
         # Post-export steps (opt-in, stage-graph models only): cross-backend verification

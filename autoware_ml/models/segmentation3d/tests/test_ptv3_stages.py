@@ -52,7 +52,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.types.backend import Backend
-from autoware_ml.utils.deploy import export_to_onnx
+from autoware_ml.deployment.export import export_to_onnx
 
 REQUIRES_SPARSE_CUDA = pytest.mark.skipif(
     not (IS_SPCONV_AVAILABLE and torch.cuda.is_available()),
@@ -89,7 +89,7 @@ def test_seg_export_specs_are_derived_and_keep_the_split_contract() -> None:
     assert encoder_spec.dynamic_axes["voxels"] == {0: "num_voxels"}
     # The derived specs go to ONNX and to TensorRT (whose build loads the plugin library).
     for spec in specs.values():
-        assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
+        assert spec.supported_targets == frozenset({"onnx", "tensorrt"})
     with torch.no_grad():
         stage_feats = encoder_spec.module(*encoder_spec.args)
         pred_labels, pred_probs = specs["ptv3_seg3d_head"].module(*specs["ptv3_seg3d_head"].args)
