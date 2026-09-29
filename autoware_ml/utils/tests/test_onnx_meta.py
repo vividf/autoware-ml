@@ -174,11 +174,11 @@ def test_stamp_keeps_metadata_written_by_earlier_passes(tmp_path) -> None:
         [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1])],
     )
     model = onnx.helper.make_model(graph)
-    onnx.helper.set_model_props(model, {"rulebook_stages": "[]"})
+    onnx.helper.set_model_props(model, {"runtime_contract": "[]"})
     onnx.save(model, str(path))
 
     stamp_onnx_meta(path, config_name="cfg", module="stage", release=None, export_git_sha="abc")
 
     props = {prop.key: prop.value for prop in onnx.load(str(path)).metadata_props}
-    assert props["rulebook_stages"] == "[]"
+    assert props["runtime_contract"] == "[]"
     assert props["module"] == "stage"
