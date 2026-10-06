@@ -124,3 +124,160 @@ datamodule:
       - _target_: autoware_ml.transforms.common.packing.BuildPointFeatures
         keys: [coord, strength]
         output_key: feat
+
+deploy:
+  tensorrt:
+    # Optimization profiles for every dynamic input of the two graphs (one mapping
+    # for both modules; entries that are not an input of a graph are skipped). Point
+    # counts measured on the j6gen2 val split (126k-135k points after grid sampling);
+    # min/max leave a 2x band around them; serialized_order/inverse are [2, N] for
+    # the two serialization orders.
+    input_shapes:
+      grid_coord:
+        min_shape: [63026, 3]
+        opt_shape: [130565, 3]
+        max_shape: [202619, 3]
+      feat:
+        min_shape: [63026, 4]
+        opt_shape: [130565, 4]
+        max_shape: [202619, 4]
+      serialized_order:
+        min_shape: [2, 63026]
+        opt_shape: [2, 130565]
+        max_shape: [2, 202619]
+      serialized_inverse:
+        min_shape: [2, 63026]
+        opt_shape: [2, 130565]
+        max_shape: [2, 202619]
+      serialized_pooling_0_indices:
+        min_shape: [63026]
+        opt_shape: [130565]
+        max_shape: [202619]
+      serialized_pooling_0_indptr:
+        min_shape: [30006]
+        opt_shape: [63296]
+        max_shape: [99873]
+      serialized_pooling_0_head_indices:
+        min_shape: [30005]
+        opt_shape: [63295]
+        max_shape: [99872]
+      serialized_pooling_0_grid_coord:
+        min_shape: [30005, 3]
+        opt_shape: [63295, 3]
+        max_shape: [99872, 3]
+      serialized_pooling_0_serialized_order:
+        min_shape: [2, 30005]
+        opt_shape: [2, 63295]
+        max_shape: [2, 99872]
+      serialized_pooling_0_serialized_inverse:
+        min_shape: [2, 30005]
+        opt_shape: [2, 63295]
+        max_shape: [2, 99872]
+      serialized_pooling_1_indices:
+        min_shape: [30005]
+        opt_shape: [63295]
+        max_shape: [99872]
+      serialized_pooling_1_indptr:
+        min_shape: [12195]
+        opt_shape: [26219]
+        max_shape: [42072]
+      serialized_pooling_1_head_indices:
+        min_shape: [12194]
+        opt_shape: [26218]
+        max_shape: [42071]
+      serialized_pooling_1_grid_coord:
+        min_shape: [12194, 3]
+        opt_shape: [26218, 3]
+        max_shape: [42071, 3]
+      serialized_pooling_1_serialized_order:
+        min_shape: [2, 12194]
+        opt_shape: [2, 26218]
+        max_shape: [2, 42071]
+      serialized_pooling_1_serialized_inverse:
+        min_shape: [2, 12194]
+        opt_shape: [2, 26218]
+        max_shape: [2, 42071]
+      serialized_pooling_2_indices:
+        min_shape: [12194]
+        opt_shape: [26218]
+        max_shape: [42071]
+      serialized_pooling_2_indptr:
+        min_shape: [4669]
+        opt_shape: [10190]
+        max_shape: [16563]
+      serialized_pooling_2_head_indices:
+        min_shape: [4668]
+        opt_shape: [10189]
+        max_shape: [16562]
+      serialized_pooling_2_grid_coord:
+        min_shape: [4668, 3]
+        opt_shape: [10189, 3]
+        max_shape: [16562, 3]
+      serialized_pooling_2_serialized_order:
+        min_shape: [2, 4668]
+        opt_shape: [2, 10189]
+        max_shape: [2, 16562]
+      serialized_pooling_2_serialized_inverse:
+        min_shape: [2, 4668]
+        opt_shape: [2, 10189]
+        max_shape: [2, 16562]
+      serialized_pooling_3_indices:
+        min_shape: [4668]
+        opt_shape: [10189]
+        max_shape: [16562]
+      serialized_pooling_3_indptr:
+        min_shape: [1734]
+        opt_shape: [3847]
+        max_shape: [6341]
+      serialized_pooling_3_head_indices:
+        min_shape: [1733]
+        opt_shape: [3846]
+        max_shape: [6340]
+      serialized_pooling_3_grid_coord:
+        min_shape: [1733, 3]
+        opt_shape: [3846, 3]
+        max_shape: [6340, 3]
+      serialized_pooling_3_serialized_order:
+        min_shape: [2, 1733]
+        opt_shape: [2, 3846]
+        max_shape: [2, 6340]
+      serialized_pooling_3_serialized_inverse:
+        min_shape: [2, 1733]
+        opt_shape: [2, 3846]
+        max_shape: [2, 6340]
+      point_feat_0:
+        min_shape: [63026, 32]
+        opt_shape: [130565, 32]
+        max_shape: [202619, 32]
+      point_feat_1:
+        min_shape: [30005, 64]
+        opt_shape: [63295, 64]
+        max_shape: [99872, 64]
+      point_feat_2:
+        min_shape: [12194, 128]
+        opt_shape: [26218, 128]
+        max_shape: [42071, 128]
+      point_feat_3:
+        min_shape: [4668, 256]
+        opt_shape: [10189, 256]
+        max_shape: [16562, 256]
+      point_feat_4:
+        min_shape: [1733, 512]
+        opt_shape: [3846, 512]
+        max_shape: [6340, 512]
+      pooling_cluster_0:
+        min_shape: [63026]
+        opt_shape: [130565]
+        max_shape: [202619]
+      pooling_cluster_1:
+        min_shape: [30005]
+        opt_shape: [63295]
+        max_shape: [99872]
+      pooling_cluster_2:
+        min_shape: [12194]
+        opt_shape: [26218]
+        max_shape: [42071]
+      pooling_cluster_3:
+        min_shape: [4668]
+        opt_shape: [10189]
+        max_shape: [16562]

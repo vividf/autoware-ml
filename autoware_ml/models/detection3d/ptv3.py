@@ -15,19 +15,20 @@ from copy import deepcopy
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.onnx.operators import shape_as_tensor
 
+from autoware_ml.deployment.stages import GraphStage, Stage
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
 from autoware_ml.models.segmentation3d.ptv3_base import (
+    DET_HEAD_STAGE,
     PTv3BaseModel,
     PTv3EncoderExportBase,
     PTv3ExportContext,
-    build_encoder_export_spec,
     build_monolithic_export_inputs,
-    build_ptv3_export_context,
     build_ptv3_input_dynamic_axes,
+    build_ptv3_stages,
     stage_voxel_axis_name,
 )
 from autoware_ml.utils.deploy import ExportSpec
@@ -319,7 +320,7 @@ def det_head_export_dynamic_axes(stage_count: int) -> dict[str, dict[int, str]]:
 
 
 def build_det_head_export_spec(
-    context: "PTv3ExportContext",
+    context: PTv3ExportContext,
     bev_neck: PTv3DetBEVNeck,
     bbox_head: nn.Module,
     output_names: Sequence[str],
@@ -538,17 +539,21 @@ class PTv3DetectionModel(PTv3BaseModel):
             supported_stages=self.EXPORT_SUPPORTED_STAGES,
         )
 
-    def build_export_specs(
-        self, batch_inputs_dict: Mapping[str, torch.Tensor]
-    ) -> dict[str, ExportSpec]:
-        """Build split PTv3 detection ONNX export specs for encoder and detection head."""
-        context = build_ptv3_export_context(self, batch_inputs_dict)
-        return {
-            "ptv3_encoder": build_encoder_export_spec(context),
-            "ptv3_det3d_head": build_det_head_export_spec(
-                context,
-                self.bev_neck,
-                self.bbox_head.prepare_for_export(),
-                self.export_output_names,
-            ),
-        }
+    def build_stages(self) -> Sequence[Stage]:
+        """``serialize_points -> ptv3_encoder -> ptv3_det3d_head``; the export specs derive from it."""
+        stage_count = len(self.encoder.stride) + 1
+        output_names = tuple(self.export_output_names)
+        head = GraphStage(
+            DET_HEAD_STAGE,
+            module=_PTv3DetHeadExportModule(
+                bev_neck=deepcopy(self.bev_neck).eval(),
+                bbox_head=self.bbox_head.prepare_for_export(),
+                output_names=output_names,
+            ).eval(),
+            inputs=tuple(det_head_export_input_names(stage_count)),
+            outputs=output_names,
+            # The head's ONNX outputs are the keys of forward()'s output dict, so a
+            # backend's raw outputs feed build_eval_output (bbox_head.predict) unchanged.
+            onnx_dynamic_axes=det_head_export_dynamic_axes(stage_count),
+        )
+        return build_ptv3_stages(self, head)
