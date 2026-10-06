@@ -51,9 +51,9 @@ def export_spec_for_stage(stage: GraphStage, context: StageContext) -> ExportSpe
     Returns:
         Spec whose ``module`` is the stage module with BatchNorm folded (a copy, or the
         module itself when it has none), whose ``input_param_names`` / ``output_names``
-        are the stage's declared context names and whose ``dynamic_axes`` are the
-        stage's intrinsic axes (``None`` when it declares none, so the module's config
-        entry applies).
+        are the stage's declared context names, whose ``dynamic_axes`` are the stage's
+        intrinsic axes (``None`` when it declares none, so the module's config entry
+        applies) and whose ``onnx_transforms`` are the stage's declared graph rewrites.
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -68,6 +68,7 @@ def export_spec_for_stage(stage: GraphStage, context: StageContext) -> ExportSpe
         input_param_names=list(stage.inputs),
         output_names=list(stage.outputs),
         dynamic_axes=dynamic_axes,
+        onnx_transforms=tuple(stage.onnx_transforms),
     )
 
 

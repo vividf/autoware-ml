@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BEVFusion lidar stage graph: declaration validity, ABI names, the ONNX fallback, and
-the packed-output decode's agreement with the head."""
+"""BEVFusion lidar stage graph: declaration validity, ABI names, the ONNX fallback, the
+the sparse fusion transform, and the packed-output decode's agreement with the head."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from autoware_ml.models.detection3d.encoders.sparse import SparseEncoder
 from autoware_ml.models.detection3d.heads.transfusion import TransFusionHead
 from autoware_ml.models.detection3d.task_modules.bbox_coders import TransFusionBBoxCoder
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 
 
@@ -78,6 +79,8 @@ def test_lidar_declaration_keeps_the_runtime_module_and_falls_back_on_onnx() -> 
     # TensorRT executes the plugin ops (deploy.tensorrt.plugin_libraries); ONNX Runtime has
     # no implementation for them, so only that backend falls back to PyTorch.
     assert graph.torch_fallback_backends == (Backend.ONNX,)
+    # The bias/ReLU fold into the plugin nodes is part of the declaration.
+    assert fuse_sparse_graph in graph.onnx_transforms
     assert model.verification_caveat
 
 

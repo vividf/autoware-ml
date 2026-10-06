@@ -37,6 +37,7 @@ from autoware_ml.models.detection3d.feature_extractors import (
     LidarBEVFeatureExtractor,
     MultiviewImageFeatureExtractor,
 )
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
@@ -721,8 +722,10 @@ class BEVFusionDetectionModel(BaseModel):
 
         The single ``bevfusion_lidar`` graph is the module the runtime loads, unchanged
         in name and I/O. Its ONNX carries ``autoware::`` plugin ops (the sparse encoder),
-        which TensorRT executes through its plugin library and ONNX Runtime cannot run,
-        so only that backend falls back to PyTorch. The graph is single-sample.
+        which TensorRT executes through ``deploy.tensorrt.plugin_libraries`` and ONNX
+        Runtime cannot run, so only that backend falls back to PyTorch. The graph is
+        single-sample; ``fuse_sparse_graph`` folds the bias and ReLU of every sparse
+        convolution into its plugin node after export.
 
         Returns:
             The stages for a lidar-only model, ``None`` for camera-lidar (its two-graph
@@ -752,6 +755,7 @@ class BEVFusionDetectionModel(BaseModel):
                 # axes stay dynamic through deploy.onnx.modules.bevfusion_lidar.
                 outputs=("bbox_pred", "score", "label_pred"),
                 torch_fallback_backends=(Backend.ONNX,),
+                onnx_transforms=(fuse_sparse_graph,),
             ),
         )
 
