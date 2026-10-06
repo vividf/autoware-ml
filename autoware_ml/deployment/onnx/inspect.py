@@ -30,3 +30,19 @@ def onnx_has_qdq(onnx_path: str | Path) -> bool:
     """Whether the graph contains quantize / dequantize nodes (INT8 or FP8)."""
     model = onnx.load(str(onnx_path), load_external_data=False)
     return any(node.op_type in QDQ_OPS for node in model.graph.node)
+
+
+def onnx_custom_op_domains(onnx_path: str | Path) -> tuple[str, ...]:
+    """Non-standard operator domains used by the graph's nodes.
+
+    Nodes outside the default ONNX domain (and ``ai.onnx.*``) are runtime plugins —
+    ``autoware::ImplicitGemm`` and friends. ONNX Runtime cannot execute such a graph
+    without the plugin, and generic precision converters cannot type it.
+    """
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    domains = {
+        node.domain
+        for node in model.graph.node
+        if node.domain and not node.domain.startswith("ai.onnx")
+    }
+    return tuple(sorted(domains))
