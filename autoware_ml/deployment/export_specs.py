@@ -36,6 +36,7 @@ from autoware_ml.deployment.stages import (
     graph_stages,
     run_stages_in_torch,
 )
+from autoware_ml.utils.bn_fusion import bn_folded_copy
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -48,9 +49,11 @@ def export_spec_for_stage(stage: GraphStage, context: StageContext) -> ExportSpe
             stage's ``inputs`` are read from it as the trace arguments.
 
     Returns:
-        Spec whose ``input_param_names`` / ``output_names`` are the stage's declared
-        context names and whose ``dynamic_axes`` are the stage's intrinsic axes (``None``
-        when it declares none, so the module's config entry applies).
+        Spec whose ``module`` is the stage module with BatchNorm folded (a copy, or the
+        module itself when it has none), whose ``input_param_names`` / ``output_names``
+        are the stage's declared context names and whose ``dynamic_axes`` are the
+        stage's intrinsic axes (``None`` when it declares none, so the module's config
+        entry applies).
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -58,7 +61,9 @@ def export_spec_for_stage(stage: GraphStage, context: StageContext) -> ExportSpe
         else None
     )
     return ExportSpec(
-        module=stage.module,
+        # Deployed graphs carry no BatchNormalization node: fold on a copy (identity at
+        # inference), leaving the model's own module — and the pytorch backend — unfolded.
+        module=bn_folded_copy(stage.module),
         args=tuple(context[name].to(context.device) for name in stage.inputs),
         input_param_names=list(stage.inputs),
         output_names=list(stage.outputs),

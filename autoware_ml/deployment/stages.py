@@ -180,6 +180,27 @@ def artifact_path(output_dir: str | Path, stage_name: str, backend: Backend) -> 
     return Path(output_dir) / f"{stage_name}{backend.artifact_suffix}"
 
 
+def run_graph_stage(stage: GraphStage, args: Sequence[Any]) -> dict[str, Any]:
+    """Call a graph stage's PyTorch module and name its outputs.
+
+    The one place a module's return is checked against the declaration, shared by the
+    reference run below and by the pipeline's ``pytorch`` backend.
+
+    Raises:
+        ValueError: When the module returns a different number of tensors than the stage
+            declares as ``outputs``.
+    """
+    raw = stage.module(*args)
+    if isinstance(raw, torch.Tensor):
+        raw = (raw,)
+    if len(raw) != len(stage.outputs):
+        raise ValueError(
+            f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
+            f"outputs {list(stage.outputs)}."
+        )
+    return dict(zip(stage.outputs, raw))
+
+
 def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.device) -> StageContext:
     """Run every stage with its PyTorch module and return the filled context.
 
@@ -201,13 +222,5 @@ def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.devic
                 context.tensors.update(stage.run(context))
                 continue
             args = tuple(context[name].to(device) for name in stage.inputs)
-            raw = stage.module(*args)
-            if isinstance(raw, torch.Tensor):
-                raw = (raw,)
-            if len(raw) != len(stage.outputs):
-                raise ValueError(
-                    f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
-                    f"outputs {list(stage.outputs)}."
-                )
-            context.tensors.update(zip(stage.outputs, raw))
+            context.tensors.update(run_graph_stage(stage, args))
     return context
