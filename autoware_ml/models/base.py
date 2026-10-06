@@ -37,6 +37,7 @@ from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.base import DataPreprocessing
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.deploy import ExportSpec, infer_export_spec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
 
@@ -382,6 +383,18 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
             output_names=self.get_export_output_names(),
             supported_stages=raw_spec.supported_stages,
         )
+
+    def build_quantization_rules(self) -> QuantRules | None:
+        """Declare which submodules carry which quantizable module kinds, or ``None``.
+
+        A :class:`~autoware_ml.quantization.rules.QuantRules` object stating, per top-level
+        submodule, the module kinds (``conv`` / ``linear`` / ``spconv``) the quantize stage
+        may replace. It is an architecture fact and lives in code; the ``quantization``
+        config only subtracts from it (``skip_quantize``). ``None`` means the model does
+        not support quantization. Every stage binds it to a config through
+        :meth:`~autoware_ml.quantization.plan.QuantizationPlan.for_model`.
+        """
+        return None
 
     def build_stages(self) -> Sequence[Stage] | None:
         """Declare the model's deployment stage graph, or ``None`` when it has none.
