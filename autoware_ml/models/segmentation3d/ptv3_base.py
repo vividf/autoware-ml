@@ -24,7 +24,7 @@ from autoware_ml.models.segmentation3d.encoders.ptv3 import (
 )
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.types.backend import Backend
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 from autoware_ml.utils.point_cloud.structures import (
     Point,
     bit_length_tensor,
@@ -99,7 +99,7 @@ class PTv3BaseModel(BaseModel):
     """
 
     EXPORT_ORDER = ("z", "z-trans")
-    EXPORT_SUPPORTED_STAGES = frozenset({"onnx"})
+    EXPORT_SUPPORTED_TARGETS = frozenset({"onnx"})
 
     def __init__(
         self,
@@ -608,7 +608,7 @@ def build_encoder_export_spec(context: PTv3ExportContext) -> ExportSpec:
         input_param_names=input_names,
         output_names=stage_feature_names(context.stage_count),
         dynamic_axes=build_ptv3_encoder_dynamic_axes(input_names, context.stage_count),
-        supported_stages=PTv3BaseModel.EXPORT_SUPPORTED_STAGES,
+        supported_targets=PTv3BaseModel.EXPORT_SUPPORTED_TARGETS,
     )
 
 
@@ -641,7 +641,7 @@ def build_seg_head_export_spec(
         input_param_names=input_names,
         output_names=list(output_names),
         dynamic_axes=dynamic_axes,
-        supported_stages=PTv3BaseModel.EXPORT_SUPPORTED_STAGES,
+        supported_targets=PTv3BaseModel.EXPORT_SUPPORTED_TARGETS,
     )
 
 

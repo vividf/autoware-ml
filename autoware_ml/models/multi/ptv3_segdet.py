@@ -53,7 +53,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     build_seg_head_export_spec,
     split_block_parameters,
 )
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 
 
 class PTv3SegDetModel(PTv3BaseModel):
@@ -300,7 +300,7 @@ class PTv3SegDetModel(PTv3BaseModel):
             input_param_names=input_param_names,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
-            supported_stages=self.EXPORT_SUPPORTED_STAGES,
+            supported_targets=self.EXPORT_SUPPORTED_TARGETS,
         )
 
     def build_export_specs(

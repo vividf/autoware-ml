@@ -1,0 +1,441 @@
+# Copyright 2026 TIER IV, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The per-module export contract and the ONNX export loop helpers.
+
+Models expose ``build_export_specs(batch)`` (derived from ``build_stages()`` when they
+declare a stage graph) and return a mapping from module names to :class:`ExportSpec`
+objects; ``scripts/deploy.py`` exports each one with the helpers below. The TensorRT
+side lives in :mod:`autoware_ml.deployment.backends.tensorrt_builder`, the precision
+cast in :mod:`autoware_ml.deployment.onnx.convert`.
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from collections.abc import Callable, Sequence
+from typing import Any
+
+import lightning as L
+import torch
+from omegaconf import DictConfig, OmegaConf
+from torch.export import Dim
+
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
+from autoware_ml.ops.segment.scatter_reduce import register_scatter_reduce_onnx_symbolic
+from autoware_ml.utils.deploy import move_to_device
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExportSpec:
+    """Describe the module and tensor inputs used for model export.
+
+    Attributes:
+        module: Module instance exported to ONNX.
+        args: Example positional inputs supplied during export.
+        input_param_names: Names associated with the positional input tensors.
+        output_names: Optional names associated with exported output tensors.
+        dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
+            the export arguments. Used only when exporting with ``dynamo=False``.
+        supported_targets: Export targets (``onnx`` / ``tensorrt``) this specification supports.
+        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
+            after the export and before any config-driven graph modifier or precision
+            cast (each takes the path and returns the path it wrote). A stage graph
+            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`.
+    """
+
+    module: torch.nn.Module
+    args: tuple[Any, ...]
+    input_param_names: list[str]
+    output_names: list[str] | None = None
+    dynamic_axes: dict[str, dict[int, str]] | None = None
+    supported_targets: frozenset[str] = frozenset({"onnx", "tensorrt"})
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
+
+    Args:
+        onnx_path: The freshly exported ``.onnx``.
+        transforms: Callables taking the current path and returning the path they wrote
+            (usually the same file, rewritten in place).
+
+    Returns:
+        The path the last transform returned (``onnx_path`` when there is none).
+    """
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
+
+
+def get_forward_signature(model: L.LightningModule) -> inspect.Signature:
+    """Return the cached forward signature from BaseModel, or compute it."""
+    return getattr(model, "forward_signature", inspect.signature(model.forward))
+
+
+def get_export_parameter_names(model: L.LightningModule) -> list[str]:
+    """Return concrete forward parameter names used for export."""
+    signature = get_forward_signature(model)
+    return [
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+
+
+def extract_input_from_batch(batch: dict[str, Any], param_name: str) -> Any:
+    """Extract one export input from a batch dictionary."""
+    if param_name not in batch:
+        raise ValueError(
+            f"Parameter '{param_name}' not found in batch. Available keys: {list(batch.keys())}"
+        )
+
+    input_value = batch[param_name]
+    if isinstance(input_value, (list, tuple)):
+        input_value = input_value[0]
+    return input_value
+
+
+def get_predict_batch(
+    datamodule: L.LightningDataModule,
+    model: L.LightningModule,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Load one prediction batch and apply transfer-time preprocessing."""
+    datamodule.setup("predict")
+    predict_dataloader = datamodule.predict_dataloader()
+    batch = next(iter(predict_dataloader))
+    batch = move_to_device(batch, device)
+    return model.on_after_batch_transfer(batch, dataloader_idx=0)
+
+
+def infer_export_spec(model: L.LightningModule, batch: dict[str, Any]) -> ExportSpec:
+    """Infer an export specification directly from the model forward signature."""
+    forward_params = get_export_parameter_names(model)
+    if not forward_params:
+        raise ValueError("Model forward signature has no parameters.")
+
+    if (
+        isinstance(batch, dict)
+        and len(forward_params) == 1
+        and forward_params[0] == "batch_inputs_dict"
+    ):
+        return ExportSpec(module=model, args=(batch,), input_param_names=forward_params)
+
+    input_args = tuple(extract_input_from_batch(batch, param_name) for param_name in forward_params)
+    return ExportSpec(module=model, args=input_args, input_param_names=forward_params)
+
+
+def resolve_export_specs(
+    datamodule: L.LightningDataModule,
+    model: L.LightningModule,
+    device: torch.device,
+) -> dict[str, ExportSpec]:
+    """Resolve per-module export specifications for a model.
+
+    Args:
+        datamodule: Data module used to generate one prediction batch.
+        model: Model instance to export.
+        device: Device for tensor operations during export preparation.
+
+    Returns:
+        Ordered mapping of module name to export specification.
+    """
+    batch = get_predict_batch(datamodule, model, device)
+    return model.build_export_specs(batch)
+
+
+def merge_module_onnx_cfg(onnx_cfg: DictConfig, module_name: str) -> DictConfig:
+    """Merge shared ONNX settings with per-module settings.
+
+    Module-level settings override shared settings. The ``modules`` key itself
+    is excluded from the merged result.
+
+    Args:
+        onnx_cfg: Top-level ONNX deploy config containing a ``modules`` mapping.
+        module_name: Key of the module to resolve within ``modules``.
+
+    Returns:
+        Merged config with shared settings and module-specific overrides.
+
+    Raises:
+        KeyError: If ``module_name`` is not found in ``onnx_cfg.modules``.
+    """
+    if "modules" not in onnx_cfg or module_name not in onnx_cfg.modules:
+        raise KeyError(
+            f"Module '{module_name}' not found in deploy.onnx.modules. "
+            f"Available: {list(onnx_cfg.get('modules', {}).keys())}"
+        )
+    shared = {
+        k: v for k, v in OmegaConf.to_container(onnx_cfg, resolve=True).items() if k != "modules"
+    }
+    module_overrides = OmegaConf.to_container(onnx_cfg.modules[module_name], resolve=True)
+    return OmegaConf.create({**shared, **module_overrides})
+
+
+def log_export_inputs(input_args: tuple[Any, ...], input_names: list[str]) -> None:
+    """Log export input metadata for debugging."""
+    for input_name, input_value in zip(input_names, input_args):
+        if isinstance(input_value, torch.Tensor):
+            logger.info(
+                "Input '%s': shape=%s, dtype=%s",
+                input_name,
+                tuple(input_value.shape),
+                input_value.dtype,
+            )
+        else:
+            logger.info("Input '%s': type=%s", input_name, type(input_value).__name__)
+
+
+def build_dynamic_shapes(
+    onnx_cfg: DictConfig,
+    forward_params: list[str],
+) -> tuple[dict[int, Dim] | None, ...] | None:
+    """Build the ONNX dynamic-shape mapping from config."""
+    if "dynamic_shapes" not in onnx_cfg or onnx_cfg.dynamic_shapes is None:
+        return None
+
+    raw_dynamic_shapes = onnx_cfg.dynamic_shapes
+    unknown_params = [
+        param_name for param_name in raw_dynamic_shapes if param_name not in forward_params
+    ]
+    if unknown_params:
+        raise ValueError(
+            f"Dynamic shape parameters {unknown_params} not found in export inputs. "
+            f"Available inputs: {forward_params}."
+        )
+
+    dynamic_shapes: list[dict[int, Dim] | None] = []
+    for param_name in forward_params:
+        dim_mapping = raw_dynamic_shapes.get(param_name)
+        if dim_mapping is None:
+            dynamic_shapes.append(None)
+            continue
+
+        param_dynamic_shapes: dict[int, Dim] = {}
+        for dim_idx, dim_spec in dim_mapping.items():
+            if isinstance(dim_spec, str):
+                param_dynamic_shapes[int(dim_idx)] = Dim(dim_spec)
+                continue
+
+            dim_name = dim_spec.get("name")
+            if dim_name is None:
+                raise ValueError(
+                    f"Dynamic shape spec for '{param_name}[{dim_idx}]' must define 'name'."
+                )
+            dim_kwargs = {key: dim_spec[key] for key in ("min", "max") if key in dim_spec}
+            param_dynamic_shapes[int(dim_idx)] = Dim(dim_name, **dim_kwargs)
+
+        dynamic_shapes.append(param_dynamic_shapes or None)
+
+    if all(param_dynamic_shapes is None for param_dynamic_shapes in dynamic_shapes):
+        return None
+    return tuple(dynamic_shapes)
+
+
+def normalize_dynamic_shapes_for_model(
+    model: torch.nn.Module,
+    dynamic_shapes: tuple[dict[int, Dim] | None, ...] | None,
+) -> tuple[Any, ...] | None:
+    """Adapt dynamic-shape structure to the model forward signature.
+
+    ``torch.export`` requires ``dynamic_shapes`` to mirror the positional input
+    pytree passed to the model. Wrappers that expose ``forward(*args)`` receive
+    one tuple-valued positional argument, so their dynamic-shape structure must
+    be wrapped one level deeper.
+    """
+    if dynamic_shapes is None:
+        return None
+
+    signature = inspect.signature(model.forward)
+    parameters = [parameter for parameter in signature.parameters.values()]
+    if len(parameters) == 1 and parameters[0].kind == inspect.Parameter.VAR_POSITIONAL:
+        return (dynamic_shapes,)
+    return dynamic_shapes
+
+
+def build_dynamic_axes(onnx_cfg: DictConfig) -> dict[str, dict[int, str]] | None:
+    """Build legacy ONNX dynamic-axes mapping from config.
+
+    This path is used with ``torch.onnx.export(..., dynamo=False)`` to support
+    exports that still rely on the legacy exporter behavior.
+    """
+    dynamic_axes_cfg = onnx_cfg.get("dynamic_axes")
+    if dynamic_axes_cfg is None:
+        dynamic_axes_cfg = onnx_cfg.get("dynamic_shapes")
+    if dynamic_axes_cfg is None:
+        return None
+
+    dynamic_axes: dict[str, dict[int, str]] = {}
+    for tensor_name, dim_mapping in dynamic_axes_cfg.items():
+        tensor_dynamic_axes: dict[int, str] = {}
+        for dim_idx, dim_spec in dim_mapping.items():
+            if isinstance(dim_spec, str):
+                tensor_dynamic_axes[int(dim_idx)] = dim_spec
+                continue
+
+            dim_name = dim_spec.get("name")
+            if dim_name is None:
+                raise ValueError(
+                    f"Dynamic axis/shape spec for '{tensor_name}[{dim_idx}]' must define 'name'."
+                )
+            tensor_dynamic_axes[int(dim_idx)] = dim_name
+
+        if tensor_dynamic_axes:
+            dynamic_axes[tensor_name] = tensor_dynamic_axes
+
+    return dynamic_axes or None
+
+
+def merge_onnx_external_data(onnx_path: Path) -> None:
+    """Merge ONNX external data shards back into a single file."""
+    import onnx
+    from onnx.external_data_helper import convert_model_from_external_data
+
+    onnx_model = onnx.load(str(onnx_path), load_external_data=True)
+    convert_model_from_external_data(onnx_model)
+    onnx.save_model(onnx_model, str(onnx_path))
+
+
+def export_to_onnx(
+    model: torch.nn.Module,
+    input_sample: tuple[Any, ...],
+    onnx_cfg: DictConfig,
+    input_param_names: list[str],
+    output_names_override: list[str] | None,
+    dynamic_axes_override: dict[str, dict[int, str]] | None,
+    output_path: Path,
+) -> None:
+    """Export a model to ONNX."""
+    logger.info("Exporting model to ONNX...")
+
+    if not input_param_names:
+        raise ValueError("Model forward signature has no parameters.")
+
+    dynamo = onnx_cfg.get("dynamo", True)
+    if dynamo and dynamic_axes_override:
+        raise ValueError(
+            "The export spec declares dynamic_axes (a stage graph's onnx_dynamic_axes or a "
+            "hand-written spec) but deploy.onnx.dynamo=true ignores them and would export a "
+            "static graph. Set deploy.onnx.dynamo=false for this module, or express the axes "
+            "as deploy.onnx.dynamic_shapes."
+        )
+    dynamic_shapes = build_dynamic_shapes(onnx_cfg, input_param_names) if dynamo else None
+    dynamic_shapes = normalize_dynamic_shapes_for_model(model, dynamic_shapes) if dynamo else None
+    dynamic_axes = None
+    if not dynamo:
+        dynamic_axes = dynamic_axes_override or build_dynamic_axes(onnx_cfg)
+    input_names = list(onnx_cfg.get("input_names", input_param_names))
+    output_names = list(output_names_override or onnx_cfg.get("output_names", ["output"]))
+
+    logger.info("Dynamic shapes: %s", dynamic_shapes)
+    logger.info("Dynamic axes: %s", dynamic_axes)
+    logger.info("ONNX opset version: %s", onnx_cfg.opset_version)
+    logger.info("Input names: %s", input_names)
+    logger.info("Output names: %s", output_names)
+    log_export_inputs(input_sample, input_param_names)
+
+    # Register shared ONNX symbolics needed by export-aware ops packages.
+    register_scatter_reduce_onnx_symbolic(opset_version=int(onnx_cfg.opset_version))
+
+    export_kwargs = {
+        "model": model,
+        "args": input_sample,
+        "f": str(output_path),
+        "input_names": input_names,
+        "output_names": output_names,
+        "opset_version": onnx_cfg.opset_version,
+        "dynamo": dynamo,
+        "do_constant_folding": onnx_cfg.get("do_constant_folding", True),
+    }
+    if dynamo:
+        export_kwargs["dynamic_shapes"] = dynamic_shapes
+    else:
+        export_kwargs["dynamic_axes"] = dynamic_axes
+
+    torch.onnx.export(**export_kwargs)
+
+    logger.info("Successfully exported ONNX model to %s", output_path)
+    # Quantized exports spell each Q/DQ scale / zero point as Constant (-> Cast) helper
+    # chains; fold them into initializers so the parameters are readable on the node.
+    # A no-op (the file is left untouched) for graphs without Q/DQ.
+    if output_path.exists():
+        fold_qdq_params(output_path)
+
+    data_path = output_path.with_suffix(output_path.suffix + ".data")
+    if data_path.exists():
+        logger.info("Found external data file %s. Merging into the ONNX file...", data_path)
+        merge_onnx_external_data(output_path)
+        data_path.unlink()
+        logger.info("Successfully merged external data into the ONNX file")
+
+
+def instantiate_modifier(modify_graph_cfg: DictConfig) -> Any:
+    """Instantiate an ONNX graph modifier from config."""
+    import hydra
+
+    modifier = hydra.utils.instantiate(modify_graph_cfg)
+    if callable(modifier):
+        return modifier
+    if hasattr(modifier, "modify"):
+        return modifier
+    raise ValueError(f"Modifier {modifier} must be callable or have a 'modify' method.")
+
+
+def apply_modifier(modifier: Any, onnx_path: Path) -> Path:
+    """Apply a configured ONNX graph modifier."""
+    modified_path = modifier(onnx_path) if callable(modifier) else modifier.modify(onnx_path)
+    if modified_path is None:
+        raise ValueError("Modifier returned None. Must return Path or str.")
+    return Path(modified_path)
+
+
+def should_modify_graph(modify_graph_cfg: DictConfig | None) -> bool:
+    """Return whether graph modification is enabled."""
+    if modify_graph_cfg is None:
+        return False
+    if isinstance(modify_graph_cfg, DictConfig):
+        return OmegaConf.to_container(modify_graph_cfg, resolve=False) is not None
+    return True
+
+
+def modify_onnx_graph(onnx_path: Path, modify_graph_cfg: DictConfig) -> Path:
+    """Modify an ONNX graph using the configured modifier."""
+    logger.info("Modifying ONNX graph...")
+    modifier = instantiate_modifier(modify_graph_cfg)
+    modified_path = apply_modifier(modifier, onnx_path)
+    logger.info("Successfully modified ONNX graph: %s", modified_path)
+    return modified_path
+
+
+def should_export_target(target_cfg: DictConfig | None) -> bool:
+    """Return whether an export target (``deploy.onnx`` / ``deploy.tensorrt``) is enabled."""
+    if target_cfg is None:
+        return False
+    return bool(target_cfg.get("enabled", True))
+
+
+def supports_export_target(export_spec: ExportSpec, target: str) -> bool:
+    """Return whether an export specification supports a target (``onnx`` / ``tensorrt``)."""
+    return target in export_spec.supported_targets

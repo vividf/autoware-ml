@@ -31,7 +31,7 @@ from autoware_ml.metrics.segmentation3d.eval_output import (
     segmentation_frames_eval_output,
 )
 from autoware_ml.models.base import BaseModel
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 
 
 class _FRNetExportModule(nn.Module):

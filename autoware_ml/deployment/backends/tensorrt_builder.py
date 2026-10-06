@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from omegaconf import DictConfig, OmegaConf
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,3 +236,36 @@ def build_engine(
         f.write(serialized_engine)
 
     logger.info("Successfully built TensorRT engine: %s", output_path)
+
+
+def build_engine_from_config(
+    onnx_path: Path,
+    deploy_cfg: DictConfig,
+    output_path: Path,
+) -> None:
+    """Build a strongly typed TensorRT engine from an ONNX model, reading ``deploy.tensorrt``.
+
+    Thin config adapter over :func:`build_engine`: reads
+    ``deploy.tensorrt.{workspace_size, plugin_libraries, input_shapes}`` and validates
+    the optimization profile before TensorRT sees it.
+    """
+    tensorrt_cfg = deploy_cfg.tensorrt
+    raw_shapes = tensorrt_cfg.get("input_shapes", None)
+    input_shapes = None
+    if raw_shapes:
+        input_shapes = {
+            str(name): ShapeProfile.from_dict(
+                OmegaConf.to_container(shapes, resolve=True)
+                if OmegaConf.is_config(shapes)
+                else shapes,
+                f"deploy.tensorrt.input_shapes.{name}",
+            )
+            for name, shapes in raw_shapes.items()
+        }
+    build_engine(
+        onnx_path,
+        output_path,
+        workspace_size=int(tensorrt_cfg.get("workspace_size", 1 << 30)),
+        plugin_libraries=tuple(str(p) for p in (tensorrt_cfg.get("plugin_libraries") or ())),
+        input_shapes=input_shapes,
+    )

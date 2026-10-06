@@ -15,7 +15,7 @@
 
 """FP16 conversion for exported graphs that carry Q/DQ nodes or runtime plugin ops.
 
-Plain graphs take ``autoware_ml.utils.onnx_precision`` (onnxconverter-common behind an
+Plain graphs take :mod:`autoware_ml.deployment.onnx.convert` (onnxconverter-common behind an
 FP32 I/O boundary). A graph with quantize/dequantize nodes or custom-domain plugin ops
 cannot: the converter has no rule for keeping a calibrated Q/DQ pair exact and cannot
 type a plugin op. :func:`cast_graph_to_fp16` is the whole-graph FP16 cast for those:
