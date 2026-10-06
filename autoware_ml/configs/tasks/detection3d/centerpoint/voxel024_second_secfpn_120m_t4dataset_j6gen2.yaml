@@ -13,6 +13,20 @@ dataset: ${t4dataset}
 point_cloud_range: [-122.4, -122.4, -3.0, 122.4, 122.4, 5.0]
 voxel_size: [0.24, 0.24, 8.0]
 
+deploy:
+  tensorrt:
+    # One profile per exported module input (each engine takes the entries it has).
+    input_shapes:
+      input_features:
+        min_shape: [1, 32, 11]
+        opt_shape: [20000, 32, 11]
+        max_shape: [160000, 32, 11]
+      # Static BEV canvas: (batch, pfn_channels, *pts_middle_encoder.output_shape).
+      spatial_features:
+        min_shape: [1, 32, 1020, 1020]
+        opt_shape: [1, 32, 1020, 1020]
+        max_shape: [1, 32, 1020, 1020]
+
 model:
   pts_middle_encoder:
     output_shape: [1020, 1020]

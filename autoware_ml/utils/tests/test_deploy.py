@@ -190,6 +190,21 @@ def test_normalize_dynamic_shapes_wraps_varargs_forward() -> None:
     assert normalize_dynamic_shapes_for_model(_VarArgsModel(), dynamic_shapes) == (dynamic_shapes,)
 
 
+def test_export_to_onnx_refuses_declared_axes_under_dynamo(tmp_path: Path) -> None:
+    # A stage graph's onnx_dynamic_axes only reach the legacy exporter; silently exporting
+    # a static graph under dynamo=true is the failure this guards against.
+    with pytest.raises(ValueError, match="dynamo=false"):
+        export_to_onnx(
+            torch.nn.Identity(),
+            (torch.ones(2, 3),),
+            OmegaConf.create({"dynamo": True}),
+            ["x"],
+            None,
+            {"x": {0: "n"}},
+            tmp_path / "static.onnx",
+        )
+
+
 def test_should_modify_graph_handles_none_and_config() -> None:
     assert should_modify_graph(None) is False
     assert should_modify_graph(OmegaConf.create({"_target_": "pkg.Modifier"})) is True

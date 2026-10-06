@@ -26,12 +26,14 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, final
 
 import lightning as L
-from lightning.pytorch.utilities.data import extract_batch_size
 import torch
-import torch.nn as nn
+from lightning.pytorch.utilities.data import extract_batch_size
+from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
+from autoware_ml.deployment.export_specs import derive_export_specs
+from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.base import DataPreprocessing
@@ -199,7 +201,6 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
         Returns:
             Model outputs.
         """
-        pass
 
     @abstractmethod
     def compute_metrics(
@@ -214,7 +215,6 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
         Returns:
             Dictionary of metric tensors. A ``"loss"`` key is required.
         """
-        pass
 
     def get_log_batch_size(self, batch_inputs_dict: Mapping[str, Any]) -> int | None:
         """Infer the effective sample batch size for logging.
@@ -377,12 +377,31 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
             supported_stages=raw_spec.supported_stages,
         )
 
+    def build_stages(self) -> Sequence[Stage] | None:
+        """Declare the model's deployment stage graph, or ``None`` when it has none.
+
+        A stage graph (:mod:`autoware_ml.deployment.stages`) states once how inference
+        splits into exportable graphs and the PyTorch glue between them. Declaring it
+        gives the model its :meth:`build_export_specs` for free — one spec per
+        ``GraphStage``, traced with the tensors the glue produces — and is what
+        cross-backend verification and per-backend evaluation run on. Models that keep
+        a hand-written :meth:`build_export_specs` leave this at ``None``.
+
+        Returns:
+            The ordered stages, or ``None`` for models without a stage graph.
+        """
+        return None
+
     def build_export_specs(self, batch_inputs_dict: Mapping[str, Any]) -> dict[str, ExportSpec]:
         """Build per-module deployment export specifications.
 
-        The default implementation wraps :meth:`build_export_spec` as a single
-        ``end_to_end`` module. Models with separate exportable sub-graphs
-        override this to return one spec per architectural component.
+        When the model declares :meth:`build_stages`, the specs are derived from that
+        declaration (:func:`~autoware_ml.deployment.export_specs.derive_export_specs`):
+        the stage graph runs once on the example batch and every ``GraphStage`` becomes
+        one module keyed by its stage name. Otherwise the default wraps
+        :meth:`build_export_spec` as a single ``end_to_end`` module; models with
+        separate exportable sub-graphs and no stage graph override this to return one
+        spec per architectural component.
 
         Args:
             batch_inputs_dict: Example preprocessed batch used for export.
@@ -390,7 +409,15 @@ class BaseModel(MetricEvalMixin, L.LightningModule, ABC):
         Returns:
             Ordered mapping of module name to export specification.
         """
+        stages = self.build_stages()
+        if stages is not None:
+            return derive_export_specs(stages, batch_inputs_dict, self._export_device())
         return {"end_to_end": self.build_export_spec(batch_inputs_dict)}
+
+    def _export_device(self) -> torch.device:
+        """Device the stage graph traces on: where the parameters live (CPU if none)."""
+        parameter = next(self.parameters(), None)
+        return parameter.device if parameter is not None else torch.device("cpu")
 
     def configure_optimizers(self) -> Optimizer | dict[str, Any]:
         """Configure optimizers and schedulers.
