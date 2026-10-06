@@ -101,6 +101,24 @@ datamodule:
       - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
         point_cloud_range: ${point_cloud_range}
 
+deploy:
+  tensorrt:
+    # Voxel count varies per frame; the max matches the evaluation pillar budget
+    # (eval_max_voxels), the largest the runtime can hand the engine.
+    input_shapes:
+      voxels:
+        min_shape: [1000, 32, 5]
+        opt_shape: [80000, 32, 5]
+        max_shape: [160000, 32, 5]
+      coors:
+        min_shape: [1000, 3]
+        opt_shape: [80000, 3]
+        max_shape: [160000, 3]
+      num_points_per_voxel:
+        min_shape: [1000]
+        opt_shape: [80000]
+        max_shape: [160000]
+
 model:
   pts_middle_encoder:
     sparse_shape: [1440, 1440, 41]
