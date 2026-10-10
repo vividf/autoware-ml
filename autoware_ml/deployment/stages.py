@@ -263,6 +263,35 @@ def run_torch_stage(stage: TorchStage, state: RunState) -> dict[str, Any]:
     return {name: produced[name] for name in stage.outputs}
 
 
+def run_graph_stage(stage: GraphStage, args: Sequence[Any]) -> dict[str, Any]:
+    """Call a graph stage's PyTorch module and name its outputs.
+
+    The one place a module's return is checked against the declaration, shared by the
+    reference run below and by the pipeline's ``pytorch`` backend.
+
+    Raises:
+        TypeError: When the module returns a mapping (a graph stage's outputs are
+            positional).
+        ValueError: When the module returns a different number of tensors than the stage
+            declares as ``outputs``.
+    """
+    raw = stage.module(*args)
+    if isinstance(raw, Mapping):
+        # len() and zip() would accept a dict and name the outputs by its keys.
+        raise TypeError(
+            f"GraphStage {stage.name!r} returned a mapping; a graph stage returns "
+            f"its tensors positionally, in the order of outputs {list(stage.outputs)}."
+        )
+    if isinstance(raw, torch.Tensor):
+        raw = (raw,)
+    if len(raw) != len(stage.outputs):
+        raise ValueError(
+            f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
+            f"outputs {list(stage.outputs)}."
+        )
+    return dict(zip(stage.outputs, raw))
+
+
 def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.device) -> RunState:
     """Run every stage with its PyTorch module and return the filled run state.
 
@@ -286,19 +315,5 @@ def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.devic
                 state.add(run_torch_stage(stage, state))
                 continue
             args = tuple(state[name].to(device) for name in stage.inputs)
-            raw = stage.module(*args)
-            if isinstance(raw, Mapping):
-                # len() and zip() would accept a dict and name the outputs by its keys.
-                raise TypeError(
-                    f"GraphStage {stage.name!r} returned a mapping; a graph stage returns "
-                    f"its tensors positionally, in the order of outputs {list(stage.outputs)}."
-                )
-            if isinstance(raw, torch.Tensor):
-                raw = (raw,)
-            if len(raw) != len(stage.outputs):
-                raise ValueError(
-                    f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
-                    f"outputs {list(stage.outputs)}."
-                )
-            state.add(dict(zip(stage.outputs, raw)))
+            state.add(run_graph_stage(stage, args))
     return state
