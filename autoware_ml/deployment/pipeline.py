@@ -47,6 +47,7 @@ from autoware_ml.deployment.stages import (
     artifact_path,
     graph_stages,
     model_output_names,
+    run_graph_stage,
     run_torch_stage,
     validate_stages,
 )
@@ -114,15 +115,8 @@ class _ModuleRunner:
         args = tuple(inputs[name].to(self.device) for name in self.stage.inputs)
         times: dict[str, float] = {}
         with cuda_synced_timer(times, "run", self.device):
-            raw = self.module(*args)
-        if isinstance(raw, torch.Tensor):
-            raw = (raw,)
-        if len(raw) != len(self.stage.outputs):
-            raise ValueError(
-                f"GraphStage {self.stage.name!r} returned {len(raw)} tensor(s) but declares "
-                f"outputs {list(self.stage.outputs)}."
-            )
-        return dict(zip(self.stage.outputs, raw)), times["run"]
+            outputs = run_graph_stage(self.stage, args)
+        return outputs, times["run"]
 
 
 def normalize_device(device: str | torch.device) -> torch.device:
