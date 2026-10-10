@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ONNX Runtime module runner.
+"""ONNX Runtime runner for one graph stage.
 
-One implementation of the ONNX Runtime session plumbing (provider selection,
-name discovery, tensor conversion, wall-clock timing) shared by every
-per-model deployment pipeline, so the run loop cannot drift between backends.
+The ``onnx`` backend of :class:`~autoware_ml.deployment.pipeline.StagedPipeline` runs
+every exportable stage through this class: session creation (provider selection),
+I/O name discovery, tensor conversion and wall-clock timing of ``session.run``.
 """
 
 from __future__ import annotations
