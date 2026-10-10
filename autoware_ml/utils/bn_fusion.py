@@ -33,7 +33,7 @@ from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 
 if IS_SPCONV_AVAILABLE:
     # Guarded at the top rather than imported inside a function: spconv is the framework's
-    # one optional dependency (see replace.py).
+    # one optional dependency (see ops/spconv/availability.py).
     from spconv.pytorch import SparseSequential
     from spconv.pytorch.conv import SparseConvolution
 
@@ -128,8 +128,8 @@ def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
     """
     assert not conv.training and not bn.training, "Fusion only works in eval mode"
 
-    # Check if this is a transposed convolution
-    is_transposed = isinstance(conv, (nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d))
+    # ConvTranspose2d is the one transposed type _CONV_TO_BN admits (weight [C_in, C_out, ...]).
+    is_transposed = isinstance(conv, nn.ConvTranspose2d)
 
     conv.weight, conv.bias = fuse_bn_weights(
         conv.weight,
@@ -146,7 +146,8 @@ def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
 #: Attribute a custom container sets (``True``) to state that its ``forward`` applies
 #: its registered children one after another, in registration order — what
 #: ``nn.Sequential`` does by construction. Only such parents let adjacency stand for
-#: dataflow; PTv3's ``PointSequential`` declares it.
+#: dataflow. PTv3's ``PointSequential`` declares it (its ``forward`` walks
+#: ``_modules`` in order, dispatching on the input type).
 SEQUENTIAL_MARKER = "applies_children_in_order"
 
 #: Attribute a custom block sets to name the ``(conv_or_linear, batchnorm)`` child pairs
@@ -278,14 +279,15 @@ def _replace_bn_with_identity(model: nn.Module, bn_name: str):
     parent.add_module(attr, nn.Identity())
 
 
-def fuse_model_bn(model: nn.Module) -> nn.Module:
+def fuse_model_bn(model: nn.Module) -> list[tuple[str, str]]:
     """
     Fuse all Conv-BN pairs in the model, in place.
 
     Args:
-        model: PyTorch model (modified in place; also returned for chaining).
+        model: PyTorch model (modified in place).
     Returns:
-        Model with fused BatchNorm layers.
+        The ``(conv_name, bn_name)`` pairs that were folded (:func:`find_conv_bn_pairs`),
+        so a caller can record them without searching the structure a second time.
 
     Example:
         >>> model.eval()
@@ -295,11 +297,10 @@ def fuse_model_bn(model: nn.Module) -> nn.Module:
     # Must be in eval mode for fusion
     model.eval()
 
-    # Find all Conv-BN pairs
     pairs = find_conv_bn_pairs(model)
     if len(pairs) == 0:
         logger.info("No Conv-BN pairs found to fuse")
-        return model
+        return pairs
 
     # Build modules dict for fast lookup
     modules_dict = dict(model.named_modules())
@@ -312,4 +313,4 @@ def fuse_model_bn(model: nn.Module) -> nn.Module:
         _replace_bn_with_identity(model, bn_name)
 
     logger.info("Fused %d Conv-BN pairs", len(pairs))
-    return model
+    return pairs

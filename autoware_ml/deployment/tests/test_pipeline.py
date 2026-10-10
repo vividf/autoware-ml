@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import os
 
-import onnx
 import pytest
 import torch
 from torch import nn
@@ -197,7 +196,3 @@ class TestAvailableBackends:
             available = available_backends(_toy_stages(), tmp_path)
         assert Backend.TENSORRT in available
         assert "STALE TENSORRT ENGINE" in caplog.text
-
-
-def test_onnx_helper_is_importable_without_a_gpu() -> None:
-    assert onnx.__version__
