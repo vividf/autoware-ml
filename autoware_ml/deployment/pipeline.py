@@ -174,7 +174,7 @@ class StagedPipeline:
     def __init__(
         self,
         stages: Sequence[Stage],
-        backend: str | Backend,
+        backend: Backend,
         device: torch.device,
         artifacts_dir: str | Path | None = None,
         assemble: AssembleFn | None = None,
@@ -182,7 +182,7 @@ class StagedPipeline:
         onnx_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self.stages = validate_stages(stages)
-        self.backend = Backend.parse(backend)
+        self.backend = backend
         self.plugin_libraries = tuple(plugin_libraries)
         self.onnx_paths = dict(onnx_paths or {})
         self.device = normalize_device(device)
@@ -205,9 +205,7 @@ class StagedPipeline:
                 self._runners[stage.name] = _ModuleRunner(stage, self.device)
             else:
                 if artifacts_dir is None:
-                    raise ValueError(
-                        f"artifacts_dir is required for the {self.backend.value} backend."
-                    )
+                    raise ValueError(f"artifacts_dir is required for the {self.backend} backend.")
                 self._runners[stage.name] = _artifact_runner(
                     stage,
                     self.backend,
@@ -300,9 +298,8 @@ class PipelineCache:
         self.onnx_paths = dict(onnx_paths or {})
         self._pipelines: dict[tuple[Backend, str], StagedPipeline] = {}
 
-    def get(self, backend: str | Backend, device: str | torch.device) -> StagedPipeline:
+    def get(self, backend: Backend, device: str | torch.device) -> StagedPipeline:
         """Return the cached pipeline for ``(backend, device)``, building it on first use."""
-        backend = Backend.parse(backend)
         device = normalize_device(device)
         key = (backend, str(device))
         if key not in self._pipelines:

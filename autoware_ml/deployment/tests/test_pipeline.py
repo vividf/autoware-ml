@@ -54,7 +54,9 @@ def _toy_stages():
 
 class TestStagedPipeline:
     def test_pytorch_backend_runs_all_stages_in_order(self):
-        pipeline = StagedPipeline(_toy_stages(), backend="pytorch", device=torch.device("cpu"))
+        pipeline = StagedPipeline(
+            _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
         result, state = pipeline.run({"x": torch.tensor([1, 2, 3])})
 
         # prep: x=[1,2,3]; encoder: y=2x; glue: z=y+0.5; head: plus=z+1, minus=z-1
@@ -77,7 +79,7 @@ class TestStagedPipeline:
     def test_assemble_hook_builds_the_forward_output_type(self):
         pipeline = StagedPipeline(
             _toy_stages(),
-            backend="pytorch",
+            backend=Backend.PYTORCH,
             device=torch.device("cpu"),
             assemble=lambda fields: (fields["plus"], fields["minus"]),
         )
@@ -87,22 +89,18 @@ class TestStagedPipeline:
 
     def test_non_pytorch_backend_requires_artifacts_dir(self):
         with pytest.raises(ValueError, match="artifacts_dir"):
-            StagedPipeline(_toy_stages(), backend="onnx", device=torch.device("cpu"))
-
-    def test_unknown_backend_rejected(self):
-        with pytest.raises(ValueError, match="Unknown backend"):
-            StagedPipeline(_toy_stages(), backend="tflite", device=torch.device("cpu"))
+            StagedPipeline(_toy_stages(), backend=Backend.ONNX, device=torch.device("cpu"))
 
     def test_graph_stage_output_arity_is_checked(self):
         stages = list(_toy_stages())
         stages[3] = GraphStage("head", module=_Double(), inputs=("z",), outputs=("plus", "minus"))
-        pipeline = StagedPipeline(stages, backend="pytorch", device=torch.device("cpu"))
+        pipeline = StagedPipeline(stages, backend=Backend.PYTORCH, device=torch.device("cpu"))
         with pytest.raises(ValueError, match="returned 1 tensor"):
             pipeline.infer({"x": torch.tensor([1.0])})
 
     def test_cache_builds_each_backend_device_once(self, tmp_path):
         cache = PipelineCache(_toy_stages(), tmp_path)
-        first = cache.get("pytorch", "cpu")
+        first = cache.get(Backend.PYTORCH, "cpu")
         assert cache.get(Backend.PYTORCH, torch.device("cpu")) is first
 
     def test_onnx_backend_matches_pytorch_and_reports_fallbacks(self, tmp_path):
@@ -119,9 +117,9 @@ class TestStagedPipeline:
                 opset_version=17,
                 dynamo=False,
             )
-        reference = StagedPipeline(stages, backend="pytorch", device=torch.device("cpu"))
+        reference = StagedPipeline(stages, backend=Backend.PYTORCH, device=torch.device("cpu"))
         onnx_pipeline = StagedPipeline(
-            stages, backend="onnx", device=torch.device("cpu"), artifacts_dir=tmp_path
+            stages, backend=Backend.ONNX, device=torch.device("cpu"), artifacts_dir=tmp_path
         )
         batch = {"x": torch.tensor([1, 2, 3])}
         ref, test = reference.infer(batch), onnx_pipeline.infer(batch)
@@ -139,7 +137,7 @@ class TestStagedPipeline:
         )
         os.remove(tmp_path / "encoder.onnx")
         mixed = StagedPipeline(
-            fallback, backend="onnx", device=torch.device("cpu"), artifacts_dir=tmp_path
+            fallback, backend=Backend.ONNX, device=torch.device("cpu"), artifacts_dir=tmp_path
         )
         assert mixed.fallback_stage_names == ("encoder",)
         torch.testing.assert_close(mixed.infer(batch).outputs["plus"], ref.outputs["plus"])
