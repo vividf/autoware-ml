@@ -169,5 +169,5 @@ def test_a_missing_eval_key_names_the_model(tmp_path) -> None:
     pipeline = StagedPipeline(
         model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
     )
-    with pytest.raises(ValueError, match="_Broken"):
+    with pytest.raises(ValueError, match="_Broken.build_deployed_eval_output"):
         evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))
