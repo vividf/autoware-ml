@@ -135,7 +135,7 @@ class EvaluationConfig:
             num_warmup=int(raw.get("num_warmup", 2)),
             cpu_threads=int(raw.get("cpu_threads", 1)),
             backends={
-                Backend.parse(name): BackendEvaluationConfig.from_dict(cfg, name)
+                Backend(name): BackendEvaluationConfig.from_dict(cfg, name)
                 for name, cfg in backends.items()
             },
         )

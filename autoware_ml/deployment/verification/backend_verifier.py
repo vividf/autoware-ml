@@ -42,17 +42,17 @@ class VerificationScenario:
     """One reference-vs-test backend comparison.
 
     Attributes:
-        ref_backend: Reference backend name (``pytorch`` / ``onnx`` / ``tensorrt``).
+        ref_backend: Reference backend.
         ref_device: Device string for the reference pipeline (e.g. ``cuda`` / ``cpu``).
-        test_backend: Test backend name.
+        test_backend: Test backend.
         test_device: Device string for the test pipeline.
         tolerance: Optional per-scenario absolute tolerance overriding the
             verifier default (e.g. relaxed for int8, tight for fp32-vs-onnx).
     """
 
-    ref_backend: str
+    ref_backend: Backend
     ref_device: str
-    test_backend: str
+    test_backend: Backend
     test_device: str
     tolerance: float | None = None
 
@@ -79,9 +79,9 @@ class VerificationScenario:
         try:
             raw_tolerance = raw.get("tolerance")
             return cls(
-                ref_backend=Backend.parse(raw["ref"]["backend"]).value,
+                ref_backend=Backend(raw["ref"]["backend"]),
                 ref_device=str(raw["ref"].get("device", "cuda")),
-                test_backend=Backend.parse(raw["test"]["backend"]).value,
+                test_backend=Backend(raw["test"]["backend"]),
                 test_device=str(raw["test"].get("device", "cuda")),
                 tolerance=float(raw_tolerance) if raw_tolerance is not None else None,
             )
@@ -143,7 +143,7 @@ class BackendVerifier:
         executed = 0
         all_passed = True
         for scenario in scenarios:
-            required = {Backend.parse(scenario.ref_backend), Backend.parse(scenario.test_backend)}
+            required = {scenario.ref_backend, scenario.test_backend}
             missing = required - available_backends
             if missing:
                 logger.warning(

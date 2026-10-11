@@ -107,7 +107,9 @@ def _loader(num_batches: int = 4, batch_size: int = 3) -> DataLoader:
 
 def test_pytorch_backend_scores_the_split_and_times_every_stage() -> None:
     model = _Model().eval()
-    pipeline = StagedPipeline(model.build_stages(), backend="pytorch", device=torch.device("cpu"))
+    pipeline = StagedPipeline(
+        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+    )
     result = evaluate_backend(model, _loader(), pipeline, torch.device("cpu"), num_warmup=1)
 
     assert result.backend is Backend.PYTORCH and result.split == "test"
@@ -121,7 +123,9 @@ def test_pytorch_backend_scores_the_split_and_times_every_stage() -> None:
 
 def test_num_samples_limits_at_batch_granularity_and_val_reports_under_val() -> None:
     model = _Model().eval()
-    pipeline = StagedPipeline(model.build_stages(), backend="pytorch", device=torch.device("cpu"))
+    pipeline = StagedPipeline(
+        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+    )
     result = evaluate_backend(
         model, _loader(), pipeline, torch.device("cpu"), num_samples=4, stage=EvalStage.VAL
     )
@@ -131,7 +135,9 @@ def test_num_samples_limits_at_batch_granularity_and_val_reports_under_val() -> 
 
 def test_zero_samples_is_an_error() -> None:
     model = _Model().eval()
-    pipeline = StagedPipeline(model.build_stages(), backend="pytorch", device=torch.device("cpu"))
+    pipeline = StagedPipeline(
+        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+    )
     with pytest.raises(ValueError, match="zero samples"):
         evaluate_backend(model, _loader(num_batches=0), pipeline, torch.device("cpu"))
 
@@ -142,6 +148,8 @@ def test_a_missing_eval_key_names_the_model(tmp_path) -> None:
             return {"prediction": outputs["y"]}
 
     model = _Broken().eval()
-    pipeline = StagedPipeline(model.build_stages(), backend="pytorch", device=torch.device("cpu"))
+    pipeline = StagedPipeline(
+        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+    )
     with pytest.raises(ValueError, match="_Broken.build_eval_output"):
         evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))
