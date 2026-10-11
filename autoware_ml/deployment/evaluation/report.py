@@ -39,20 +39,18 @@ LATENCY_ROOT = "latency"
 _RANGE_SUFFIX = re.compile(r"_\d[0-9p]*m_(\d[0-9p]*m|inf)$")
 
 
-def metric_key(split: str, backend: str | Backend, prefix: str, name: str) -> str:
+def metric_key(split: str, backend: Backend, prefix: str, name: str) -> str:
     """Build the canonical metric key ``{split}/{backend}/{prefix}/{name}``.
 
     Lightning logs the same suite under ``{split}/{prefix}/{name}``; the backend segment
     is the only difference (every attached suite has a prefix).
     """
-    backend_name = backend.value if isinstance(backend, Backend) else str(backend)
-    return f"{split}/{backend_name}/{prefix}/{name}"
+    return f"{split}/{backend}/{prefix}/{name}"
 
 
-def latency_key(backend: str | Backend, stage: str) -> str:
+def latency_key(backend: Backend, stage: str) -> str:
     """Build the canonical latency key ``latency/{backend}/{stage}``."""
-    backend_name = backend.value if isinstance(backend, Backend) else str(backend)
-    return f"{LATENCY_ROOT}/{backend_name}/{stage}"
+    return f"{LATENCY_ROOT}/{backend}/{stage}"
 
 
 def is_headline(key: str, headline_metrics: Iterable[str]) -> bool:
