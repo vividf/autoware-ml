@@ -281,14 +281,18 @@ def build_stages(self):
                    outputs=("pillar_features",)),
         TorchStage("scatter", run=...),
         GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
-                   outputs=("heatmap", "reg", ...)),  # the final stage's outputs are forward()'s keys
+                   outputs=("heatmap", "reg", ...)),  # the model outputs: forward()'s keys
     )
 ```
 
 Every `GraphStage` is one `deploy.onnx.modules.<name>` entry and one `<name>.onnx` /
 `<name>.engine`; the export specs are derived from the declaration (the graph runs once
 in PyTorch on the example batch and each stage is traced with the tensors the glue
-produced), so `build_export_specs()` needs no hand-written counterpart. Models without
+produced), so `build_export_specs()` needs no hand-written counterpart. The model outputs
+are the outputs of the graphs after the last glue stage that no later graph consumes:
+the last graph's outputs in a chain like the one above, and every head's outputs when
+several heads share one encoder (PTv3 seg + det). They are the keys of `forward()`'s
+output, which is what makes a backend's raw outputs feed `build_eval_output`. Models without
 a stage graph keep their existing `build_export_specs()`; nothing below applies to them.
 
 The same declaration runs on three backends — `pytorch` (the modules), `onnx` (ONNX
@@ -310,7 +314,7 @@ deploy:
 ```
 
 Each scenario runs the reference and test pipelines on the first predict batches and
-compares the final raw graph outputs element wise; a failing scenario fails the deploy.
+compares the raw model outputs element wise; a failing scenario fails the deploy.
 Tolerances are calibrated, not guessed: lossy backends (fp16 engines, int8) set an
 explicit per-scenario `tolerance`, and a failing tensor's message suggests the gate that
 would have passed so the observed value can be recorded in the config comment. Raw-logit
