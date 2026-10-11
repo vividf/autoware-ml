@@ -21,8 +21,8 @@ their module (``pytorch`` backend) or the runner of their exported artifact
 same named tensors, so cross-backend differences are pure backend differences.
 
 Preprocessing (the model's ``on_after_batch_transfer``) and decoding / metrics stay
-outside the pipeline: it starts from a preprocessed batch and ends at the final graph
-stage's raw outputs plus a per-stage latency breakdown.
+outside the pipeline: it starts from a preprocessed batch and ends at the model's raw
+graph outputs plus a per-stage latency breakdown.
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ from autoware_ml.deployment.stages import (
     Stage,
     TorchStage,
     artifact_path,
-    final_stage,
     graph_stages,
+    model_output_names,
     run_graph_stage,
     validate_stages,
 )
@@ -54,7 +54,7 @@ from autoware_ml.types.backend import Backend
 
 logger = logging.getLogger(__name__)
 
-#: Turns the final stage's name-keyed tensors into the model's ``forward()`` output type.
+#: Turns the name-keyed model outputs into what the model's ``build_eval_output`` takes.
 AssembleFn = Callable[[dict[str, torch.Tensor]], Any]
 
 
@@ -63,7 +63,8 @@ class PipelineResult:
     """Raw outputs of one pipeline run.
 
     Attributes:
-        outputs: Final graph stage's output tensors keyed by their ONNX output name.
+        outputs: The model's output tensors (``model_output_names``) keyed by their ONNX
+            output name.
         output_names: Output names in the declared (frozen ABI) order.
         stage_times_ms: Per-stage latency in milliseconds.
         graph_stage_names: Names of the exportable stages; :attr:`model_ms` sums these
@@ -166,9 +167,9 @@ class StagedPipeline:
         device: Device the exportable stages execute on; glue stages hand their results
             over on this device.
         artifacts_dir: Directory holding ``<stage>.onnx`` / ``.engine`` (non-pytorch backends).
-        assemble: Turns the final stage's name-keyed tensors into the model's ``forward()``
-            output type. ``None`` returns the dict itself — right for models whose
-            ``forward`` returns a ``dict`` keyed by the final stage's output names.
+        assemble: Turns the name-keyed model outputs into what the model's
+            ``build_eval_output`` takes. ``None`` hands over the dict itself — right for
+            models whose ``build_eval_output`` reads the model outputs by name.
     """
 
     def __init__(
@@ -187,8 +188,7 @@ class StagedPipeline:
         self.onnx_paths = dict(onnx_paths or {})
         self.device = normalize_device(device)
         self._assemble = assemble
-        self.final_stage = final_stage(self.stages)
-        self.output_names = list(self.final_stage.outputs)
+        self.output_names = list(model_output_names(self.stages))
         self.graph_stage_names = tuple(stage.name for stage in graph_stages(self.stages))
 
         self._runners: dict[str, Any] = {}
@@ -248,10 +248,11 @@ class StagedPipeline:
         return result
 
     def assemble(self, result: PipelineResult, device: torch.device | None = None) -> Any:
-        """Turn a result into what the model's ``forward()`` returns (what metrics consume).
+        """Turn a result into what the model's ``build_eval_output`` takes (what metrics consume).
 
-        The final stage's output names are the forward output keys; the ``assemble``
-        hook (or the dict itself) then gives the forward output type.
+        The tensors are keyed by the model output names (``model_output_names``); the
+        ``assemble`` hook (or the dict itself) then gives the type ``build_eval_output``
+        expects — for a model whose ``forward`` returns that dict, its forward output.
 
         Args:
             result: Output of :meth:`infer`.

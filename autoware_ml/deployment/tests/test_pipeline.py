@@ -67,7 +67,7 @@ class TestStagedPipeline:
         assert set(result.stage_times_ms) == {"prep", "encoder", "glue", "head"}
         assert set(state.tensors) == {"x", "y", "z", "plus", "minus"}
 
-    def test_assemble_keys_by_the_final_stage_output_names(self):
+    def test_assemble_keys_by_the_model_output_names(self):
         pipeline = StagedPipeline(
             _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
         )
