@@ -42,7 +42,7 @@ def test_keys_carry_split_backend_prefix_and_name() -> None:
         metric_key("test", Backend.TENSORRT, "det3d", "mAP_0m_121m")
         == "test/tensorrt/det3d/mAP_0m_121m"
     )
-    assert metric_key("val", "onnx", "seg", "loss") == "val/onnx/seg/loss"
+    assert metric_key("val", Backend.ONNX, "seg", "loss") == "val/onnx/seg/loss"
     assert latency_key(Backend.ONNX, "head_mean_ms") == "latency/onnx/head_mean_ms"
 
 
