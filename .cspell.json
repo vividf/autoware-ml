@@ -235,6 +235,7 @@
     "pdnorm",
     "pgid",
     "pointcept",
+    "poolings",
     "posemb",
     "pread",
     "prefilter",
