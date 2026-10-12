@@ -1592,6 +1592,30 @@ class TestTransFusionHead(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "class_names"):
             self._build_transfusion_head(coder_class_names=list(reversed(self.class_names)))
 
+    def test_export_output_names_follow_the_output_fields(self) -> None:
+        """
+        Test that the deployed graph's outputs are what the head declares: the dense heatmap
+        and the proposal selection first, then the TransFusionSeparateHeadOutputs fields in
+        their order, with vel only when the head predicts velocity.
+        """
+        self.assertEqual(
+            self._build_transfusion_head(use_velocity=True).export_output_names,
+            (
+                "dense_heatmap",
+                "query_heatmap_score",
+                "query_labels",
+                "heatmap",
+                "center",
+                "height",
+                "dim",
+                "rot",
+                "vel",
+            ),
+        )
+        self.assertEqual(
+            self._build_transfusion_head(use_velocity=False).export_output_names[-1], "rot"
+        )
+
     def test_export_freezes_the_key_positional_encoding_for_the_given_bev_shape(self) -> None:
         """
         Test that exporting with the BEV shape replaces the learned key positional encoding of
