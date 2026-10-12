@@ -147,6 +147,38 @@ class TransFusionHeadOutputs(BaseModel):
         } | {name: getattr(separate, name) for name in type(separate).model_fields}
         return _pick_export_tensors(tensors, names)
 
+    @classmethod
+    def from_export_tensors(cls, tensors: Mapping[str, torch.Tensor]) -> TransFusionHeadOutputs:
+        """
+        Rebuild the head outputs from the tensors a deployed graph emitted under their names.
+
+        The inverse of :meth:`export_tensors`: the dense and query tensors and every
+        per-proposal branch the head predicts (``vel`` stays unset when absent).
+
+        Args:
+            tensors: The exported tensors keyed by output name.
+
+        Returns:
+            The head outputs.
+
+        Raises:
+            ValueError: If a name is not an output of the head, or a tensor every head
+                emits is missing.
+        """
+        own = ("dense_heatmap", "query_heatmap_score", "query_labels")
+        branches = TransFusionSeparateHeadOutputs.model_fields
+        unknown = sorted(set(tensors) - set(own) - set(branches))
+        if unknown:
+            raise ValueError(f"The head has no output named {unknown}, it has {[*own, *branches]}.")
+        return cls(
+            **{name: tensors.get(name) for name in own},
+            separate_head_outputs=TransFusionSeparateHeadOutputs(
+                **_export_tensors_by_branch(
+                    branches, {name: tensor for name, tensor in tensors.items() if name in branches}
+                )
+            ),
+        )
+
 
 class CenterHeadOutputs(BaseModel):
     """
