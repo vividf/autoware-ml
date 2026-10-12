@@ -30,7 +30,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,14 +48,12 @@ from autoware_ml.deployment.stages import (
     graph_stages,
     model_output_names,
     run_graph_stage,
+    run_torch_stage,
     validate_stages,
 )
 from autoware_ml.types.backend import Backend
 
 logger = logging.getLogger(__name__)
-
-#: Turns the name-keyed model outputs into what the model's ``build_eval_output`` takes.
-AssembleFn = Callable[[dict[str, torch.Tensor]], Any]
 
 
 @dataclass
@@ -167,9 +165,6 @@ class StagedPipeline:
         device: Device the exportable stages execute on; glue stages hand their results
             over on this device.
         artifacts_dir: Directory holding ``<stage>.onnx`` / ``.engine`` (non-pytorch backends).
-        assemble: Turns the name-keyed model outputs into what the model's
-            ``build_eval_output`` takes. ``None`` hands over the dict itself — right for
-            models whose ``build_eval_output`` reads the model outputs by name.
     """
 
     def __init__(
@@ -178,7 +173,6 @@ class StagedPipeline:
         backend: Backend,
         device: torch.device,
         artifacts_dir: str | Path | None = None,
-        assemble: AssembleFn | None = None,
         plugin_libraries: Sequence[str] = (),
         onnx_paths: Mapping[str, Path] | None = None,
     ) -> None:
@@ -187,7 +181,6 @@ class StagedPipeline:
         self.plugin_libraries = tuple(plugin_libraries)
         self.onnx_paths = dict(onnx_paths or {})
         self.device = normalize_device(device)
-        self._assemble = assemble
         self.output_names = list(model_output_names(self.stages))
         self.graph_stage_names = tuple(stage.name for stage in graph_stages(self.stages))
 
@@ -227,13 +220,13 @@ class StagedPipeline:
             for stage in self.stages:
                 if isinstance(stage, TorchStage):
                     with cuda_synced_timer(times, stage.name, self.device):
-                        produced = stage.run(state)
-                    state.add(stage.name, produced)
+                        produced = run_torch_stage(stage, state)
+                    state.add(produced)
                 else:
                     inputs = {name: state[name] for name in stage.inputs}
                     outputs, elapsed_ms = self._runners[stage.name].run(inputs)
                     times[stage.name] = times.get(stage.name, 0.0) + elapsed_ms
-                    state.add(stage.name, {name: outputs[name] for name in stage.outputs})
+                    state.add({name: outputs[name] for name in stage.outputs})
         result = PipelineResult(
             outputs={name: state[name] for name in self.output_names},
             output_names=list(self.output_names),
@@ -247,12 +240,11 @@ class StagedPipeline:
         result, _ = self.run(batch)
         return result
 
-    def assemble(self, result: PipelineResult, device: torch.device | None = None) -> Any:
-        """Turn a result into what the model's ``build_eval_output`` takes (what metrics consume).
-
-        The tensors are keyed by the model output names (``model_output_names``); the
-        ``assemble`` hook (or the dict itself) then gives the type ``build_eval_output``
-        expects — for a model whose ``forward`` returns that dict, its forward output.
+    def assemble(
+        self, result: PipelineResult, device: torch.device | None = None
+    ) -> dict[str, torch.Tensor]:
+        """The model outputs of a result, as the model's ``build_deployed_eval_output`` takes
+        them: keyed by the model output names (``model_output_names``), owned copies.
 
         Args:
             result: Output of :meth:`infer`.
@@ -270,7 +262,7 @@ class StagedPipeline:
             if tensor.is_floating_point():
                 tensor = tensor.float()
             fields[name] = tensor.contiguous()
-        return fields if self._assemble is None else self._assemble(fields)
+        return fields
 
 
 class PipelineCache:
@@ -286,13 +278,11 @@ class PipelineCache:
         self,
         stages: Sequence[Stage],
         artifacts_dir: str | Path,
-        assemble: AssembleFn | None = None,
         plugin_libraries: Sequence[str] = (),
         onnx_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self.stages = validate_stages(stages)
         self.artifacts_dir = Path(artifacts_dir)
-        self._assemble = assemble
         self.plugin_libraries = tuple(plugin_libraries)
         #: Stage name -> the ``.onnx`` the export loop shipped, when a graph modifier wrote
         #: it under another name than ``<stage>.onnx``.
@@ -309,7 +299,6 @@ class PipelineCache:
                 backend=backend,
                 device=device,
                 artifacts_dir=self.artifacts_dir,
-                assemble=self._assemble,
                 plugin_libraries=self.plugin_libraries,
                 onnx_paths=self.onnx_paths,
             )

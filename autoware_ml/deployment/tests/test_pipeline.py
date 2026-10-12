@@ -45,9 +45,16 @@ class _SplitHead(nn.Module):
 
 def _toy_stages():
     return (
-        TorchStage("prep", run=lambda state: {"x": state.batch["x"].float()}),
+        TorchStage(
+            "prep", run=lambda state: {"x": state.batch["x"].float()}, inputs=(), outputs=("x",)
+        ),
         GraphStage("encoder", module=_Double(), inputs=("x",), outputs=("y",)),
-        TorchStage("glue", run=lambda state: {"z": state["y"].to(state.device) + 0.5}),
+        TorchStage(
+            "glue",
+            run=lambda state: {"z": state["y"].to(state.device) + 0.5},
+            inputs=("y",),
+            outputs=("z",),
+        ),
         GraphStage("head", module=_SplitHead(), inputs=("z",), outputs=("plus", "minus")),
     )
 
@@ -75,17 +82,6 @@ class TestStagedPipeline:
         assembled = pipeline.assemble(result)
         assert set(assembled) == {"plus", "minus"}
         assert assembled["plus"].item() == pytest.approx(3.5)
-
-    def test_assemble_hook_builds_the_forward_output_type(self):
-        pipeline = StagedPipeline(
-            _toy_stages(),
-            backend=Backend.PYTORCH,
-            device=torch.device("cpu"),
-            assemble=lambda fields: (fields["plus"], fields["minus"]),
-        )
-        result = pipeline.infer({"x": torch.tensor([1.0])})
-        a, b = pipeline.assemble(result)
-        assert a.item() == pytest.approx(3.5) and b.item() == pytest.approx(1.5)
 
     def test_non_pytorch_backend_requires_artifacts_dir(self):
         with pytest.raises(ValueError, match="artifacts_dir"):
