@@ -143,15 +143,13 @@ deploy:
 ```
 
 **Tensor names**: the export spec names the graph inputs and outputs, either
-the names a stage graph declares (see
-[Model-Owned Export Wrappers](#model-owned-export-wrappers)) or the names a
-hand-written spec lists; the export log prints them. A spec names every one of
-its inputs and at least one output, or it is refused when built. `deploy.onnx`
-carries no `input_names` or `output_names`; an entry fails the deploy before its
-MLflow run is created or the model loads. The keys of `dynamic_shapes`,
-`dynamic_axes` and `deploy.tensorrt.input_shapes` are these names. A model that
-lets a config choose its names exposes them as a model parameter, as PTv3's
-`export_output_names`.
+the names a [stage graph](#stage-graph-verification-and-evaluation) declares or
+the names a hand-written spec lists; the export log prints them. A spec names
+every one of its inputs and at least one output, or it is refused when built.
+`deploy.onnx` carries no `input_names` or `output_names`; an entry fails the
+deploy before its MLflow run is created or the model loads. The keys of
+`dynamic_shapes`, `dynamic_axes` and `deploy.tensorrt.input_shapes` are these
+names.
 
 **precision**: `fp32` exports the model unchanged. `fp16` halves the weights and
 internal tensors but keeps graph inputs and outputs fp32, so consumers keep their
@@ -245,7 +243,9 @@ runs the stages once on the example batch in eval mode, and returns one export
 spec per `GraphStage`, traced on the tensors the glue produced. The model
 outputs are the graph outputs no later stage reads, so a declaration ends with
 a `GraphStage`; PyTorch post-processing of the deployed outputs belongs in
-`build_deployed_eval_output()`. CenterPoint declares its two modules this way.
+`build_deployed_eval_output()`. CenterPoint declares its two modules this way;
+[Stage graph: verification and evaluation](#stage-graph-verification-and-evaluation)
+describes the declaration in full and what else runs on it.
 
 ## Optional Graph Modification
 
@@ -276,24 +276,31 @@ glue between them (`TorchStage`) — through `ModuleBaseModel.build_stages()`:
 ```python
 def build_stages(self):
     return (
-        TorchStage("decorate", run=lambda ctx: {"input_features": self.encoder.decorate(...)}),
+        TorchStage("decorate", run=lambda state: {"input_features": self.encoder.decorate(...)},
+                   inputs=(), outputs=("input_features",)),   # glue reads only the batch
         GraphStage("pts_voxel_encoder_centerpoint", module=..., inputs=("input_features",),
                    outputs=("pillar_features",)),
-        TorchStage("scatter", run=...),
+        TorchStage("scatter", run=..., inputs=("pillar_features",), outputs=("spatial_features",)),
         GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
-                   outputs=("heatmap", "reg", ...)),  # the model outputs: forward()'s keys
+                   outputs=("heatmap", "reg", ...)),  # nothing consumes these: the model outputs
     )
 ```
 
 Every `GraphStage` is one `deploy.onnx.modules.<name>` entry and one `<name>.onnx` /
 `<name>.engine`; the export specs are derived from the declaration (the graph runs once
 in PyTorch on the example batch and each stage is traced with the tensors the glue
-produced), so `build_export_specs()` needs no hand-written counterpart. The model outputs
-are the outputs of the graphs after the last glue stage that no later graph consumes:
-the last graph's outputs in a chain like the one above, and every head's outputs when
-several heads share one encoder (PTv3 seg + det). They are the keys of `forward()`'s
-output, which is what makes a backend's raw outputs feed `build_eval_output`. Models without
-a stage graph keep their existing `build_export_specs()`; nothing below applies to them.
+produced), so `build_export_specs()` needs no hand-written counterpart. Glue declares what
+it reads and writes like a graph does, so `validate_stages` checks the whole dataflow from
+the declaration (every input written earlier, every name written once) before anything
+runs. The model outputs are the graph outputs no later stage consumes: the last graph's
+outputs in a chain like the one above, and every head's outputs when several heads share
+one encoder (PTv3 seg + det). They are what a backend hands to the model's
+`build_deployed_eval_output(batch_inputs, outputs)`, which turns them into the flat dict
+`build_eval_output` produces from `forward()`'s typed outputs — rebuilding the typed head
+outputs when the graph emits them (CenterPoint, the PTv3 det head), or scoring what the
+graph decoded itself (BEVFusion's packed boxes, the PTv3 seg head's labels and scores).
+Models without a stage graph keep their existing `build_export_specs()`; nothing below
+applies to them.
 
 The same declaration runs on three backends — `pytorch` (the modules), `onnx` (ONNX
 Runtime sessions) and `tensorrt` (the engines) — with identical glue, so two backends
