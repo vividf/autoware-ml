@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
+from autoware_ml.deployment.tests.toy_batch import ToyBatch
 from autoware_ml.deployment.evaluation.evaluator import (
     MODEL_STAGE,
     evaluate_backend,
@@ -73,21 +74,31 @@ class _Model(BaseModel):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"y": self.scale(x)}
 
-    def compute_metrics(self, batch_inputs_dict, outputs):
+    def forward_inputs(self, batch_inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {"x": batch_inputs["x"]}
+
+    def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
+        return batch  # the toy batch is its own model input
+
+    def compute_metrics(self, batch_inputs, outputs):
         return {"loss": outputs["y"].sum()}
 
-    def build_eval_output(self, batch: Mapping[str, Any], outputs: Any) -> dict[str, Any]:
-        return {"prediction": outputs["y"], "target": batch["target"]}
+    def build_deployed_eval_output(
+        self, batch_inputs: Mapping[str, Any], outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        return {"prediction": outputs["y"], "target": batch_inputs["target"]}
 
-    def get_log_batch_size(self, batch_inputs_dict):
-        return batch_inputs_dict["x"].shape[0]
+    def get_log_batch_size(self, batch_inputs):
+        return batch_inputs["x"].shape[0]
 
     def clone_metrics(self, stage: EvalStage):
         return [_SumSuite()]
 
     def build_stages(self) -> Sequence[Stage]:
         return (
-            TorchStage("prep", run=lambda state: {"x": state.batch["x"].float()}),
+            TorchStage(
+                "prep", run=lambda state: {"x": state.batch["x"].float()}, inputs=(), outputs=("x",)
+            ),
             GraphStage(
                 "scale",
                 module=self.scale,
@@ -99,7 +110,9 @@ class _Model(BaseModel):
 
 def _loader(num_batches: int = 4, batch_size: int = 3) -> DataLoader:
     items = [
-        {"x": torch.full((batch_size, 1), float(i)), "target": torch.full((batch_size, 1), 2.0 * i)}
+        ToyBatch(
+            x=torch.full((batch_size, 1), float(i)), target=torch.full((batch_size, 1), 2.0 * i)
+        )
         for i in range(num_batches)
     ]
     return DataLoader(items, batch_size=None)
@@ -144,12 +157,12 @@ def test_zero_samples_is_an_error() -> None:
 
 def test_a_missing_eval_key_names_the_model(tmp_path) -> None:
     class _Broken(_Model):
-        def build_eval_output(self, batch, outputs):
+        def build_deployed_eval_output(self, batch_inputs, outputs):
             return {"prediction": outputs["y"]}
 
     model = _Broken().eval()
     pipeline = StagedPipeline(
         model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
     )
-    with pytest.raises(ValueError, match="_Broken.build_eval_output"):
+    with pytest.raises(ValueError, match="_Broken.build_deployed_eval_output"):
         evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))

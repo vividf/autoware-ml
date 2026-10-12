@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 
 from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
+from autoware_ml.deployment.tests.toy_batch import ToyBatch
 from autoware_ml.models.base import BaseModel
 
 
@@ -55,22 +56,35 @@ class _StagedModel(BaseModel):
         plus, minus = self.head(self.encoder(points.float()))
         return {"plus": plus, "minus": minus}
 
-    def compute_metrics(self, batch_inputs_dict: Mapping[str, Any], outputs: Any):
-        del batch_inputs_dict
+    def forward_inputs(self, batch_inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {"points": batch_inputs["points"]}
+
+    def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
+        return batch  # the toy batch is its own model input
+
+    def compute_metrics(self, batch_inputs: Mapping[str, Any], outputs: Any):
+        del batch_inputs
         return {"loss": outputs["plus"].sum()}
 
-    def build_eval_output(self, batch: Mapping[str, Any], outputs: Any) -> dict[str, Any]:
-        return {"plus": outputs["plus"], "target": batch["target"]}
+    def build_deployed_eval_output(
+        self, batch_inputs: Mapping[str, Any], outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        return {"plus": outputs["plus"], "target": batch_inputs["target"]}
 
-    def get_log_batch_size(self, batch_inputs_dict):
-        return batch_inputs_dict["points"].shape[0]
+    def get_log_batch_size(self, batch_inputs):
+        return batch_inputs["points"].shape[0]
 
     def clone_metrics(self, stage):
         return [_ErrorSuite()]
 
     def build_stages(self) -> Sequence[Stage]:
         return (
-            TorchStage("prep", run=lambda state: {"features": state.batch["points"].float()}),
+            TorchStage(
+                "prep",
+                run=lambda state: {"features": state.batch["points"].float()},
+                inputs=(),
+                outputs=("features",),
+            ),
             GraphStage("encoder", module=self.encoder, inputs=("features",), outputs=("encoded",)),
             GraphStage(
                 "head",
@@ -85,7 +99,10 @@ class _PlainModel(BaseModel):
     def forward(self, x):
         return x
 
-    def compute_metrics(self, batch_inputs_dict, outputs):
+    def forward_inputs(self, batch_inputs):
+        return {"x": batch_inputs["points"]}
+
+    def compute_metrics(self, batch_inputs, outputs):
         return {"loss": outputs.sum()}
 
 
@@ -99,11 +116,11 @@ class _DataModule(L.LightningDataModule):
         self.setup_calls.append(stage)
 
     def predict_dataloader(self):
-        return DataLoader([{"points": p} for p in self.points], batch_size=None)
+        return DataLoader([ToyBatch(points=p) for p in self.points], batch_size=None)
 
     def test_dataloader(self):
         return DataLoader(
-            [{"points": p, "target": p.sum(dim=1, keepdim=True)} for p in self.points],
+            [ToyBatch(points=p, target=p.sum(dim=1, keepdim=True)) for p in self.points],
             batch_size=None,
         )
 
