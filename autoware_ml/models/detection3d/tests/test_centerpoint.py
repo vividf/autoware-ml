@@ -332,7 +332,12 @@ def test_stage_graph_reproduces_forward_and_names_the_deployed_modules() -> None
     num_points = torch.randint(1, 5, (12,), dtype=torch.int32)
     voxel_coords = torch.randint(0, 8, (12, 4), dtype=torch.int32)
     voxel_coords[:, 0] = 0
-    batch = build_batch_inputs(voxels=voxels_data_from_zyx(voxels, num_points, voxel_coords))
+    gt_boxes = [torch.tensor([[2.0, 3.0, 0.2, 4.0, 1.6, 1.5, 0.25, 0.5, -0.1]])]
+    gt_labels = [torch.tensor([0], dtype=torch.long)]
+    batch = build_batch_inputs(
+        detection=build_detection_gt_batch(gt_boxes, gt_labels),
+        voxels=voxels_data_from_zyx(voxels, num_points, voxel_coords),
+    )
 
     stages = model.build_stages()
     assert all(isinstance(stage, GraphStage) for stage in stages[1::2])
@@ -345,7 +350,19 @@ def test_stage_graph_reproduces_forward_and_names_the_deployed_modules() -> None
     assert model_output_names(stages) == ("heatmap", "reg", "height", "dim", "rot", "vel")
 
     with torch.no_grad():
-        expected = model(**model.forward_inputs(batch)).detection3d().center_head()
+        forward_outputs = model(**model.forward_inputs(batch))
+    expected = forward_outputs.detection3d().center_head()
     state = run_stages_in_torch(stages, batch, torch.device("cpu"))
     for name in ["heatmap", "reg", "height", "dim", "rot", "vel"]:
         torch.testing.assert_close(state[name], getattr(expected, name))
+
+    # The model outputs score exactly like forward()'s typed outputs.
+    deployed = model.build_deployed_eval_output(
+        batch, {name: state[name] for name in model_output_names(stages)}
+    )
+    reference = model.build_eval_output(batch, forward_outputs)
+    assert deployed.keys() == reference.keys()
+    for key in ("bboxes_3d", "scores_3d", "labels_3d"):
+        torch.testing.assert_close(
+            deployed["predictions"][0][key], reference["predictions"][0][key]
+        )
