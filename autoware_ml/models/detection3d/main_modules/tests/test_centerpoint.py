@@ -23,7 +23,7 @@ from autoware_ml.dataclasses.batch.detection3d import (
     Detection3DGTBatch,
 )
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
-from autoware_ml.deployment.stages import GraphStage, run_stages_in_torch
+from autoware_ml.deployment.stages import GraphStage, model_output_names, run_stages_in_torch
 from autoware_ml.models.detection3d.main_modules.centerpoint import (
     CenterPointDetectionModel,
     _CenterPointBackboneNeckHeadExportWrapper,
@@ -325,7 +325,7 @@ class TestCenterPointDetectionModel(unittest.TestCase):
         self.centerpoint.eval()
         multi_task_batch_inputs = self._build_multi_task_batch_inputs()
         stages = self.centerpoint.build_stages()
-        graph = [stage for stage in stages if isinstance(stage, GraphStage)]
+        self.assertTrue(all(isinstance(stage, GraphStage) for stage in stages[1::2]))
         self.assertEqual(
             [stage.name for stage in stages],
             [
@@ -336,7 +336,7 @@ class TestCenterPointDetectionModel(unittest.TestCase):
             ],
         )
         names = ["heatmap", "reg", "height", "dim", "rot", "vel"]
-        self.assertEqual(graph[-1].outputs, tuple(names))
+        self.assertEqual(model_output_names(stages), tuple(names))
 
         with torch.no_grad():
             expected = self.centerpoint(multi_task_batch_inputs).detection3d().center_head()
