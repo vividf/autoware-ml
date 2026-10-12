@@ -144,7 +144,6 @@ class TestPipelineSmoke(unittest.TestCase):
             seg3d_head=build_seg_head(),
             bev_neck=build_bev_neck(),
             bbox_head=build_transfusion_head(POINT_CLOUD_RANGE),
-            export_output_names=["pred_labels", "pred_probs"],
             optimizer=lambda params: torch.optim.AdamW(params, lr=1e-3),
             grid_size=1.0,
             point_cloud_range=list(POINT_CLOUD_RANGE),
