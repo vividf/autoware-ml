@@ -22,7 +22,7 @@ import torch
 
 from autoware_ml.dataclasses.models.detection3d.head_outputs import CenterHeadOutputs
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
-from autoware_ml.deployment.stages import GraphStage, run_stages_in_torch
+from autoware_ml.deployment.stages import GraphStage, model_output_names, run_stages_in_torch
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.centerpoint import CenterPointDetectionModel
 from autoware_ml.models.detection3d.encoders.pillar import PillarFeatureNet, PointPillarsScatter
@@ -335,14 +335,14 @@ def test_stage_graph_reproduces_forward_and_names_the_deployed_modules() -> None
     batch = build_batch_inputs(voxels=voxels_data_from_zyx(voxels, num_points, voxel_coords))
 
     stages = model.build_stages()
-    graph = [stage for stage in stages if isinstance(stage, GraphStage)]
+    assert all(isinstance(stage, GraphStage) for stage in stages[1::2])
     assert [stage.name for stage in stages] == [
         "decorate",
         "pts_voxel_encoder_centerpoint",
         "scatter",
         "pts_backbone_neck_head_centerpoint",
     ]
-    assert graph[-1].outputs == ("heatmap", "reg", "height", "dim", "rot", "vel")
+    assert model_output_names(stages) == ("heatmap", "reg", "height", "dim", "rot", "vel")
 
     with torch.no_grad():
         expected = model(**model.forward_inputs(batch)).detection3d().center_head()
