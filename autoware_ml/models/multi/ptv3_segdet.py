@@ -21,13 +21,12 @@ labels (e.g. segmentation ground truth mixed in for rehearsal, or a GT
 segmentation validation split) train and evaluate only the segmentation
 branch. The deliberate trade-off: genuinely empty scenes also provide no
 pure-background detection supervision. The same class supports training
-(forward / compute_metrics) and ONNX export (build_export_spec).
+(forward / compute_metrics) and deployment (build_stages).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from copy import deepcopy
 from typing import Any
 
 import torch
@@ -36,42 +35,41 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from autoware_ml.dataclasses.batch.detection3d import Detection3DGTBatch
-from autoware_ml.dataclasses.models.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.dataclasses.models.detection3d.head_outputs import (
+    Detection3DHeadOutputs,
+    TransFusionHeadOutputs,
+)
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.segmentation3d.head_outputs import Segmentation3DHeadOutputs
+from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.detection3d.eval_output import detection_eval_output
-from autoware_ml.models.detection3d.ptv3 import PTv3DetBEVNeck, build_det_head_export_spec
+from autoware_ml.models.detection3d.ptv3 import PTv3DetBEVNeck, build_det_head_stage
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
 from autoware_ml.models.segmentation3d.encoders.voxel import VoxelFeatureEncoder
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3SegDecoderHead,
     segmentation_eval_output,
+    segmentation_eval_output_from_scores,
     segmentation_point_loss,
     segmentation_predict_outputs,
 )
 from autoware_ml.models.segmentation3d.ptv3_base import (
-    SERIALIZED_POOLING_FIELDS,
+    SEG_HEAD_OUTPUT_NAMES,
     PTv3BaseModel,
-    PTv3EncoderExportBase,
-    build_encoder_export_spec,
-    build_point_feature_dynamic_axes,
-    build_ptv3_export_context,
-    build_ptv3_input_dynamic_axes,
-    build_seg_head_export_spec,
-    prepare_ptv3_export_inputs,
+    build_ptv3_stages,
+    build_seg_head_stage,
     split_block_parameters,
 )
-from autoware_ml.utils.deploy import ExportSpec
 
 
 class PTv3SegDetModel(PTv3BaseModel):
     """PTv3 joint segmentation and detection model.
 
     Training: call forward() then compute_metrics().
-    Export: call build_export_spec() - requires export_output_names, grid_size,
+    Deployment: build_stages() - requires export_output_names, grid_size,
     and point_cloud_range to be provided at construction time.
     """
 
@@ -288,23 +286,32 @@ class PTv3SegDetModel(PTv3BaseModel):
         deadlocks under DDP when ranks see different seg/det frame mixes.
         Empty prediction + empty ground truth is metric-neutral.
         """
-        det_mask = self._detection_frame_mask(self._detection_gt_batch(batch))
-        predictions = self.bbox_head.predict(outputs.detection3d().transfusion_head())
-        predictions = [
-            prediction
-            if flagged
-            else Detection3DSamplePredictions(
-                bboxes_3d=prediction.bboxes_3d[:0],
-                scores_3d=prediction.scores_3d[:0],
-                labels_3d=prediction.labels_3d[:0],
-            )
-            for prediction, flagged in zip(predictions, det_mask.tolist())
-        ]
-        eval_out = detection_eval_output(
-            ModelPredictions(detection3d_predictions=predictions), batch
+        return _joint_eval_output(
+            self,
+            batch,
+            outputs.detection3d().transfusion_head(),
+            segmentation_eval_output(outputs.segmentation3d().logits, batch),
         )
-        eval_out.update(segmentation_eval_output(outputs.segmentation3d().logits, batch))
-        return eval_out
+
+    def build_deployed_eval_output(
+        self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the two head graphs' tensors exactly like forward()'s outputs.
+
+        The seg head graph emits the argmax labels and the softmax scores, the det head
+        graph its TransFusionHeadOutputs tensors; both are model outputs side by side.
+        """
+        det_tensors = {
+            name: tensor for name, tensor in outputs.items() if name not in SEG_HEAD_OUTPUT_NAMES
+        }
+        return _joint_eval_output(
+            self,
+            batch_inputs,
+            TransFusionHeadOutputs.from_export_tensors(det_tensors),
+            segmentation_eval_output_from_scores(
+                outputs["pred_labels"], outputs["pred_probs"], batch_inputs
+            ),
+        )
 
     def predict_outputs(
         self, batch_inputs: ModelBatchInputs, outputs: ModelOutputs
@@ -327,159 +334,55 @@ class PTv3SegDetModel(PTv3BaseModel):
             ),
         )
 
-    def get_export_output_names(self) -> list[str]:
-        """Return configured ONNX export output names.
+    def build_stages(self) -> Sequence[Stage]:
+        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head -> ptv3_det3d_head``.
 
-        Returns:
-            Output names passed to the export spec.
+        Both heads read the shared encoder graph and nothing from each other, so both are
+        model outputs: the seg head's names, then the det head's (the configured
+        ``export_output_names`` minus the seg head's).
 
         Raises:
-            ValueError: If export output names were not configured.
+            ValueError: If the export output names or the geometry were not configured.
         """
         if self._export_output_names is None:
-            raise ValueError(
-                "export_output_names must be provided at construction time to use export."
-            )
-        return list(self._export_output_names)
-
-    def build_export_spec(self, batch_inputs: ModelBatchInputs) -> ExportSpec:
-        """Build the ONNX export spec for joint PTv3 segmentation+detection.
-
-        Args:
-            batch_inputs: Example preprocessed batch with the voxels.
-
-        Returns:
-            Deployment export specification for the joint model.
-        """
+            raise ValueError("export_output_names must be provided at construction time to deploy.")
         if self.grid_size is None or self.point_cloud_range is None:
             raise ValueError(
-                "grid_size and point_cloud_range must be provided at construction time to use "
-                "export."
+                "grid_size and point_cloud_range must be provided at construction time to deploy."
             )
-        inputs = prepare_ptv3_export_inputs(self, batch_inputs)
-        export_input_args, input_param_names = inputs.encoder_args(SERIALIZED_POOLING_FIELDS)
-        export_module = _PTv3SegDetExportModule(
-            encoder=self._prepare_encoder_export(),
-            voxel_encoder=self.voxel_encoder,
-            seg3d_head=self.seg3d_head.prepare_for_export(self.EXPORT_ORDER),
-            bev_neck=deepcopy(self.bev_neck).eval(),
-            bbox_head=self.bbox_head.prepare_for_export(),
-            sparse_shape=inputs.sparse_shape,
-            serialized_depth=inputs.serialization_depth,
-            output_names=self.get_export_output_names(),
-        )
-        export_module.eval()
-        output_names = self.get_export_output_names()
-        dynamic_axes = build_ptv3_input_dynamic_axes(input_param_names)
-        dynamic_axes.update(
-            build_point_feature_dynamic_axes(
-                tuple(name for name in output_names if name in {"pred_labels", "pred_probs"})
-            )
-        )
-        return ExportSpec(
-            module=export_module,
-            args=export_input_args,
-            input_param_names=input_param_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            supported_stages=self.EXPORT_SUPPORTED_STAGES,
-        )
-
-    def build_export_specs(self, batch_inputs: ModelBatchInputs) -> dict[str, ExportSpec]:
-        """Build split PTv3 segdet ONNX export specs for encoder, seg head, and det head.
-
-        Args:
-            batch_inputs: Example preprocessed batch with the voxels.
-
-        Returns:
-            Export specs of the encoder, the segmentation head, and the detection head.
-        """
-        if self.grid_size is None or self.point_cloud_range is None:
-            raise ValueError(
-                "grid_size and point_cloud_range must be provided at construction time to use "
-                "export."
-            )
-        context = build_ptv3_export_context(self, batch_inputs)
         det_output_names = [
-            n for n in self.get_export_output_names() if n not in ("pred_labels", "pred_probs")
+            name for name in self._export_output_names if name not in SEG_HEAD_OUTPUT_NAMES
         ]
-        return {
-            "ptv3_encoder": build_encoder_export_spec(context),
-            "ptv3_seg3d_head": build_seg_head_export_spec(
-                context,
-                self.seg3d_head.prepare_for_export(self.EXPORT_ORDER),
-                ["pred_labels", "pred_probs"],
-            ),
-            "ptv3_det3d_head": build_det_head_export_spec(
-                context,
-                self.bev_neck,
-                self.bbox_head.prepare_for_export(),
-                det_output_names,
-            ),
-        }
-
-
-class _PTv3SegDetExportModule(PTv3EncoderExportBase):
-    """ONNX-exportable PTv3 segmentation+detection graph with baked sparse shape."""
-
-    def __init__(
-        self,
-        encoder: PointTransformerV3Encoder,
-        voxel_encoder: VoxelFeatureEncoder,
-        seg3d_head: PTv3SegDecoderHead,
-        bev_neck: PTv3DetBEVNeck,
-        bbox_head: nn.Module,
-        sparse_shape: torch.Tensor,
-        serialized_depth: torch.Tensor,
-        output_names: Sequence[str],
-    ) -> None:
-        super().__init__(encoder, voxel_encoder, sparse_shape, serialized_depth)
-        self.seg3d_head = seg3d_head
-        self.bev_neck = bev_neck
-        self.bbox_head = bbox_head
-        self.output_names = list(output_names)
-
-    def forward(
-        self,
-        voxels: torch.Tensor,
-        num_points_per_voxel: torch.Tensor,
-        grid_coord: torch.Tensor,
-        serialized_order: torch.Tensor,
-        serialized_inverse: torch.Tensor,
-        *serialized_pooling_inputs: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """Run the export graph and return outputs in configured order.
-
-        Args:
-            voxels: Padded voxel points.
-            num_points_per_voxel: Valid point count per voxel.
-            grid_coord: Input voxel coordinates.
-            serialized_order: Level-0 serialization order, one row per curve.
-            serialized_inverse: Inverse of ``serialized_order``.
-            serialized_pooling_inputs: Precomputed pooling metadata tensors.
-
-        Returns:
-            Tuple of export tensors ordered according to ``output_names``.
-        """
-        point = self.run_encoder(
-            voxels,
-            num_points_per_voxel,
-            grid_coord,
-            serialized_order,
-            serialized_inverse,
-            *serialized_pooling_inputs,
+        return build_ptv3_stages(
+            self,
+            build_seg_head_stage(self, self.seg3d_head),
+            build_det_head_stage(self, self.bev_neck, self.bbox_head, det_output_names),
         )
-        # BEV branch first: the segmentation decoder consumes the pooling
-        # chain destructively.
-        bev_features = self.bev_neck(point)
-        det_outputs = self.bbox_head(bev_features)
 
-        seg_logits = self.seg3d_head(point)
-        pred_probs = torch.softmax(seg_logits, dim=1)
-        pred_labels = pred_probs.argmax(dim=1)
 
-        segmentation = {"pred_labels": pred_labels, "pred_probs": pred_probs}
-        detection_names = [name for name in self.output_names if name not in segmentation]
-        detection = dict(zip(detection_names, det_outputs.export_tensors(detection_names)))
-        outputs = segmentation | detection
-        return tuple(outputs[name] for name in self.output_names)
+def _joint_eval_output(
+    model: PTv3SegDetModel,
+    batch: ModelBatchInputs,
+    det_outputs: TransFusionHeadOutputs,
+    seg_eval_out: dict[str, Any],
+) -> dict[str, Any]:
+    """Decode the boxes, blank the frames without detection supervision, add the seg frames.
+
+    Shared by ``build_eval_output`` (forward's typed outputs) and
+    ``build_deployed_eval_output`` (the head graphs' tensors), so both score identically.
+    """
+    det_mask = model._detection_frame_mask(model._detection_gt_batch(batch))
+    predictions = model.bbox_head.predict(det_outputs)
+    predictions = [
+        prediction
+        if flagged
+        else Detection3DSamplePredictions(
+            bboxes_3d=prediction.bboxes_3d[:0],
+            scores_3d=prediction.scores_3d[:0],
+            labels_3d=prediction.labels_3d[:0],
+        )
+        for prediction, flagged in zip(predictions, det_mask.tolist())
+    ]
+    eval_out = detection_eval_output(ModelPredictions(detection3d_predictions=predictions), batch)
+    eval_out.update(seg_eval_out)
+    return eval_out
