@@ -360,18 +360,15 @@ class _PTv3DetHeadExportModule(nn.Module):
 
 
 def build_det_head_stage(
-    model: PTv3BaseModel,
-    bev_neck: PTv3DetBEVNeck,
-    bbox_head: nn.Module,
-    output_names: Sequence[str],
+    model: PTv3BaseModel, bev_neck: PTv3DetBEVNeck, bbox_head: nn.Module
 ) -> GraphStage:
     """The ``ptv3_det3d_head`` graph over the two coarsest encoder stages.
 
     No plugin op: dense BEV convolutions and the TransFusion head, so every backend runs
-    the artifact. The graph emits the head's tensors under ``output_names``.
+    the artifact. The graph emits the head's own ``export_output_names``.
     """
     stage_count = len(model.encoder.stride) + 1
-    output_names = tuple(output_names)
+    output_names = tuple(bbox_head.export_output_names)
     return GraphStage(
         DET_HEAD_STAGE,
         module=_PTv3DetHeadExportModule(
@@ -396,7 +393,6 @@ class PTv3DetectionModel(PTv3BaseModel):
         voxel_encoder: VoxelFeatureEncoder,
         bev_neck: PTv3DetBEVNeck,
         bbox_head: nn.Module,
-        export_output_names: Sequence[str],
         grid_size: float,
         point_cloud_range: Sequence[float],
         freeze_encoder: bool = False,
@@ -408,8 +404,8 @@ class PTv3DetectionModel(PTv3BaseModel):
             encoder: PTv3 encoder module.
             voxel_encoder: Voxel feature encoder feeding the embedding stem.
             bev_neck: Detection BEV neck consuming the encoder pooling chain.
-            bbox_head: Detection head producing the decoded predictions.
-            export_output_names: Ordered output names used during export.
+            bbox_head: Detection head producing the decoded predictions; its
+                ``export_output_names`` are the deployed graph's outputs.
             grid_size: Voxel grid size used to derive sparse shape.
             point_cloud_range: Point-cloud range used to derive sparse shape.
             freeze_encoder: When ``True``, keep the encoder frozen in eval mode.
@@ -425,7 +421,6 @@ class PTv3DetectionModel(PTv3BaseModel):
         )
         self.bev_neck = bev_neck
         self.bbox_head = bbox_head
-        self.export_output_names = list(export_output_names)
 
     def build_eval_output(self, batch: ModelBatchInputs, outputs: ModelOutputs) -> dict[str, Any]:
         """Decode detections and pair them with ground truth for metrics.
@@ -509,10 +504,7 @@ class PTv3DetectionModel(PTv3BaseModel):
 
     def build_stages(self) -> Sequence[Stage]:
         """``serialize_points -> ptv3_encoder -> ptv3_det3d_head``; the export specs derive from it."""
-        return build_ptv3_stages(
-            self,
-            build_det_head_stage(self, self.bev_neck, self.bbox_head, self.export_output_names),
-        )
+        return build_ptv3_stages(self, build_det_head_stage(self, self.bev_neck, self.bbox_head))
 
     def build_deployed_eval_output(
         self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]

@@ -138,18 +138,6 @@ datamodule:
     pedestrian_class_name: pedestrian
 
 model:
-  export_output_names:
-    [
-      dense_heatmap,
-      query_heatmap_score,
-      query_labels,
-      heatmap,
-      center,
-      height,
-      dim,
-      rot,
-      vel,
-    ]
   bev_neck:
     bev_projector:
       output_shape: [256, 256]
