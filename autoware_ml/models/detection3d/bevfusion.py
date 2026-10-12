@@ -795,7 +795,12 @@ class BEVFusionDetectionModel(BaseModel):
             return {"voxels": voxels, "coors": coors, "num_points_per_voxel": num_points_per_voxel}
 
         return (
-            TorchStage("fetch_voxels", run=fetch_voxels),
+            TorchStage(
+                "fetch_voxels",
+                run=fetch_voxels,
+                inputs=(),  # reads only the batch
+                outputs=("voxels", "coors", "num_points_per_voxel"),
+            ),
             GraphStage(
                 "bevfusion_lidar",
                 module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
