@@ -77,12 +77,31 @@ autoware-ml train \
 ```
 
 The backbone init is the upstream StreamPETR DD3D/FCOS3D-pretrained
-VoVNet-99 (`fcos3d_vovnet_imgbackbone-remapped.pth`, BGR) with its stem conv
-flipped to RGB; without it the recipe underperforms. The training log should
-report `Loaded matching weight tensors: 626/1526 (+626 shared-tensor
-aliases)` for this init. Watch the first few hundred iterations: at lr 8e-4
-with grad-clip 35 a loss spike/NaN means both LRs should back off (e.g. to
-6e-4 / 6e-5).
+VoVNet-99 (`fcos3d_vovnet_imgbackbone-remapped.pth`, BGR); without it the
+recipe underperforms. The detector keeps its backbone inside its image feature
+extractor, so the file's `img_backbone.*` tensors are renamed to
+`image_feature_extractor.img_backbone.*` (under the original names no tensor
+matches and `--weights` fails) and the stem conv is flipped to RGB:
+
+```python
+import torch
+
+state = torch.load("fcos3d_vovnet_imgbackbone-remapped.pth", map_location="cpu")
+state = state.get("state_dict", state)
+backbone = {
+    f"image_feature_extractor.{key}": value
+    for key, value in state.items()
+    if key.startswith("img_backbone.")
+}
+stem = "image_feature_extractor.img_backbone.stem.stem_1/conv.weight"
+backbone[stem] = backbone[stem][:, [2, 1, 0]].contiguous()  # BGR -> RGB
+torch.save({"state_dict": backbone}, "rgb_stem_vovnet_backbone.pth")
+```
+
+The training log should report `Loaded matching weight tensors: 626/894 (+0
+shared-tensor aliases)` for this init. Watch the first few hundred iterations:
+at lr 8e-4 with grad-clip 35 a loss spike/NaN means both LRs should back off
+(e.g. to 6e-4 / 6e-5).
 
 Accepted run: val mAP **0.5031** at epoch 29 (7-class; the upstream 10-class
 published result is 0.4697).
@@ -252,7 +271,10 @@ An AWML/mmdet3d checkpoint converter
 (`autoware_ml/tools/convert_streampetr_checkpoint.py`) existed during the
 migration and was removed once the native training flow replaced converted
 checkpoints; recover it from git history if an mm-style checkpoint ever needs
-importing again.
+importing again. Its output predates the image feature extractor, so prefix
+its `img_backbone.*` and `img_neck.*` keys with `image_feature_extractor.`:
+under the old names only the heads match, and `--weights` leaves the backbone
+and the neck randomly initialized without an error.
 
 ## Acknowledgment
 
