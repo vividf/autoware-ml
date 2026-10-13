@@ -155,6 +155,52 @@ class TestImageAug3D(unittest.TestCase):
         torch.testing.assert_close(images.lidar2images, expected @ images.lidar2cams)
 
 
+class TestImageAug3DRelativeResize(unittest.TestCase):
+    """Resize factors relative to the scale at which every image covers the final size."""
+
+    def test_cameras_of_any_resolution_cover_the_final_size_in_evaluation(self) -> None:
+        # Without an offset, the covering factor scales a 40x60 and an 80x60 image so that
+        # one side matches the final size and the other one overflows it, never padding.
+        transform = ImageAug3D(
+            final_dim=[8, 12],
+            resize_lim=[-0.02, 0.02],
+            bot_pct_lim=[0.0, 0.0],
+            training=False,
+            resize_relative=True,
+        )
+
+        for height, width, expected_scale in ((40, 60, 0.2), (80, 60, 0.2)):
+            images = build_images(height=height, width=width)
+            images = images.model_copy(update={"images": torch.ones_like(images.images)})
+            sample = transform(build_sample(images))
+
+            augmented = sample.camera_image_data
+            self.assertTrue(bool((augmented.images > 0).all()), (height, width))
+            self.assertAlmostEqual(
+                float(augmented.augmented_camera_intrinsics[0, 0, 0]),
+                width * expected_scale,
+                places=4,
+            )
+
+    def test_training_samples_the_offset_around_the_covering_factor(self) -> None:
+        transform = ImageAug3D(
+            final_dim=[8, 12],
+            resize_lim=[0.05, 0.05],
+            bot_pct_lim=[0.0, 0.0],
+            training=True,
+            resize_relative=True,
+        )
+
+        sample = transform(build_sample(build_images(height=40, width=60)))
+
+        # fx = width * (covering factor 0.2 + offset 0.05)
+        self.assertAlmostEqual(
+            float(sample.camera_image_data.augmented_camera_intrinsics[0, 0, 0]),
+            60 * 0.25,
+            places=4,
+        )
+
+
 class TestUndistortImage(unittest.TestCase):
     """Undistortion of the images and of their calibration."""
 

@@ -75,16 +75,21 @@ class ImageAug3D(BaseTransform):
         rand_flip: bool = False,
         rot_lim: Sequence[float] | None = None,
         training: bool = True,
+        resize_relative: bool = False,
     ) -> None:
         """Initialize the ImageAug3D transform.
 
         Args:
             final_dim: Final image size [height, width].
-            resize_lim: Minimum and maximum resize factors.
+            resize_lim: Minimum and maximum resize factors. With ``resize_relative``, the
+                offsets added to the factor at which an image just covers ``final_dim``.
             bot_pct_lim: Bottom crop ratios.
             rand_flip: Whether horizontal flipping is enabled.
             rot_lim: In plane rotation range in degrees, None to keep the images upright.
             training: Whether to sample stochastic augmentation parameters.
+            resize_relative: Whether ``resize_lim`` is relative to the covering factor
+                ``max(final_height / height, final_width / width)`` of every image, so cameras
+                of different resolutions keep the same framing after the crop.
         """
         super().__init__(probability=None)
         self.final_dim = tuple(final_dim)
@@ -93,6 +98,7 @@ class ImageAug3D(BaseTransform):
         self.rand_flip = rand_flip
         self.rot_lim = tuple(rot_lim) if rot_lim is not None else (0.0, 0.0)
         self.training = training
+        self.resize_relative = resize_relative
 
     def transform(self, model_gt_sample: ModelGTSample) -> ModelGTSample:
         """Augment every image of the sample and update its calibration.
@@ -169,6 +175,8 @@ class ImageAug3D(BaseTransform):
         source_height, source_width = image.shape[:2]
         final_height, final_width = self.final_dim
         resize, crop_bottom, flip, rotate = self.sample_augmentation()
+        if self.resize_relative:
+            resize += max(final_height / source_height, final_width / source_width)
 
         resized_width = int(round(source_width * resize))
         resized_height = int(round(source_height * resize))
