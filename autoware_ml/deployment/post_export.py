@@ -40,10 +40,12 @@ from autoware_ml.deployment.config import (
 from autoware_ml.deployment.pipeline import PipelineCache, available_backends
 from autoware_ml.deployment.verification.backend_verifier import BackendVerifier
 from autoware_ml.deployment.evaluation.evaluator import (
+    RESULTS_FILE_NAME,
     EvaluationResult,
     evaluate_backend,
     flatten_results,
     log_comparison,
+    write_results_json,
 )
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.types.backend import Backend
@@ -232,7 +234,9 @@ def run_post_export(
     """Run the enabled post-export steps of ``deploy_cfg`` over the artifacts in ``output_dir``.
 
     ``log_metric(key, value)`` receives every evaluation metric and mean latency (the
-    deploy run's MLflow client, say). ``plugin_libraries`` are the TensorRT plugin ``.so``
+    deploy run's MLflow client, say); with or without it, evaluation writes every metric
+    and latency of every backend to ``<output_dir>/evaluation.json``, since the log keeps
+    only the headline rows. ``plugin_libraries`` are the TensorRT plugin ``.so``
     the engines were built with (``deploy.tensorrt.plugin_libraries``), handed to the
     runners by the caller so this module reads only its own config sections.
 
@@ -263,6 +267,8 @@ def run_post_export(
     results: list[EvaluationResult] = []
     if cfg.evaluation.enabled:
         results = run_evaluation(cfg.evaluation, model, pipelines, available, datamodule, device)
+        report = write_results_json(results, output_dir / RESULTS_FILE_NAME)
+        logger.info("Every metric and latency of the evaluated backends: %s", report)
         if log_metric is not None:
             for key, value in flatten_results(results).items():
                 log_metric(key, value)
