@@ -327,9 +327,11 @@ preceding numpy or CPU-torch op leaves busy-waiting double its measured time (BE
 Set it to 0 to keep the process default when only the metrics matter. Metric keys carry
 the backend, `{split}/{backend}/{suite}/{metric}` (`test/tensorrt/det3d/mAP_0m_121m`),
 latencies land under `latency/{backend}/{stage}_mean_ms`, and everything is logged to the
-deploy run. The log ends with a cross-backend table of the suites' headline metrics; a
-backend column whose stages ran in PyTorch (a declared fallback, e.g. a plugin graph on
-ONNX Runtime) is starred.
+deploy run and written to `<output_dir>/evaluation.json` (every metric and latency of every
+backend, with or without a tracker). The log ends with a cross-backend table of the suites'
+headline metrics (det3d: `mAP` and NDS, reported as `map_based_nds`; seg3d: `mIoU` and
+`fwIoU`); a backend column whose stages ran in PyTorch (a declared fallback, e.g. a plugin
+graph on ONNX Runtime) is starred.
 
 ## Overriding at Runtime
 
