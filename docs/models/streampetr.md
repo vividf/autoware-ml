@@ -98,10 +98,9 @@ backbone[stem] = backbone[stem][:, [2, 1, 0]].contiguous()  # BGR -> RGB
 torch.save({"state_dict": backbone}, "rgb_stem_vovnet_backbone.pth")
 ```
 
-The training log should report `Loaded matching weight tensors: 626/894 (+0
-shared-tensor aliases)` for this init. Watch the first few hundred iterations:
-at lr 8e-4 with grad-clip 35 a loss spike/NaN means both LRs should back off
-(e.g. to 6e-4 / 6e-5).
+The training log should report `Loaded matching weight tensors: 626/894` for
+this init. Watch the first few hundred iterations: at lr 8e-4 with grad-clip 35
+a loss spike/NaN means both LRs should back off (e.g. to 6e-4 / 6e-5).
 
 Accepted run: val mAP **0.5031** at epoch 29 (7-class; the upstream 10-class
 published result is 0.4697).
@@ -115,8 +114,8 @@ autoware-ml train \
 ```
 
 Cross-stage checkpoint loads must report `Loaded matching weight tensors:
-1526/1526 (+0 shared-tensor aliases)` — full coverage, nothing dropped (the
-nuScenes and T4 stages share the same 7-class head).
+894/894` — full coverage, nothing dropped (the nuScenes and T4 stages share the
+same 7-class head).
 
 Accepted run: val mAP **0.4420** at epoch 34. That run used the older
 5-class base infos (no cone/barrier at all — a 35-epoch supervision gap for
