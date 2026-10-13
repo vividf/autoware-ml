@@ -3,28 +3,23 @@
 # (nuScenes pretrain -> T4 base -> j6gen2 fine-tune): the full T4 base DB.
 #
 # The model, augmentation, auxiliary 2D head, traffic_cone/barrier
-# partial-ignore, LR schedule, 35 epochs and validation cadence are all
-# inherited from the j6gen2 config; this stage swaps the split to the T4 base
-# DB and pins the recipe of the accepted stage-2 run: 4 GPUs x batch 8
+# partial-ignore setting, LR schedule, 35 epochs and validation cadence are all
+# inherited from the j6gen2 config; this stage swaps the database to the T4
+# base DB and pins the recipe of the accepted stage-2 run: 4 GPUs x batch 8
 # (total 32), lr 2.0e-4 / 2.0e-5. Rescale both LRs by N/32 for another total
 # batch size N.
+#
+# The base DB mixes vehicles whose cameras have different resolutions; the
+# relative resize of the inherited pipelines keeps their framing alike.
 #
 # Initialize from the stage-1 nuScenes pretrain checkpoint:
 #   --weights mlruns/detection3d/streampetr/vov_320x800_nuscenes_pretrain/<run_id>/artifacts/checkpoints/best.ckpt
 defaults:
   - /tasks/detection3d/streampetr/vov_480x640_t4dataset_j6gen2
+  - override /database@database: t4dataset/t4dataset_base
   - _self_
 
 batch_size: 8          # per-GPU; 4 GPUs -> total batch 32
-
-datamodule:
-  # The 2.8.1 base infos carry all 7 classes (traffic_cone/barrier included)
-  # plus the per-frame annotation status, so partial-ignore trains the two
-  # sparse classes on annotated frames instead of leaving a supervision gap
-  # (the older 5-class info/detection3d infos had no cone/barrier at all).
-  train_ann_file: info/kokseang_2_8_1/t4dataset_base_infos_train.pkl
-  val_ann_file: info/kokseang_2_8_1/t4dataset_base_infos_val.pkl
-  test_ann_file: info/kokseang_2_8_1/t4dataset_base_infos_test.pkl
 
 model:
   optimizer:

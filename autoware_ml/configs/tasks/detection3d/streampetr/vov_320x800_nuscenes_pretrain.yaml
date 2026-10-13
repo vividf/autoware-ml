@@ -17,11 +17,12 @@
 #   * CPFPN neck instead of GeneralizedLSSFPN, and an auxiliary FocalHead2D,
 #     so the produced checkpoint is weight-compatible with the T4 stages.
 #   * The reference pretrain augmentation and optimizer settings above.
-# The nuScenes and T4 detector class sets are both the same 7 classes, so the
-# checkpoint loads into stage 2 without dropping any classification layer.
+# The nuScenes and the T4 seven-class detector class sets are the same 7
+# classes in the same order, so the checkpoint loads into stage 2 without
+# dropping any classification layer.
 #
-# Running this stage needs the nuScenes dataset mounted (default data_root is
-# ${AUTOWARE_ML_DATA_PATH}/nuscenes) and an RGB-stem DD3D/FCOS3D-pretrained
+# Running this stage needs the nuScenes database (records under
+# ${data_root_path}/nuscenes) and an RGB-stem DD3D/FCOS3D-pretrained
 # VoVNet-99 backbone as --weights; without that backbone init the recipe
 # underperforms.
 defaults:
@@ -33,43 +34,39 @@ batch_size: 8          # per-GPU; 4 GPUs -> total batch 32
 num_workers: 8
 
 datamodule:
-  # Produced by LoadAnnotations2DFromBoxes3D for the auxiliary 2D head;
-  # val/test/predict pipelines never carry these keys.
-  train_collation_map:
-    gt_bboxes_2d: list
-    gt_labels_2d: list
-    centers_2d: list
-  train_transforms:
-    _target_: autoware_ml.transforms.base.TransformsCompose
-    pipeline:
-      - _target_: autoware_ml.transforms.boxes3d.loading.LoadAnnotations3D
-        name_mapping: ${dataset.detection3d.name_mapping}
-      - _target_: autoware_ml.transforms.camera.loading.LoadMultiViewImagesFromFiles
-        # Keep pixels in [0,255]: img_norm_cfg mean/std are 0-255-scale ImageNet stats.
-        normalize_to_unit: false
-      # The reference nuScenes pipeline range-filters before augmentation
-      # (unlike the T4 pipeline, which filters after projecting the 2D
-      # annotations).
-      - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeFilter
-        point_cloud_range: ${point_cloud_range}
-      - _target_: autoware_ml.transforms.camera.resize.ResizeCropFlipRotImage
-        data_aug_conf:
+  train_dataset:
+    transforms:
+      _target_: autoware_ml.transforms.base.TransformsCompose
+      _convert_: all
+      pipeline:
+        - _target_: autoware_ml.transforms.boxes3d.filters.BBoxesLabelNameFilter
+          _convert_: all
+          label_names_to_keep: ${database.taxonomy.detection3d.class_names}
+          class_names: ${database.taxonomy.detection3d.class_names}
+        # The reference nuScenes pipeline range-filters before augmentation
+        # (unlike the T4 pipeline, which filters after projecting the 2D
+        # annotations).
+        - _target_: autoware_ml.transforms.boxes3d.filters.BBoxesRangeFilter
+          _convert_: all
+          point_cloud_range: ${point_cloud_range}
+        - _target_: autoware_ml.transforms.camera.loading.LoadImagesFromFile
+          _convert_: all
+        - _target_: autoware_ml.transforms.camera.geometry.ImageAug3D
+          _convert_: all
+          final_dim: ${image_size}
           resize_lim: [0.47, 0.625]
-          final_dim: [320, 800]
           bot_pct_lim: [0.0, 0.0]
           rot_lim: [0.0, 0.0]
           rand_flip: true
-        training: true
-      - _target_: autoware_ml.transforms.camera.geometry.GlobalRotScaleTrans
-        rot_range: [-0.3925, 0.3925]
-        scale_ratio_range: [0.95, 1.05]
-      - _target_: autoware_ml.transforms.camera.resize.PadMultiViewImage
-        size_divisor: 32
-      - _target_: autoware_ml.transforms.camera.normalize.NormalizeMultiviewImage
-        mean: ${img_norm_cfg.mean}
-        std: ${img_norm_cfg.std}
-        to_rgb: ${img_norm_cfg.to_rgb}
-      - _target_: autoware_ml.transforms.camera.annotations2d.LoadAnnotations2DFromBoxes3D
+          training: true
+        - _target_: autoware_ml.transforms.camera.geometry.CameraGlobalRotScaleTrans
+          _convert_: all
+          yaw_rot_range: [-0.3925, 0.3925]
+          scale_ratio_range: [0.95, 1.05]
+        # Projects the augmented boxes for the auxiliary 2D head, so it runs
+        # after every geometric augmentation.
+        - _target_: autoware_ml.transforms.camera.annotations2d.LoadAnnotations2DFromBoxes3D
+          _convert_: all
 
 model:
   # CPFPN is the reference StreamPETR neck, weight-compatible with the T4

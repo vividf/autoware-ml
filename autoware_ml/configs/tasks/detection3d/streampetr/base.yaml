@@ -10,25 +10,12 @@ dataset: ???
 point_cloud_range: ???
 post_center_range: ???
 
-# RGB channel order, matching the RGB output of the image loading transform.
+# The loader serves RGB images in [0, 1]. These are the ImageNet statistics in that range,
+# the 0-255 constants the runtime normalizes the camera images with divided by 255.
 img_norm_cfg:
-  mean: [123.675, 116.280, 103.530]
-  std: [58.395, 57.120, 57.375]
-  to_rgb: false
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
 
-datamodule:
-  collation_map:
-    img: list
-    camera_intrinsics: list
-    lidar2cam: list
-    lidar2img: list
-    timestamp: list
-    prev_exists: list
-    ego_pose: list
-    ego_pose_inv: list
-    gt_boxes: list
-    gt_labels: list
-    gt_num_points: list
 model:
   _target_: autoware_ml.models.detection3d.streampetr.StreamPETRDetectionModel
   metrics: ${dataset.detection3d.metrics}
@@ -116,11 +103,15 @@ callbacks:
     verbose: true
   early_stopping: null
 
-# Train-only grid-mask image augmentation (reference StreamPETR recipe). It is a
-# GPU preprocessing layer rather than part of the model so the deployed graphs
-# never see it; it is a no-op outside training.
+# Image normalization, then the train-only grid-mask augmentation of the reference StreamPETR
+# recipe, which masks the normalized images. Both are GPU preprocessing layers rather than part
+# of the model, so the deployed graphs never see them: the runtime normalizes the images itself
+# before extract_img_feat.
 data_preprocessing:
   pipeline:
+    - _target_: autoware_ml.preprocessing.camera.normalize.BatchNormalizeImages
+      mean: ${img_norm_cfg.mean}
+      std: ${img_norm_cfg.std}
     - _target_: autoware_ml.preprocessing.camera.grid_mask.BatchGridMask
 
 trainer:
@@ -136,6 +127,7 @@ deploy:
     dynamo: false
     opset_version: 17
     do_constant_folding: true
+    # The export specs name the outputs the runtime binds; these restate them.
     modules:
       extract_img_feat:
         output_names: [img_feats]
@@ -151,13 +143,6 @@ deploy:
             post_memory_timestamp,
             post_memory_egopose,
             post_memory_velo,
-            reference_points,
-            tgt,
-            temp_memory,
-            temp_pos,
-            query_pos,
-            query_pos_in,
-            outs_dec,
           ]
   tensorrt:
     enabled: false
