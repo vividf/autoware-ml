@@ -258,7 +258,7 @@ filters of the T4 dataset configs.
 | `autoware_ml/models/detection3d/task_modules/`             | Shared assigners, costs, coders, streaming memory |
 | `autoware_ml/datamodule/data_module.py`                    | `streaming` dataloaders (`GroupStreamingSampler`) |
 | `autoware_ml/datamodule/base_dataset.py`                   | Scene grouping of the record table                |
-| `autoware_ml/dataclasses/batch/frame_meta.py`              | Per-frame pose, sample time and scenario          |
+| `autoware_ml/dataclasses/batch/frame_meta.py`              | Per-frame pose, scene and sample time             |
 | `autoware_ml/transforms/camera/annotations2d.py`           | 2D targets projected from the 3D boxes            |
 | `autoware_ml/transforms/camera/geometry.py`                | `ImageAug3D`, `CameraGlobalRotScaleTrans`         |
 | `autoware_ml/preprocessing/camera/normalize.py`            | Batched image normalization                       |

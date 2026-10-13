@@ -202,7 +202,6 @@ def _dn_mixed_gt_worker(rank: int, world_size: int, init_file: str) -> None:
                 bbox_preds=torch.randn(num_layers, 1, pad, 10, generator=generator),
                 known_labels=gt_labels.repeat(head.scalar),
                 known_boxes=gt_boxes.repeat(head.scalar, 1),
-                known_indices=torch.arange(num_known),
                 batch_indices=torch.zeros(num_known, dtype=torch.long),
                 slot_indices=torch.arange(num_known),
             )

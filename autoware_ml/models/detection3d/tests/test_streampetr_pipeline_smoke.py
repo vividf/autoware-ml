@@ -14,7 +14,7 @@ from autoware_ml.databases.schemas.dataset_schemas import DatasetTableSchema
 from autoware_ml.datamodule.detection3d import Detection3DTask
 from autoware_ml.datamodule.samplers import GroupStreamingSampler
 from autoware_ml.datamodule.t4dataset.dataset import T4Dataset
-from autoware_ml.datamodule.tests.corpus import write_corpus
+from autoware_ml.datamodule.tests.corpus import SCENE, write_corpus
 from autoware_ml.datamodule.tests.test_camera_pipeline_smoke import CAMERAS, write_images
 from autoware_ml.models.common.necks.lss_fpn import GeneralizedLSSFPN
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
@@ -152,9 +152,9 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         continuity = []
         stream_continuity = model.bbox_head.stream_continuity
 
-        def record_continuity(scenario_ids, timestamp):
-            prev_exists = stream_continuity(scenario_ids, timestamp)
-            continuity.append((list(scenario_ids), timestamp.tolist(), prev_exists.tolist()))
+        def record_continuity(scene_tokens, timestamp):
+            prev_exists = stream_continuity(scene_tokens, timestamp)
+            continuity.append((list(scene_tokens), timestamp.tolist(), prev_exists.tolist()))
             return prev_exists
 
         model.bbox_head.stream_continuity = record_continuity
@@ -172,14 +172,16 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
             loss.backward()
             self.assertTrue(torch.isfinite(loss))
 
-        # Scene b starts the lane, its second frame continues the memory, scene a resets it.
+        # Scenario b starts the lane and its second frame continues the memory; the corpus
+        # stores every record under one scene directory, so scenario a, whose frames come
+        # earlier in time, resets the memory by its time.
         self.assertEqual(
             continuity,
             [
-                (["b"], [20.0], [0.0]),
-                (["b"], [21.0], [1.0]),
-                (["a"], [10.0], [0.0]),
-                (["a"], [10.5], [1.0]),
+                ([SCENE], [20.0], [0.0]),
+                ([SCENE], [21.0], [1.0]),
+                ([SCENE], [10.0], [0.0]),
+                ([SCENE], [10.5], [1.0]),
             ],
         )
         self.assertTrue(
