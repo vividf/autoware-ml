@@ -24,6 +24,7 @@ import torch
 from autoware_ml.dataclasses.models.detection3d.head_outputs import (
     CenterHeadOutputs,
     Detection3DHeadOutputs,
+    FocalHead2DOutputs,
     StreamPETRDenoisingOutputs,
     StreamPETRHeadOutputs,
     TransFusionHeadOutputs,
@@ -383,6 +384,37 @@ class TestStreamPETRHeadOutputs(unittest.TestCase):
                     | {"known_indices": torch.zeros(3, dtype=torch.int64)}
                 )
             )
+
+
+class TestFocalHead2DOutputs(unittest.TestCase):
+    """Unit tests for the dense outputs of the auxiliary 2D head."""
+
+    def build(self, num_tokens_of_boxes: int = 6) -> FocalHead2DOutputs:
+        return FocalHead2DOutputs(
+            cls_scores=torch.zeros(4, 6, 3),
+            bbox_preds=torch.zeros(4, num_tokens_of_boxes, 4),
+            centers_2d=torch.zeros(4, 6, 2),
+            centerness=torch.zeros(4, 6, 1),
+            image_height=96,
+            image_width=160,
+        )
+
+    def test_rides_along_the_streampetr_outputs(self) -> None:
+        """Test that the StreamPETR outputs carry the auxiliary outputs of a training step."""
+        auxiliary = self.build()
+        outputs = StreamPETRHeadOutputs(
+            all_cls_scores=torch.zeros(2, 1, 5, 3),
+            all_bbox_preds=torch.zeros(2, 1, 5, 10),
+            denoising=None,
+            auxiliary_2d=auxiliary,
+        )
+
+        self.assertIs(outputs.auxiliary_2d, auxiliary)
+
+    def test_every_prediction_covers_the_same_tokens(self) -> None:
+        """Test that boxes predicted for other tokens than the logits are rejected."""
+        with self.assertRaises(ValidationError):
+            self.build(num_tokens_of_boxes=5)
 
 
 class TestDetection3DHeadOutputs(unittest.TestCase):

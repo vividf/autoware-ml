@@ -28,6 +28,10 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from autoware_ml.dataclasses.models.detection3d.head_outputs import (
+    StreamPETRDenoisingOutputs,
+    StreamPETRHeadOutputs,
+)
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import NMSFreeBBoxCoder3D
@@ -183,36 +187,30 @@ def _dn_mixed_gt_worker(rank: int, world_size: int, init_file: str) -> None:
             gt_labels = torch.zeros(0, dtype=torch.long)
 
         # Minimal outputs contract for StreamPETRHead.loss: per-layer scores /
-        # box params plus the DN bookkeeping. The GT-less rank gets
-        # dn_mask_dict=None (what prepare_for_dn returns without boxes) and
-        # must still reach the DN count collective inside loss().
+        # box params plus the denoising queries. The GT-less rank gets
+        # denoising=None (what the head returns without boxes) and must
+        # still reach the DN count collective inside loss().
         num_layers = head.num_decoder_layers
         generator = torch.Generator().manual_seed(40)
         all_cls_scores = torch.randn(num_layers, 1, _NUM_QUERIES, _NUM_CLASSES, generator=generator)
         all_bbox_preds = torch.randn(num_layers, 1, _NUM_QUERIES, 10, generator=generator)
         if rank == 0:
             pad = 8
-            mask_dict = {
-                "known_lbs_bboxes": (
-                    gt_labels.repeat(head.scalar),
-                    gt_boxes.repeat(head.scalar, 1),
-                ),
-                "known_indices": torch.arange(gt_labels.numel() * head.scalar),
-                "batch_idx": torch.zeros(gt_labels.numel() * head.scalar, dtype=torch.long),
-                "map_known_indice": torch.arange(gt_labels.numel() * head.scalar),
-                "pad_size": pad,
-                "output_known_lbs_bboxes": (
-                    torch.randn(num_layers, 1, pad, _NUM_CLASSES, generator=generator),
-                    torch.randn(num_layers, 1, pad, 10, generator=generator),
-                ),
-            }
+            num_known = gt_labels.numel() * head.scalar
+            denoising = StreamPETRDenoisingOutputs(
+                cls_scores=torch.randn(num_layers, 1, pad, _NUM_CLASSES, generator=generator),
+                bbox_preds=torch.randn(num_layers, 1, pad, 10, generator=generator),
+                known_labels=gt_labels.repeat(head.scalar),
+                known_boxes=gt_boxes.repeat(head.scalar, 1),
+                known_indices=torch.arange(num_known),
+                batch_indices=torch.zeros(num_known, dtype=torch.long),
+                slot_indices=torch.arange(num_known),
+            )
         else:
-            mask_dict = None
-        outputs = {
-            "all_cls_scores": all_cls_scores,
-            "all_bbox_preds": all_bbox_preds,
-            "dn_mask_dict": mask_dict,
-        }
+            denoising = None
+        outputs = StreamPETRHeadOutputs(
+            all_cls_scores=all_cls_scores, all_bbox_preds=all_bbox_preds, denoising=denoising
+        )
 
         losses = head.loss(outputs, [gt_boxes], [gt_labels])
 

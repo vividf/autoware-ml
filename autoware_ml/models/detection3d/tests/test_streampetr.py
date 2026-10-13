@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
 import torch
 
+from autoware_ml.dataclasses.batch.detection2d import Detection2DGTBatch, Detection2DGTSample
 from autoware_ml.dataclasses.batch.frame_meta import FrameMetaBatch
 from autoware_ml.dataclasses.geometry.images import ImageGTBatch
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.models.common.necks.lss_fpn import GeneralizedLSSFPN
+from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
 from autoware_ml.models.detection3d.streampetr import StreamPETRDetectionModel
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
@@ -43,8 +46,14 @@ class _TinyMultiScaleBackbone(torch.nn.Module):
         return c3, c4, c5
 
 
-def _build_model() -> StreamPETRDetectionModel:
+CLASS_NAMES = ["car", "traffic_cone", "barrier"]
+
+
+def _build_model(
+    img_roi_head: FocalHead2D | None = None, partial_ignore: bool = False
+) -> StreamPETRDetectionModel:
     return StreamPETRDetectionModel(
+        img_roi_head=img_roi_head,
         img_backbone=_TinyMultiScaleBackbone(),
         img_neck=GeneralizedLSSFPN(in_channels=[128, 256, 512], out_channels=128),
         bbox_head=StreamPETRHead(
@@ -82,6 +91,8 @@ def _build_model() -> StreamPETRDetectionModel:
             ),
             point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
             code_weights=[2.0, 2.0] + [1.0] * 8,
+            class_names=CLASS_NAMES if partial_ignore else None,
+            partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
         ),
     )
 
@@ -462,3 +473,119 @@ def test_forward_sanitizes_nan_poisoned_memory_and_keeps_float64_timestamps() ->
     head_outputs = outputs.detection3d().streampetr_head()
     assert torch.isfinite(head_outputs.all_cls_scores).all()
     assert torch.isfinite(head_outputs.all_bbox_preds).all()
+
+
+def _build_focal_head(partial_ignore: bool = False) -> FocalHead2D:
+    return FocalHead2D(
+        num_classes=3,
+        in_channels=128,
+        embed_dims=32,
+        # The tiny neck emits its tokens at stride 8.
+        stride=8,
+        class_names=CLASS_NAMES,
+        partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
+    )
+
+
+def _with_2d_boxes(batch_inputs: ModelBatchInputs) -> ModelBatchInputs:
+    """Give every camera of every sample one 2D box of class 0, the last camera none."""
+    num_samples = batch_inputs.batch_size()
+    samples = [
+        Detection2DGTSample(
+            gt_bboxes_2d=[torch.tensor([[10.0, 10.0, 60.0, 60.0]])] * (NUM_CAMS - 1)
+            + [torch.zeros(0, 4)],
+            gt_centers_2d=[torch.tensor([[35.0, 35.0]])] * (NUM_CAMS - 1) + [torch.zeros(0, 2)],
+            gt_labels_2d=[torch.tensor([0])] * (NUM_CAMS - 1) + [torch.zeros(0, dtype=torch.int64)],
+        )
+        for _ in range(num_samples)
+    ]
+    gt_batch = batch_inputs.multi_task_gt_batch._replace(
+        detection2d_gt_batch=Detection2DGTBatch.collate_gt_samples(samples)
+    )
+    return batch_inputs.replace(multi_task_gt_batch=gt_batch)
+
+
+def _with_cone_barrier_status(
+    batch_inputs: ModelBatchInputs, status: list[bool]
+) -> ModelBatchInputs:
+    gt_batch = batch_inputs.multi_task_gt_batch
+    detection = gt_batch.detection3d_gt_batch._replace(
+        gt_traffic_cone_barrier_bbox_status=torch.tensor(status)
+    )
+    return batch_inputs.replace(
+        multi_task_gt_batch=gt_batch._replace(detection3d_gt_batch=detection)
+    )
+
+
+def _one_box_batch(batch_size: int = 1) -> ModelBatchInputs:
+    return _build_batch_inputs(
+        torch.randn(batch_size, NUM_CAMS, 3, *IMAGE_HW),
+        gt_boxes=[_collated_box(0.0, 0.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.0, 0.0, 0.0)] * batch_size,
+        gt_labels=[torch.tensor([0])] * batch_size,
+    )
+
+
+def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
+    model = _build_model(img_roi_head=_build_focal_head()).train()
+    batch_inputs = _with_2d_boxes(_one_box_batch(batch_size=2))
+
+    outputs = _run(model, batch_inputs)
+    losses = model.compute_metrics(batch_inputs, outputs)
+
+    auxiliary = outputs.detection3d().streampetr_head().auxiliary_2d
+    assert auxiliary is not None
+    assert auxiliary.cls_scores.shape[0] == 2 * NUM_CAMS
+    roi_keys = ("loss_cls2d", "loss_bbox2d", "loss_iou2d", "loss_centers2d", "loss_centerness2d")
+    assert all(torch.isfinite(losses[key]) for key in roi_keys)
+    gt_detections = batch_inputs.multi_task_gt_batch.detection3d_gt_batch
+    without_roi = model.bbox_head.loss(
+        outputs.detection3d().streampetr_head(),
+        [boxes[:, :9] for boxes in gt_detections.valid_bboxes_3d()],
+        gt_detections.valid_labels_3d(),
+    )
+    # The total adds the five auxiliary terms to the detection loss.
+    torch.testing.assert_close(
+        losses["loss"], without_roi["loss"] + sum(losses[key] for key in roi_keys)
+    )
+    losses["loss"].backward()
+    assert all(parameter.grad is not None for parameter in model.img_roi_head.cls.parameters())
+
+
+def test_auxiliary_2d_head_needs_the_2d_boxes_in_training() -> None:
+    model = _build_model(img_roi_head=_build_focal_head()).train()
+    batch_inputs = _one_box_batch()
+
+    outputs = _run(model, batch_inputs)
+
+    with pytest.raises(ValueError, match="LoadAnnotations2DFromBoxes3D"):
+        model.compute_metrics(batch_inputs, outputs)
+
+
+def test_evaluation_skips_the_auxiliary_2d_head() -> None:
+    model = _build_model(img_roi_head=_build_focal_head()).eval()
+    batch_inputs = _one_box_batch()
+
+    with torch.no_grad():
+        outputs = _run(model, batch_inputs)
+        losses = model.compute_metrics(batch_inputs, outputs)
+
+    assert outputs.detection3d().streampetr_head().auxiliary_2d is None
+    assert "loss_cls2d" not in losses
+
+
+def test_partial_ignore_reads_the_cone_barrier_status_of_the_batch() -> None:
+    torch.manual_seed(0)
+    model = _build_model(partial_ignore=True).eval()
+    batch_inputs = _one_box_batch()
+    with torch.no_grad():
+        outputs = _run(model, batch_inputs)
+
+    annotated = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [True]), outputs)
+    ignored = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [False]), outputs)
+
+    # Dropping the cone and barrier background terms lowers only the classification loss.
+    assert ignored["loss_cls"] < annotated["loss_cls"]
+    torch.testing.assert_close(ignored["loss_bbox"], annotated["loss_bbox"])
+    # The flag is required as soon as partial-ignore is configured.
+    with pytest.raises(ValueError, match="gt_traffic_cone_barrier_bbox_status"):
+        model.compute_metrics(batch_inputs, outputs)

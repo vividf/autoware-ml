@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from autoware_ml.dataclasses.models.detection3d.head_outputs import StreamPETRHeadOutputs
 from autoware_ml.losses.detection3d.focal import SigmoidFocalLoss
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
@@ -162,16 +163,16 @@ def test_head_loss_wiring_applies_annotation_status() -> None:
     """head.loss must thread the status flags through to the focal loss."""
     torch.manual_seed(0)
     head = _build_head(partial_ignore=True).eval()
-    outputs = {
-        "all_cls_scores": torch.randn(2, 1, 16, 7),
-        "all_bbox_preds": torch.rand(2, 1, 16, 10),
-        "dn_mask_dict": None,
-    }
+    outputs = StreamPETRHeadOutputs(
+        all_cls_scores=torch.randn(2, 1, 16, 7),
+        all_bbox_preds=torch.rand(2, 1, 16, 10),
+        denoising=None,
+    )
     gt_boxes = [torch.tensor([[0.0, 0.0, 0.0, 4.0, 2.0, 1.5, 0.1, 0.0, 0.0]], dtype=torch.float32)]
     gt_labels = [torch.tensor([0], dtype=torch.long)]
 
-    annotated = head.loss(outputs, gt_boxes, gt_labels, annotation_status=[True])
-    ignored = head.loss(outputs, gt_boxes, gt_labels, annotation_status=[False])
+    annotated = head.loss(outputs, gt_boxes, gt_labels, annotation_status=torch.tensor([True]))
+    ignored = head.loss(outputs, gt_boxes, gt_labels, annotation_status=torch.tensor([False]))
     # Masking removes non-negative background terms from the cls loss only.
     assert ignored["loss_cls"] < annotated["loss_cls"]
     assert torch.allclose(ignored["loss_bbox"], annotated["loss_bbox"])
@@ -198,10 +199,11 @@ def test_focal_head_2d_forward_and_loss_with_partial_ignore() -> None:
     batch_size, num_cams = 2, 2
     img_features = torch.randn(batch_size, num_cams, 32, 6, 10)
     outputs = head(img_features, image_height=96, image_width=160)
-    assert outputs["enc_cls_scores"].shape == (4, 60, 7)
-    assert outputs["enc_bbox_preds"].shape == (4, 60, 4)
-    assert outputs["pred_centers2d"].shape == (4, 60, 2)
-    assert outputs["centerness"].shape == (4, 60, 1)
+    assert outputs.cls_scores.shape == (4, 60, 7)
+    assert outputs.bbox_preds.shape == (4, 60, 4)
+    assert outputs.centers_2d.shape == (4, 60, 2)
+    assert outputs.centerness.shape == (4, 60, 1)
+    assert (outputs.image_height, outputs.image_width) == (96, 160)
 
     gt_boxes = np.array([[10.0, 10.0, 60.0, 60.0]], dtype=np.float32)
     gt_centers = np.array([[35.0, 35.0]], dtype=np.float32)

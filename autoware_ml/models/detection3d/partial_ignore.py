@@ -18,7 +18,9 @@ Some dataset scenes are annotated for every class except a subset. Training on
 such frames must not punish background predictions of the un-annotated classes
 as false positives. The per-frame ``annotation_status`` flag marks whether the
 frame's scene carries those annotations; when it is ``False``, classification
-weights for the ignored class columns are zeroed on that frame's queries.
+weights for the ignored class columns are zeroed on that frame's queries. The
+typed batch carries the flag of the traffic cones and barriers as
+``Detection3DGTBatch.gt_traffic_cone_barrier_bbox_status``.
 """
 
 from __future__ import annotations
@@ -56,8 +58,7 @@ def resolve_partial_ignore_labels(
 def normalize_status_flags(value: object, batch_size: int) -> list[bool]:
     """Normalize per-sample annotation-status flags to a plain bool list.
 
-    Accepts tensors, nested lists, or scalars produced by different collation
-    paths.
+    Accepts a boolean tensor, nested lists, or scalars.
 
     Args:
         value: Raw ``annotation_status`` value from the batch.
@@ -73,14 +74,14 @@ def normalize_status_flags(value: object, batch_size: int) -> list[bool]:
     """
     if value is None:
         raise ValueError(
-            "annotation_status is required when partial_ignore_classes is configured; "
-            "check the datamodule's annotation_status_field and collation_map."
+            "annotation_status is required when partial_ignore_classes is configured, but the "
+            "batch carries no gt_traffic_cone_barrier_bbox_status; the database has to provide "
+            "the per-scenario annotation flag."
         )
     flattened = _flatten_flags(value)
     if len(flattened) != batch_size:
         raise ValueError(
-            f"annotation_status carries {len(flattened)} flags for a batch of "
-            f"{batch_size} samples; check the collation_map strategy for the key."
+            f"annotation_status carries {len(flattened)} flags for a batch of {batch_size} samples."
         )
     return flattened
 

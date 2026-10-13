@@ -28,11 +28,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn as nn
 
+from autoware_ml.dataclasses.models.detection3d.head_outputs import FocalHead2DOutputs
 from autoware_ml.losses.detection2d.losses import (
     GIoULoss,
     HeatmapGaussianFocalLoss,
@@ -193,7 +193,7 @@ class FocalHead2D(nn.Module):
         img_features: torch.Tensor,
         image_height: int,
         image_width: int,
-    ) -> dict[str, Any]:
+    ) -> FocalHead2DOutputs:
         """Predict dense 2D outputs for every camera.
 
         Args:
@@ -230,13 +230,14 @@ class FocalHead2D(nn.Module):
             batch_size * num_cams, -1, 2
         )
 
-        return {
-            "enc_cls_scores": cls_logits,
-            "enc_bbox_preds": pred_bboxes,
-            "pred_centers2d": pred_centers2d,
-            "centerness": centerness,
-            "pad_shape_2d": (image_height, image_width),
-        }
+        return FocalHead2DOutputs(
+            cls_scores=cls_logits,
+            bbox_preds=pred_bboxes,
+            centers_2d=pred_centers2d,
+            centerness=centerness,
+            image_height=int(image_height),
+            image_width=int(image_width),
+        )
 
     def _get_targets_single(
         self,
@@ -312,7 +313,7 @@ class FocalHead2D(nn.Module):
 
     def loss(
         self,
-        outputs: dict[str, torch.Tensor],
+        outputs: FocalHead2DOutputs,
         gt_bboxes_2d: list[list[torch.Tensor]],
         gt_labels_2d: list[list[torch.Tensor]],
         centers_2d: list[list[torch.Tensor]],
@@ -321,7 +322,7 @@ class FocalHead2D(nn.Module):
         """Compute the five auxiliary 2D losses.
 
         Args:
-            outputs: Model outputs holding the dense 2D predictions.
+            outputs: Dense 2D predictions of the head.
             gt_bboxes_2d: Per-sample, per-camera projected 2D boxes in
                 unnormalized ``(x1, y1, x2, y2)`` pixels.
             gt_labels_2d: Per-sample, per-camera class labels.
@@ -333,11 +334,11 @@ class FocalHead2D(nn.Module):
         Returns:
             Loss dictionary with ``loss_*2d`` keys.
         """
-        cls_scores = outputs["enc_cls_scores"]
-        bbox_preds = outputs["enc_bbox_preds"]
-        pred_centers2d = outputs["pred_centers2d"]
-        centerness = outputs["centerness"]
-        image_height, image_width = outputs["pad_shape_2d"]
+        cls_scores = outputs.cls_scores
+        bbox_preds = outputs.bbox_preds
+        pred_centers2d = outputs.centers_2d
+        centerness = outputs.centerness
+        image_height, image_width = outputs.image_height, outputs.image_width
         device = cls_scores.device
 
         batch_size = len(gt_bboxes_2d)
@@ -346,7 +347,7 @@ class FocalHead2D(nn.Module):
         if cls_scores.size(0) != num_images:
             raise ValueError(
                 f"2D predictions cover {cls_scores.size(0)} images but annotations cover "
-                f"{num_images}; check the 2D annotation transform and collation."
+                f"{num_images}; check the 2D annotation transform."
             )
 
         def to_tensor(value: object, columns: int) -> torch.Tensor:
