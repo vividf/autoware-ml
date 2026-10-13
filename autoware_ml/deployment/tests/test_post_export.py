@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -215,12 +216,8 @@ def test_a_diverging_artifact_fails_the_deploy(tmp_path) -> None:
         run_post_export(_cfg(tolerance=0.5), model, _DataModule(), tmp_path, torch.device("cpu"))
 
 
-def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) -> None:
-    torch.manual_seed(0)
-    model = _StagedModel().eval()
-    _export_stage_artifacts(model, tmp_path)
-    logged: dict[str, float] = {}
-    cfg = {
+def _evaluation_cfg() -> dict:
+    return {
         "onnx": {"enabled": True},
         "tensorrt": {"enabled": False},
         "evaluation": {
@@ -234,8 +231,20 @@ def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) ->
             },
         },
     }
+
+
+def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) -> None:
+    torch.manual_seed(0)
+    model = _StagedModel().eval()
+    _export_stage_artifacts(model, tmp_path)
+    logged: dict[str, float] = {}
     results = run_post_export(
-        cfg, model, _DataModule(), tmp_path, torch.device("cpu"), log_metric=logged.__setitem__
+        _evaluation_cfg(),
+        model,
+        _DataModule(),
+        tmp_path,
+        torch.device("cpu"),
+        log_metric=logged.__setitem__,
     )
     # tensorrt has no artifacts in this run and is skipped; the other two are scored.
     assert [r.backend.value for r in results] == ["pytorch", "onnx"]
@@ -245,3 +254,20 @@ def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) ->
     )
     assert "latency/onnx/model_graphs_mean_ms" in logged
     assert "test/pytorch/toy/error" in logged
+
+
+def test_evaluation_writes_every_metric_without_a_tracker(tmp_path) -> None:
+    """``logger=null`` deploys keep the full report: the log holds the headline rows only."""
+    torch.manual_seed(0)
+    model = _StagedModel().eval()
+    _export_stage_artifacts(model, tmp_path)
+    results = run_post_export(
+        _evaluation_cfg(), model, _DataModule(), tmp_path, torch.device("cpu")
+    )
+    entries = json.loads((tmp_path / "evaluation.json").read_text())["results"]
+    assert [entry["backend"] for entry in entries] == ["pytorch", "onnx"]
+    for entry, result in zip(entries, results):
+        assert entry["metrics"] == pytest.approx(result.metrics)
+        assert entry["latency_ms"]["model_graphs"]["mean"] == pytest.approx(
+            result.latency["model_graphs"].mean
+        )

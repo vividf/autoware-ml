@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -29,9 +30,13 @@ from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.deployment.tests.toy_batch import ToyBatch
 from autoware_ml.deployment.evaluation.evaluator import (
     MODEL_STAGE,
+    RESULTS_FILE_NAME,
+    EvaluationResult,
     evaluate_backend,
     flatten_results,
+    write_results_json,
 )
+from autoware_ml.deployment.evaluation.latency import LatencyStats
 from autoware_ml.metrics.base import EvalStage
 from autoware_ml.models.base import BaseModel
 from autoware_ml.types.backend import Backend
@@ -166,3 +171,26 @@ def test_a_missing_eval_key_names_the_model(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="_Broken.build_deployed_eval_output"):
         evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))
+
+
+def test_results_json_keeps_every_metric_and_nulls_non_finite_values(tmp_path) -> None:
+    result = EvaluationResult(
+        backend=Backend.TENSORRT,
+        device="cuda",
+        split="test",
+        metrics={"test/tensorrt/det3d/mAP_car": 0.5, "test/tensorrt/det3d/mAP_bus": float("nan")},
+        latency={MODEL_STAGE: LatencyStats.from_samples([2.0, 4.0])},
+        num_samples=2,
+    )
+    path = write_results_json([result], tmp_path / RESULTS_FILE_NAME)
+
+    def reject(constant: str) -> None:
+        pytest.fail(f"non-strict JSON constant {constant}")
+
+    (entry,) = json.loads(path.read_text(), parse_constant=reject)["results"]
+    assert (entry["backend"], entry["split"], entry["num_samples"]) == ("tensorrt", "test", 2)
+    assert entry["metrics"] == {
+        "test/tensorrt/det3d/mAP_bus": None,
+        "test/tensorrt/det3d/mAP_car": 0.5,
+    }
+    assert entry["latency_ms"][MODEL_STAGE]["mean"] == pytest.approx(3.0)

@@ -25,10 +25,13 @@ metric suites — so a full-split ``pytorch`` run reproduces ``trainer.test`` an
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -45,6 +48,8 @@ logger = logging.getLogger(__name__)
 PREPROCESS_STAGE = "preprocess"
 POSTPROCESS_STAGE = "decode_and_metrics"
 MODEL_STAGE = "model_graphs"
+# Written next to the artifacts by every evaluation run (see write_results_json).
+RESULTS_FILE_NAME = "evaluation.json"
 
 
 @dataclass(frozen=True)
@@ -275,3 +280,39 @@ def flatten_results(results: Sequence[EvaluationResult]) -> dict[str, float]:
         for name, stats in result.latency.items():
             flat[latency_key(result.backend, f"{name}_mean_ms")] = stats.mean
     return flat
+
+
+def write_results_json(results: Sequence[EvaluationResult], path: str | Path) -> Path:
+    """Write every backend's full metric report and latency stats to ``path`` as JSON.
+
+    The log leads with the headline rows only, and ``log_metric`` reaches a tracker only
+    when one is configured; this file keeps the per-class and per-range values of every
+    backend next to the artifacts either way. Non-finite values (a class without support,
+    say) are written as ``null`` so the file stays strict JSON.
+
+    Returns:
+        The written path.
+    """
+
+    def finite(value: float) -> float | None:
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    entries = [
+        {
+            "backend": result.backend.value,
+            "device": result.device,
+            "split": result.split,
+            "num_samples": result.num_samples,
+            "fallback_stages": list(result.fallback_stages),
+            "metrics": {key: finite(value) for key, value in sorted(result.metrics.items())},
+            "latency_ms": {
+                name: {field: finite(value) for field, value in asdict(stats).items()}
+                for name, stats in result.latency.items()
+            },
+        }
+        for result in results
+    ]
+    path = Path(path)
+    path.write_text(json.dumps({"results": entries}, indent=2) + "\n")
+    return path
