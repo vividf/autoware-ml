@@ -240,10 +240,14 @@ box pipelines differ from those info files in a few places:
 | truck–trailer merge distance                             | 2.0 m                     | 1.0 m             |
 | ground-plane velocity                                    | as annotated              | clipped at 25 m/s |
 | two-wheeler with `two_wheel_vehicle_state.without_rider` | kept                      | dropped           |
+| box recorded with fewer than 2 lidar points (training)   | kept                      | dropped           |
 
 The first three follow the coarse taxonomy every other T4 detector of the
-repository trains, the others are the shared box pipelines and attribute
-filters of the T4 dataset configs.
+repository trains, the next three are the shared box pipelines and attribute
+filters of the T4 dataset configs, and the last is the point-count rule of the
+evaluation (`min_num_points: 2`) and of the other T4 detectors' training
+pipelines, read from the count the database records with every box since the
+camera pipelines load no point cloud.
 
 ## Implementation
 
