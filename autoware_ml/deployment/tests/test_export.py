@@ -25,8 +25,8 @@ import torch
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.datamodule.tests.corpus import build_dataset, write_corpus
 from autoware_ml.preprocessing.base import DataPreprocessing
-import autoware_ml.utils.deploy as deploy
-from autoware_ml.utils.deploy import (
+import autoware_ml.deployment.export as export_mod
+from autoware_ml.deployment.export import (
     apply_onnx_transforms,
     ExportSpec,
     build_dynamic_shapes,
@@ -36,7 +36,7 @@ from autoware_ml.utils.deploy import (
     normalize_dynamic_shapes_for_model,
     resolve_export_specs,
     should_modify_graph,
-    supports_export_stage,
+    supports_export_target,
 )
 
 
@@ -107,16 +107,16 @@ def test_export_to_onnx_prefers_export_spec_dynamic_axes(
     assert captured_kwargs["dynamic_axes"] == dynamic_axes_override
 
 
-def test_supports_export_stage_uses_export_spec_capabilities() -> None:
+def test_supports_export_target_uses_export_spec_capabilities() -> None:
     spec = ExportSpec(
         module=_DummyModel(),
         args=(torch.ones(1, 1), torch.ones(1)),
         input_param_names=["voxels", "num_points"],
-        supported_stages=frozenset({"onnx"}),
+        supported_targets=frozenset({"onnx"}),
     )
 
-    assert supports_export_stage(spec, "onnx") is True
-    assert supports_export_stage(spec, "tensorrt") is False
+    assert supports_export_target(spec, "onnx") is True
+    assert supports_export_target(spec, "tensorrt") is False
 
 
 def test_build_dynamic_axes_supports_legacy_export_config() -> None:
@@ -263,7 +263,7 @@ def test_resolve_export_specs_forwards_batch_and_preserves_order(monkeypatch) ->
             return {"backbone": "spec_backbone", "det3d_head": "spec_det3d_head"}
 
     sentinel_batch = {"feat": torch.zeros(1)}
-    monkeypatch.setattr(deploy, "get_predict_batch", lambda dm, model, device: sentinel_batch)
+    monkeypatch.setattr(export_mod, "get_predict_batch", lambda dm, model, device: sentinel_batch)
 
     specs = resolve_export_specs(object(), _MultiModuleModel(), torch.device("cpu"))
 
@@ -294,7 +294,7 @@ def test_get_predict_batch_keeps_the_typed_batch_through_the_device_transfer(
         def on_after_batch_transfer(self, batch, dataloader_idx: int) -> ModelBatchInputs:
             return preprocessing(batch, is_training=False)
 
-    inputs = deploy.get_predict_batch(_Datamodule(), _Model(), torch.device("cpu"))
+    inputs = export_mod.get_predict_batch(_Datamodule(), _Model(), torch.device("cpu"))
 
     assert inputs.batch_size() == 2
     assert inputs.multi_task_gt_batch.point_cloud_gt_batch is not None

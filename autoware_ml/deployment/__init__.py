@@ -15,7 +15,7 @@
 """Deployment on top of the per-module export contract.
 
 A model that declares a *stage graph* (:mod:`.stages`) gets its
-:class:`~autoware_ml.utils.deploy.ExportSpec` mapping derived from that one declaration
+:class:`~autoware_ml.deployment.export.ExportSpec` mapping derived from that one declaration
 (:mod:`.export_specs`), and the same declaration later drives the per-backend inference
 pipeline, cross-backend verification and evaluation. Models without a stage graph keep the
 hand-written ``build_export_specs`` contract unchanged.

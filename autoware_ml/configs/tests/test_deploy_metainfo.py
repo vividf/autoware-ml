@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 
 from autoware_ml.configs.resolvers import register_config_resolvers
 from autoware_ml.models.segmentation3d.ptv3_base import PTv3BaseModel
-from autoware_ml.utils.deploy import merge_module_onnx_cfg
+from autoware_ml.deployment.export import merge_module_onnx_cfg
 
 PTV3_CONFIGS = [
     "tasks/multi/ptv3/voxel012_122m_t4dataset_j6gen2",

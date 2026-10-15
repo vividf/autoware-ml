@@ -35,7 +35,7 @@ from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.models.base import BaseModel
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 
 
 def _image_data(batch_inputs: ModelBatchInputs) -> ImageGTBatch:

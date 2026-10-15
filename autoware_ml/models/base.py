@@ -37,7 +37,7 @@ from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.base import DataPreprocessing
 from autoware_ml.quantization.rules import QuantRules
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
 
 

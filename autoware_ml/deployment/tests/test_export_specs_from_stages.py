@@ -26,7 +26,7 @@ from torch import nn
 from autoware_ml.deployment.export_specs import build_export_specs_from_stages
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.models.base import BaseModel
-from autoware_ml.utils.deploy import ExportSpec
+from autoware_ml.deployment.export import ExportSpec
 from autoware_ml.types.backend import Backend
 
 
@@ -113,7 +113,7 @@ def test_specs_are_derived_one_per_graph_stage_in_order() -> None:
     assert encoder.module is model.encoder
     assert head.module is model.head
     assert encoder.dynamic_axes is None
-    assert encoder.supported_stages == frozenset({"onnx", "tensorrt"})
+    assert encoder.supported_targets == frozenset({"onnx", "tensorrt"})
 
 
 def test_trace_inputs_are_the_run_state_tensors_the_glue_produced() -> None:
@@ -147,7 +147,7 @@ def test_stage_declared_axes_land_in_the_spec_and_fallback_keeps_export_targets(
     spec = specs["points"]
     assert spec.dynamic_axes == {"x": {0: "num_points"}, "y": {0: "num_points"}}
     # A runtime fallback says where the artifact is *run*, not whether it is exported.
-    assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
+    assert spec.supported_targets == frozenset({"onnx", "tensorrt"})
 
 
 def test_multi_input_spec_args_follow_the_declared_input_order() -> None:

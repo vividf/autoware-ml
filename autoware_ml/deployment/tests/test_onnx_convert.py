@@ -22,7 +22,7 @@ import pytest
 from omegaconf import OmegaConf
 from onnx import TensorProto, helper, numpy_helper
 
-from autoware_ml.utils.onnx_precision import (
+from autoware_ml.deployment.onnx.convert import (
     OnnxPrecision,
     convert_onnx_precision,
     resolve_onnx_precision,
