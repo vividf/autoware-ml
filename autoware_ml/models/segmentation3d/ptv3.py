@@ -32,84 +32,20 @@ from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.segmentation3d.head_outputs import Segmentation3DHeadOutputs
 from autoware_ml.models.segmentation3d.encoders.ptv3 import PointTransformerV3Encoder
 from autoware_ml.models.segmentation3d.encoders.voxel import VoxelFeatureEncoder
+from autoware_ml.deployment.stages import Stage
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3SegDecoderHead,
     segmentation_eval_output,
+    segmentation_eval_output_from_scores,
     segmentation_point_loss,
     segmentation_predict_outputs,
 )
 from autoware_ml.models.segmentation3d.ptv3_base import (
-    SERIALIZED_POOLING_FIELDS,
     PTv3BaseModel,
-    PTv3EncoderExportBase,
-    build_encoder_export_spec,
-    build_point_feature_dynamic_axes,
-    build_ptv3_export_context,
-    build_ptv3_input_dynamic_axes,
-    build_seg_head_export_spec,
-    prepare_ptv3_export_inputs,
+    build_ptv3_stages,
+    build_seg_head_stage,
     split_block_parameters,
 )
-from autoware_ml.utils.deploy import ExportSpec
-
-
-class _PTv3SegmentationExportModule(PTv3EncoderExportBase):
-    """Expose a deployment-oriented PTv3 export graph without mutating the model."""
-
-    def __init__(
-        self,
-        encoder: PointTransformerV3Encoder,
-        voxel_encoder: VoxelFeatureEncoder,
-        seg3d_head: PTv3SegDecoderHead,
-        sparse_shape: torch.Tensor,
-        serialized_depth: torch.Tensor,
-    ) -> None:
-        """Initialize the isolated PTv3 export module.
-
-        Args:
-            encoder: Export-prepared PTv3 encoder copy.
-            voxel_encoder: Voxel feature encoder feeding the embedding stem.
-            seg3d_head: Export-prepared decoder head copy.
-            sparse_shape: Static sparse shape used by exported sparse ops.
-            serialized_depth: Serialization depth baked at export time.
-        """
-        super().__init__(encoder, voxel_encoder, sparse_shape, serialized_depth)
-        self.seg3d_head = seg3d_head
-
-    def forward(
-        self,
-        voxels: torch.Tensor,
-        num_points_per_voxel: torch.Tensor,
-        grid_coord: torch.Tensor,
-        serialized_order: torch.Tensor,
-        serialized_inverse: torch.Tensor,
-        *serialized_pooling_inputs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run export-time inference on serialized voxel inputs.
-
-        Args:
-            voxels: Padded voxel points.
-            num_points_per_voxel: Valid point count per voxel.
-            grid_coord: Integer voxel coordinates.
-            serialized_order: Level-0 serialization order, one row per curve.
-            serialized_inverse: Inverse of ``serialized_order``.
-            serialized_pooling_inputs: Precomputed pooling metadata tensors.
-
-        Returns:
-            Predicted labels and voxel-wise semantic probabilities.
-        """
-        point = self.run_encoder(
-            voxels,
-            num_points_per_voxel,
-            grid_coord,
-            serialized_order,
-            serialized_inverse,
-            *serialized_pooling_inputs,
-        )
-        point_logits = self.seg3d_head(point)
-        pred_probs = torch.softmax(point_logits, dim=1)
-        pred_labels = pred_probs.argmax(dim=1)
-        return pred_labels, pred_probs
 
 
 class PTv3SegmentationModel(PTv3BaseModel):
@@ -233,55 +169,17 @@ class PTv3SegmentationModel(PTv3BaseModel):
             )
         )
 
-    def get_export_output_names(self) -> list[str]:
-        """Return ordered PTv3 segmentation export output names."""
-        return ["pred_labels", "pred_probs"]
+    def build_stages(self) -> Sequence[Stage]:
+        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads.
 
-    def build_export_spec(self, batch_inputs: ModelBatchInputs) -> ExportSpec:
-        """Build the ONNX export specification.
-
-        Args:
-            batch_inputs: Example preprocessed batch with the voxels.
-
-        Returns:
-            Deployment export specification for PTv3.
+        The export specs derive from this declaration (:meth:`BaseModel.build_export_specs`).
         """
-        inputs = prepare_ptv3_export_inputs(self, batch_inputs)
-        input_args, input_param_names = inputs.encoder_args(SERIALIZED_POOLING_FIELDS)
-        export_module = _PTv3SegmentationExportModule(
-            self._prepare_encoder_export(),
-            self.voxel_encoder,
-            self.seg3d_head.prepare_for_export(self.EXPORT_ORDER),
-            inputs.sparse_shape,
-            inputs.serialization_depth,
-        ).eval()
-        output_names = self.get_export_output_names()
-        dynamic_axes = build_ptv3_input_dynamic_axes(input_param_names)
-        dynamic_axes.update(build_point_feature_dynamic_axes(output_names))
-        return ExportSpec(
-            module=export_module,
-            args=input_args,
-            input_param_names=input_param_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            supported_stages=self.EXPORT_SUPPORTED_STAGES,
+        return build_ptv3_stages(self, build_seg_head_stage(self, self.seg3d_head))
+
+    def build_deployed_eval_output(
+        self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the seg head graph's labels and scores like forward()'s logits."""
+        return segmentation_eval_output_from_scores(
+            outputs["pred_labels"], outputs["pred_probs"], batch_inputs
         )
-
-    def build_export_specs(self, batch_inputs: ModelBatchInputs) -> dict[str, ExportSpec]:
-        """Build split PTv3 segmentation ONNX export specs for encoder and head.
-
-        Args:
-            batch_inputs: Example preprocessed batch with the voxels.
-
-        Returns:
-            Export specs of the encoder and the segmentation head.
-        """
-        context = build_ptv3_export_context(self, batch_inputs)
-        return {
-            "ptv3_encoder": build_encoder_export_spec(context),
-            "ptv3_seg3d_head": build_seg_head_export_spec(
-                context,
-                self.seg3d_head.prepare_for_export(self.EXPORT_ORDER),
-                self.get_export_output_names(),
-            ),
-        }

@@ -43,11 +43,9 @@ from autoware_ml.models.segmentation3d.heads.ptv3 import (
     segmentation_predict_outputs,
     voxel_supervision,
 )
-from autoware_ml.models.segmentation3d.ptv3 import (
-    PTv3SegmentationModel,
-    _PTv3SegmentationExportModule,
-)
+from autoware_ml.models.segmentation3d.ptv3 import PTv3SegmentationModel
 from autoware_ml.models.segmentation3d.ptv3_base import (
+    _PTv3EncoderExportModule,
     build_ptv3_encoder_dynamic_axes,
     validate_serialization_geometry,
 )
@@ -163,10 +161,9 @@ def test_build_export_module_disables_flash_attention_without_mutating_live_enco
         "autoware_ml.models.segmentation3d.encoders.ptv3.replace_submconv3d_for_export",
         return_value=None,
     ):
-        export_module = _PTv3SegmentationExportModule(
+        export_module = _PTv3EncoderExportModule(
             encoder=encoder.prepare_for_export(("z", "z-trans")),
             voxel_encoder=SweepSplitVoxelFeatureEncoder(),
-            seg3d_head=nn.Linear(4, 2),
             sparse_shape=torch.tensor([64, 64, 64], dtype=torch.long),
             serialized_depth=torch.tensor(6, dtype=torch.long),
         )
