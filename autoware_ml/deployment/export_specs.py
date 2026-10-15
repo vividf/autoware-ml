@@ -49,9 +49,10 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
 
     Returns:
         Spec whose ``module`` is the stage module itself, whose ``input_param_names`` /
-        ``output_names`` are the stage's declared run-state names and whose
-        ``dynamic_axes`` are the stage's intrinsic axes (``None`` when it declares none, so
-        the module's config entry applies).
+        ``output_names`` are the stage's declared run-state names, whose ``dynamic_axes``
+        are the stage's intrinsic axes (``None`` when it declares none, so the module's
+        config entry applies) and whose ``onnx_transforms`` are the stage's declared graph
+        rewrites.
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -68,6 +69,7 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
         input_param_names=list(stage.inputs),
         output_names=list(stage.outputs),
         dynamic_axes=dynamic_axes,
+        onnx_transforms=tuple(stage.onnx_transforms),
     )
 
 

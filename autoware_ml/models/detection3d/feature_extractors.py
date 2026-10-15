@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.utils.point_cloud.batching import infer_batch_size_from_voxel_coords
 
@@ -57,7 +57,14 @@ class LidarBEVFeatureExtractor(nn.Module):
         voxel_coords: torch.Tensor,
         batch_size: int | None = None,
     ) -> torch.Tensor:
-        """Encode voxelized lidar inputs into BEV features."""
+        """Encode voxelized lidar inputs into BEV features.
+
+        Args:
+            voxels: Per-voxel point features.
+            num_points: Points per voxel.
+            voxel_coords: ``[batch, z, y, x]`` voxel coordinates.
+            batch_size: Number of samples; inferred from the coordinates when omitted.
+        """
         if batch_size is None:
             batch_size = infer_batch_size_from_voxel_coords(voxel_coords)
         pillar_features = self.pts_voxel_encoder(voxels, num_points, voxel_coords)
