@@ -230,8 +230,10 @@ def prepare_runtime_environment(
         parent_run_id = None
         extra_tags = None
         if checkpoint_paths:
-            if stage != "deploy":
-                raise ValueError("Multi-checkpoint runtime lineage is only supported for deploy.")
+            if stage not in ("deploy", "quantize"):
+                raise ValueError(
+                    "Multi-checkpoint runtime lineage is only supported for deploy and quantize."
+                )
             experiment_name, parent_run_id, source_checkpoints = resolve_deploy_lineage(
                 config_name,
                 checkpoint_paths,
