@@ -124,6 +124,10 @@ class SparseBasicBlock(SparseModule):
     full ``SparseConvTensor`` (not just its ``.features``).
     """
 
+    #: The conv -> bn pairs forward connects directly (the export-time BN fold's contract;
+    #: registration order alone proves nothing in a residual block).
+    bn_fusion_pairs = (("conv1", "bn1"), ("conv2", "bn2"))
+
     def __init__(self, channels: int, indice_key: str, eps: float, momentum: float) -> None:
         super().__init__()
         self.conv1 = SubMConv3d(

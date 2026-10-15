@@ -48,9 +48,10 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
             stage's ``inputs`` are read from it as the trace arguments.
 
     Returns:
-        Spec whose ``input_param_names`` / ``output_names`` are the stage's declared
-        run-state names and whose ``dynamic_axes`` are the stage's intrinsic axes (``None``
-        when it declares none, so the module's config entry applies).
+        Spec whose ``module`` is the stage module itself, whose ``input_param_names`` /
+        ``output_names`` are the stage's declared run-state names and whose
+        ``dynamic_axes`` are the stage's intrinsic axes (``None`` when it declares none, so
+        the module's config entry applies).
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -58,6 +59,10 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
         else None
     )
     return ExportSpec(
+        # The module is exported as it is: BatchNorm stays a graph node (TensorRT and ONNX
+        # Runtime fuse it themselves, and folding it into fp16 weights only costs precision).
+        # The paths that need folded weights fold on their own — a sparse encoder's
+        # prepare_for_export for the plugin bias, quantization's first step for calibration.
         module=stage.module,
         args=tuple(state[name].to(state.device) for name in stage.inputs),
         input_param_names=list(stage.inputs),
