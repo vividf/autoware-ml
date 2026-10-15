@@ -480,6 +480,7 @@ class TransFusionHead(nn.Module):
         prediction_heads["heatmap"] = (num_classes, 2)
         if not use_velocity and "vel" in prediction_heads:
             prediction_heads.pop("vel")
+        self.prediction_head_names = tuple(prediction_heads)
         head_hidden = head_hidden_channels if head_hidden_channels is not None else hidden_channel
         self.prediction_heads = nn.ModuleList(
             [
@@ -715,6 +716,16 @@ class TransFusionHead(nn.Module):
                 vel=branches["vel"] if self.use_velocity else None,
             ),
         )
+
+    @property
+    def export_output_names(self) -> tuple[str, ...]:
+        """The :class:`TransFusionHeadOutputs` tensors in the order a graph that exports the
+        raw head outputs emits them: the dense heatmap and the proposal selection first,
+        then ``heatmap`` and the regression branches in ``common_heads`` order (``vel``
+        only with ``use_velocity``). A graph that decodes inside the export (packed boxes,
+        scores and labels) names its own outputs instead."""
+        branches = tuple(name for name in self.prediction_head_names if name != "heatmap")
+        return ("dense_heatmap", "query_heatmap_score", "query_labels", "heatmap", *branches)
 
     def predict(self, outputs: TransFusionHeadOutputs) -> list[Detection3DSamplePredictions]:
         """Decode predictions into metric-space boxes.

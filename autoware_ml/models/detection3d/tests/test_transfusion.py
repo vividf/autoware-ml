@@ -249,6 +249,24 @@ def test_transfusion_build_export_spec_prepares_modules_without_mutating_model()
     )
 
 
+def test_export_output_names_follow_the_declared_branches() -> None:
+    """The deployed graph's outputs are what the head declares: the dense heatmap and the
+    proposal selection first, then heatmap and the regression branches in common_heads
+    order; vel only when the head predicts velocity."""
+    assert _build_head(use_velocity=True).export_output_names == (
+        "dense_heatmap",
+        "query_heatmap_score",
+        "query_labels",
+        "heatmap",
+        "center",
+        "height",
+        "dim",
+        "rot",
+        "vel",
+    )
+    assert _build_head(use_velocity=False).export_output_names[-1] == "rot"
+
+
 def test_transfusion_bf16_export_emits_fusion_pattern(tmp_path: Path) -> None:
     head = _build_head(use_bf16_cross_attention=True).prepare_for_export()
     self_attention = head.decoder[0].self_attn
