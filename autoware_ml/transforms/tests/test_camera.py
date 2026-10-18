@@ -472,6 +472,14 @@ class TestLoadImagesFromFileShuffleOrder(unittest.TestCase):
         )
 
 
+def _frame_meta(pose: torch.Tensor) -> FrameMetaSample:
+    """Frame metadata at ``pose``; fills the sample time when the metadata carries one."""
+    fields = {"ego2global": pose, "scene_token": "scene"}
+    if "timestamp" in FrameMetaSample._fields:
+        fields["timestamp"] = 0.0
+    return FrameMetaSample(**fields)
+
+
 class TestCameraGlobalRotScaleTrans(unittest.TestCase):
     """The global 3D augmentation of a camera-only sample."""
 
@@ -553,7 +561,7 @@ class TestCameraGlobalRotScaleTrans(unittest.TestCase):
                 detection3d_gt_bboxes_3d=build_boxes(
                     [[*local_box.tolist(), 4.0, 2.0, 1.5, 0.0]], [0]
                 ),
-                frame_meta=FrameMetaSample(ego2global=pose, scene_token="scene"),
+                frame_meta=_frame_meta(pose),
             )
             augmented.append(self.augment(sample, seed=seed))
         folded = FrameMetaBatch.collate_gt_samples(
