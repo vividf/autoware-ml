@@ -62,26 +62,22 @@ def test_cameras_load_before_the_lidar_augmentations_move_their_calibration(
 
 _GEOMETRIC_AUGMENTATIONS = _LIDAR_AUGMENTATIONS + ("camera.geometry.ImageAug3D",)
 _ANNOTATIONS_2D = "camera.annotations2d.LoadAnnotations2DFromBoxes3D"
-_RANGE_FILTER = "boxes3d.filters.BBoxesRangeFilter"
 
 
 @pytest.mark.parametrize(
     "config, split, steps", _PIPELINES, ids=[f"{c}:{s}" for c, s, _ in _PIPELINES]
 )
-def test_2d_annotations_are_projected_after_the_geometry_moves_and_before_the_range_filter(
+def test_2d_annotations_are_projected_after_every_geometric_augmentation(
     config: str, split: str, steps: list[str]
 ) -> None:
     # The projection reads the augmented boxes and calibration, so every geometric
     # augmentation (image and global 3D) must run first; a later one would leave the 2D
-    # targets silently wrong. The reference recipe projects before the range filter, so the
-    # auxiliary 2D head supervises every visible object even outside the 3D range.
+    # targets silently wrong. Where the range filter goes is a recipe choice (the T4
+    # reference projects before it, the nuScenes one filters before augmenting).
     annotations = [i for i, t in enumerate(steps) if t.endswith(_ANNOTATIONS_2D)]
-    if not annotations:
-        return
     geometric = [i for i, t in enumerate(steps) if t.endswith(_GEOMETRIC_AUGMENTATIONS)]
-    range_filter = [i for i, t in enumerate(steps) if t.endswith(_RANGE_FILTER)]
-    assert all(i < annotations[0] for i in geometric)
-    assert all(annotations[0] < i for i in range_filter)
+    if annotations:
+        assert all(i < annotations[0] for i in geometric)
 
 
 _DETECTION_TEST = [
