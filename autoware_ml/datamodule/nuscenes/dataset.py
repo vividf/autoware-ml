@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from autoware_ml.databases.schemas.dataset_schemas import DatasetTableSchema
+from autoware_ml.databases.schemas.lidar_frames import LidarFrameDataModel
 from autoware_ml.datamodule.t4dataset.dataset import T4Dataset
 
 
@@ -36,3 +38,21 @@ class NuScenesDataset(T4Dataset):
         """
 
         return frame_path
+
+    def get_scene_token(self, idx: int, lidar_frame: LidarFrameDataModel) -> str:
+        """
+        Return the nuScenes scene name of the record.
+
+        The T4 scene directory cannot be read off a nuScenes path (``samples/LIDAR_TOP/...``
+        is shared by every scene, and a shallow root has too few components), so the record's
+        ``scenario_id`` names the scene; nuScenes has no lanelet map to resolve from it.
+
+        Args:
+          idx: Index of the record.
+          lidar_frame: Keyframe lidar frame of the record, unused.
+
+        Returns:
+          str: The scene name of the record.
+        """
+        del lidar_frame
+        return str(self.dataset_records_dataframe.item(idx, DatasetTableSchema.SCENARIO_ID.name))

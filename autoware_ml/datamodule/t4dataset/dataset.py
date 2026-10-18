@@ -302,6 +302,24 @@ class T4Dataset(BaseDataset):
             )
         )
 
+    def get_scene_token(self, idx: int, lidar_frame: LidarFrameDataModel) -> str:
+        """
+        Return the scene identity of a record: the ``<db>/<uuid>/<version>`` directory of the
+        T4 scene, which the lanelet map resolver of the metrics locates under the database root
+        and which a streaming model compares frame to frame.
+
+        Args:
+          idx: Index of the record.
+          lidar_frame: Keyframe lidar frame of the record.
+
+        Returns:
+          str: Scene identity shared by every record of the scene and by no other scene.
+        """
+        del idx
+        return scene_dir_fragment(
+            lidar_frame.lidar_pointcloud_relative_path, str(self.database_root_path)
+        )
+
     def get_frame_meta_sample(
         self, idx: int, source_view: LidarSourceView | None
     ) -> FrameMetaSample:
@@ -330,9 +348,7 @@ class T4Dataset(BaseDataset):
                 lidar_frame.lidar_frame_ego_pose_to_global_matrix_fp32 @ sensor_to_ego,
                 dtype=torch.float32,
             ),
-            scene_token=scene_dir_fragment(
-                lidar_frame.lidar_pointcloud_relative_path, str(self.database_root_path)
-            ),
+            scene_token=self.get_scene_token(idx, lidar_frame),
             timestamp=float(
                 self.dataset_records_dataframe.item(idx, DatasetTableSchema.TIMESTAMP_SECONDS.name)
             ),
