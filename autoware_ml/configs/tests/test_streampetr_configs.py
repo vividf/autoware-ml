@@ -46,4 +46,3 @@ def test_every_stage_streams_the_seven_classes(config_name: str) -> None:
     assert list(taxonomy.detection3d.class_names) == SEVEN_CLASSES
     assert model.bbox_head.num_classes == len(SEVEN_CLASSES)
     assert cfg.datamodule.streaming
-    assert not cfg.trainer.use_distributed_sampler

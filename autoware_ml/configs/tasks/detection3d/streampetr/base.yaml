@@ -83,7 +83,6 @@ model:
   scheduler:
     _target_: autoware_ml.utils.schedulers.iter_warmup_epoch_cosine.IterWarmupEpochCosineLR
     _partial_: true
-    max_epochs: ${trainer.max_epochs}
     warmup_iters: 500
     warmup_start_factor: 0.3333333333333333
     eta_min_factor: 1.0e-4
@@ -117,8 +116,6 @@ data_preprocessing:
 trainer:
   max_epochs: 35
   precision: bf16-mixed
-  # GroupStreamingSampler shards scenes by rank itself.
-  use_distributed_sampler: false
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
 

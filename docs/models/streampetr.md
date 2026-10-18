@@ -62,7 +62,8 @@ The data is read from the record table of the database (built on first use
 under `cache_root_path`) and split by the scenario lists under
 `t4dataset_scenario_root_path`. Every dataloader streams whole scenes per
 batch lane (`datamodule.streaming`), ordered by the sample time of the
-records, and evaluation runs one lane per rank so every frame is scored.
+records; the training split reshuffles the scenes every epoch from the
+experiment `seed`.
 
 The `img_backbone` LR is always `lr * 0.1`, set via
 `model.optimizer_group_overrides.img_backbone.lr`. Validation runs every 5
@@ -221,9 +222,11 @@ Two evaluation-side conditions make mAP comparable with AWML T4MetricV2:
    evaluates every class up to 121 m (a no-op inside the square), and the
    T4 distance buckets mirror T4MetricV2's (0-50 / 50-90 / 90-121 / 0-121 m).
 
-Validation during training streams one lane per rank. With several GPUs the
-streaming sampler trims every rank to the shortest one, so `val/det3d/mAP`
-(the checkpoint monitor) skips a few percent of the frames; `autoware-ml
+Validation during training streams one lane per rank. The sampler cuts the
+joined frames of the split into one lane per rank and drops the tail that
+does not fill a round, fewer frames than there are lanes, so `val/det3d/mAP`
+(the checkpoint monitor) on several GPUs scores all but a handful of frames;
+a lane that starts inside a scene starts a new stream there. `autoware-ml
 test` on one device scores every frame.
 
 ### Ground truth against the accepted run
