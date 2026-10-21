@@ -28,7 +28,11 @@ from __future__ import annotations
 
 import inspect
 
-from autoware_ml.ops.spconv import sparse_functional
+import pytest
+
+pytest.importorskip("spconv", reason="the export symbolics import spconv")
+
+from autoware_ml.ops.spconv import sparse_functional  # noqa: E402
 
 
 def _emitted_attributes(symbolic) -> set[str]:
