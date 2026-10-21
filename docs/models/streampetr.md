@@ -21,42 +21,56 @@ StreamPETR is a camera-based 3D object detection model integrated under the `det
 
 ## Available Configurations
 
-| Config Name                                            | Dataset   | Purpose                                                  |
-| ------------------------------------------------------ | --------- | -------------------------------------------------------- |
-| `detection3d/streampetr/vov_320x800_nuscenes`          | NuScenes  | Plain nuScenes reference configuration                   |
-| `detection3d/streampetr/vov_320x800_nuscenes_pretrain` | NuScenes  | Stage 1: nuScenes pretrain (CPFPN + auxiliary 2D head)   |
-| `detection3d/streampetr/vov_480x640_t4dataset_base`    | T4Dataset | Stage 2: full T4 base DB                                 |
-| `detection3d/streampetr/vov_480x640_t4dataset_j6gen2`  | T4Dataset | Stage 3: j6gen2 fine-tune — the production configuration |
+Experiment configs live under `autoware_ml/configs/tasks/detection3d/streampetr/<dataset>/` and are passed to the CLI as the path relative to `tasks/`. The three leaves are the three stages of the production training flow.
+
+| Leaf                                                                | Database                   | Weights                                               |
+| ------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------- |
+| `nuscenes/vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain`         | nuScenes                   | RGB-stem DD3D/FCOS3D VoVNet-99 given with `--weights` |
+| `t4dataset/vov99_cpfpn_480x640_b8_35e_t4dataset_51m_gen1_gen2_base` | T4Dataset gen1 + gen2 base | Fine-tuned from the stage-1 checkpoint (`--weights`)  |
+| `t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base`   | T4Dataset j6gen2           | Fine-tuned from the stage-2 checkpoint (`--weights`)  |
+
+The leaf name spells out its variant: the backbone and neck, the image size, the batch size, the epoch count and the detection range. The configs are layered so that each file owns one concern:
+
+| File                          | Owns                                                                                                                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `base.yaml`                   | Model architecture and head recipe, image normalization and grid mask, optimizer, LR schedule, trainer settings, ONNX modules |
+| `focal2d_head.yaml`           | The auxiliary 2D head block (`model.img_roi_head`), composed by the leaves that train it                                      |
+| `<dataset>/base_<range>.yaml` | Detection range, image size, camera order, metrics, partial annotations, transforms and the streaming datamodule              |
+| `<dataset>/<leaf>.yaml`       | Database selection and taxonomy, batch size, experiment name, epochs, learning rates and the pretrained weights               |
 
 ## Three-Stage Training Flow
 
-The production model is trained natively in three stages; each stage's config
-pins the exact recipe (GPU count, per-GPU batch, LRs) of the accepted run.
-There is no `auto_scale_lr`: for a different total batch size rescale both
-LRs linearly (each config's header states its base).
+The production model is trained natively in three stages; each leaf pins the
+exact recipe (GPU count, per-GPU batch, LRs) of the accepted run. There is no
+`auto_scale_lr`: for a different total batch size rescale both LRs linearly
+(each leaf's header states its base).
 
-| Stage | Config                                                 | Database                | Epochs | Total batch / LR | Init from                      |
-| ----- | ------------------------------------------------------ | ----------------------- | ------ | ---------------- | ------------------------------ |
-| 1     | `detection3d/streampetr/vov_320x800_nuscenes_pretrain` | `nuscenes_base`         | 30     | 32 / 8e-4        | RGB-stem DD3D/FCOS3D VoVNet-99 |
-| 2     | `detection3d/streampetr/vov_480x640_t4dataset_base`    | `t4dataset_base`        | 35     | 32 / 2e-4        | stage-1 `best.ckpt`            |
-| 3     | `detection3d/streampetr/vov_480x640_t4dataset_j6gen2`  | `t4dataset_j6gen2_base` | 35     | 64 / 4e-4        | stage-2 `best.ckpt`            |
+| Stage | Leaf                                                                | Database                                      | Epochs | Total batch / LR | Init from                      |
+| ----- | ------------------------------------------------------------------- | --------------------------------------------- | ------ | ---------------- | ------------------------------ |
+| 1     | `nuscenes/vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain`         | `nuscenes_base`                               | 30     | 32 / 8e-4        | RGB-stem DD3D/FCOS3D VoVNet-99 |
+| 2     | `t4dataset/vov99_cpfpn_480x640_b8_35e_t4dataset_51m_gen1_gen2_base` | `t4dataset_gen1_base` + `t4dataset_gen2_base` | 35     | 32 / 2e-4        | stage-1 `best.ckpt`            |
+| 3     | `t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base`   | `t4dataset_j6gen2_base`                       | 35     | 64 / 4e-4        | stage-2 `best.ckpt`            |
 
 `--weights` accepts the previous stage's Lightning checkpoint directly — no
 conversion between stages. Every stage trains the same 7 classes in the same
 order (car, truck, bus, bicycle, pedestrian, traffic_cone, barrier): the T4
-stages select the `seven_class` taxonomy of the database, which folds the
-coarse taxonomy into the nuScenes detection classes and the list the deployed
-camera detector decodes. Motorcycles train as bicycles, debris and
-pushable/pullable objects as barriers, and animals are no targets.
+stages select the `seven_class` taxonomy of the database, which is the
+`default_dynamic` taxonomy with its last two classes in the nuScenes order
+(`default_dynamic` lists barrier before traffic_cone; a checkpoint loads into
+either, so the order must be pinned, not checked). Motorcycles train as
+bicycles, debris and pushable/pullable objects as barriers, and animals are no
+targets. Stage 2 reads the gen1 and the gen2 base corpora as two dataset
+sources of one datamodule, both under the same taxonomy.
 
-The accepted recipe trains `traffic_cone`/`barrier` with partial-ignore:
-frames whose scene lacks those annotations do not punish their background
-predictions, annotated frames train them normally. Partial-ignore reads the
-per-frame flag of the batch (`gt_traffic_cone_barrier_bbox_status`) and
-refuses to run without it. The scenario lists carry the flag, but the record
-table does not yet, so the T4 stages ship with `partial_ignore_classes: null`
-and these two classes train as plain classes. Once the database fills the
-flag, set `partial_ignore_classes=[traffic_cone,barrier]`.
+The T4 stages train `traffic_cone`/`barrier` with partial annotations
+(`model.partial_annotations`, as the other T4 detectors): a frame whose
+scenario is flagged as annotated without them does not supervise those two
+classes in either head, so the detector is not taught they are absent;
+annotated frames train them normally. The flag comes from the scenario lists
+through the record table (`traffic_cone_barrier_bbox_status`) and the batch
+(`gt_traffic_cone_barrier_bbox_status`); the model refuses a batch without
+it, so every scenario of the T4 stages has to carry the status. The nuScenes
+stage supervises every class (`partial_annotations: null`).
 
 The data is read from the record table of the database (built on first use
 under `cache_root_path`) and split by the scenario lists under
@@ -66,14 +80,16 @@ records; the training split reshuffles the scenes every epoch from the
 experiment `seed`.
 
 The `img_backbone` LR is always `lr * 0.1`, set via
-`model.optimizer_group_overrides.img_backbone.lr`. Validation runs every 5
-epochs; `best.ckpt` is selected by `val/det3d/mAP`.
+`model.optimizer_group_overrides.img_backbone.lr`. The LR schedule is bound
+to `trainer.max_epochs`. Validation runs every 5 epochs and then every epoch
+over the last 10 (`callbacks.dynamic_validation.epoch_intervals`);
+`best.ckpt` is selected by `val/det3d/mAP`.
 
 ### Stage 1 — nuScenes pretrain
 
 ```bash
 autoware-ml train \
-    --config-name detection3d/streampetr/vov_320x800_nuscenes_pretrain \
+    --config-name detection3d/streampetr/nuscenes/vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain \
     --weights <rgb_stem_vovnet_backbone.pth>
 ```
 
@@ -106,12 +122,12 @@ a loss spike/NaN means both LRs should back off (e.g. to 6e-4 / 6e-5).
 Accepted run: val mAP **0.5031** at epoch 29 (7-class; the upstream 10-class
 published result is 0.4697).
 
-### Stage 2 — T4 base DB
+### Stage 2 — T4 gen1 + gen2 base
 
 ```bash
 autoware-ml train \
-    --config-name detection3d/streampetr/vov_480x640_t4dataset_base \
-    --weights mlruns/detection3d/streampetr/vov_320x800_nuscenes_pretrain/<run_id>/artifacts/checkpoints/best.ckpt
+    --config-name detection3d/streampetr/t4dataset/vov99_cpfpn_480x640_b8_35e_t4dataset_51m_gen1_gen2_base \
+    --weights mlruns/streampetr/NuScenesDataset-base-v1.0.0/nuscenes/vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain/<run_id>/artifacts/checkpoints/best.ckpt
 ```
 
 Cross-stage checkpoint loads must report `Loaded matching weight tensors:
@@ -127,15 +143,18 @@ numbers are not directly comparable.
 
 ```bash
 autoware-ml train \
-    --config-name detection3d/streampetr/vov_480x640_t4dataset_j6gen2 \
-    --weights mlruns/detection3d/streampetr/vov_480x640_t4dataset_base/<run_id>/artifacts/checkpoints/best.ckpt
+    --config-name detection3d/streampetr/t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base \
+    --weights mlruns/streampetr/T4Dataset-gen1_base-v1.0.0/gen1_gen2_base/vov99_cpfpn_480x640_b8_35e_t4dataset_51m/<run_id>/artifacts/checkpoints/best.ckpt
 ```
 
-For a pipeline validation run add `+trainer.fast_dev_run=true`. For a short
-real run instead (e.g. `trainer.max_epochs=1`) also set
-`trainer.check_val_every_n_epoch=1`: validation defaults to every 5 epochs,
-and a run that finishes without ever validating fails at teardown. Full-length
-training is unaffected.
+Checkpoints are written to
+`mlruns/<experiment_group_name>/<experiment_name>/<run_id>/artifacts/checkpoints/`
+as `best.ckpt` and `last.ckpt`. For a pipeline validation run add
+`+trainer.fast_dev_run=true`. For a short real run instead (e.g.
+`trainer.max_epochs=1`) also set
+`callbacks.dynamic_validation.epoch_intervals=[[0,1]]`: validation defaults
+to every 5 epochs, and a run that finishes without ever validating fails at
+teardown. Full-length training is unaffected.
 
 Resuming an interrupted run: `--resume-checkpoint <last.ckpt>` (mutually
 exclusive with `--weights`; repeat every other CLI override, they are not
@@ -145,10 +164,11 @@ restored from the checkpoint; add `--new-run` only to fork a new MLflow run).
 
 ```bash
 autoware-ml test \
-    --config-name detection3d/streampetr/vov_480x640_t4dataset_j6gen2 \
-    --weights mlruns/detection3d/streampetr/vov_480x640_t4dataset_j6gen2/<run_id>/artifacts/checkpoints/best.ckpt \
-    trainer.devices=1
+    --config-name detection3d/streampetr/t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base \
+    --weights mlruns/streampetr/T4Dataset-j6gen2_base-v1.0.0/j6gen2_base/vov99_cpfpn_480x640_b16_35e_t4dataset_51m/<run_id>/artifacts/checkpoints/best.ckpt
 ```
+
+Evaluation runs on a single device by default so every frame is scored.
 
 The headline number is the `0-121m` bucket mAP, directly comparable to AWML
 T4MetricV2's `mAP_center_distance_bev` in the `bev_center_0.0-121.0`
@@ -158,9 +178,9 @@ evaluator (see the alignment notes below).
 
 ```bash
 autoware-ml deploy \
-    --config-name detection3d/streampetr/vov_480x640_t4dataset_j6gen2 \
-    --weights mlruns/.../checkpoints/best.ckpt \
-    deploy.tensorrt.enabled=false
+    --config-name detection3d/streampetr/t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base \
+    --weights mlruns/streampetr/T4Dataset-j6gen2_base-v1.0.0/j6gen2_base/vov99_cpfpn_480x640_b16_35e_t4dataset_51m/<run_id>/artifacts/checkpoints/best.ckpt \
+    --release v1.0.0
 ```
 
 The export traces the three graphs the runtime node binds
@@ -177,9 +197,10 @@ Final accepted stage-3 run (batch 64 / lr 4e-4, trained on the 2.8 info
 generation; an earlier batch-32 / lr 2e-4 run matched within ±0.5 pp on
 every headline number). The three stage `best.ckpt` files are archived on
 the training host under `~/ckpt_backup/`. These numbers predate the
-record-table data pipeline and the removal of the head's `use_bottom_center`
-shift, so the stages have to be retrained and re-measured on the current
-code.
+record-table data pipeline, the removal of the head's `use_bottom_center`
+shift, the anti-aliased image resize of the typed transforms and the partial
+annotations of the T4 stages, so the stages have to be retrained and
+re-measured on the current code.
 
 | Split | mAP (0-121m) | 0-50m  | 50-90m |
 | ----- | ------------ | ------ | ------ |
@@ -193,10 +214,10 @@ bucket is 0 by construction: `point_cloud_range` is ±51.2 m and
 
 The two weakest classes trace to the data, not the recipe: the accepted
 run's stage-2 infos lacked cone/barrier entirely (a 35-epoch supervision
-gap) and only part of the j6gen2 scenes carry them. The T4 base database
-includes both classes, and partial-ignore keeps the scenes without them from
-punishing their background once the per-frame flag reaches the batch — the
-expected fix for these two classes on the next training round.
+gap) and only part of the j6gen2 scenes carry them. The T4 base databases
+include both classes, and the partial annotations keep the scenes without
+them from punishing their background — the expected fix for these two
+classes on the next training round.
 
 For reference, the earlier AWML-checkpoint-conversion route on the same split
 scored val 0.3913 / test 0.3661, and AWML itself 0.3752 / 0.3552 — the
@@ -235,43 +256,48 @@ The accepted run read AWML-generated info files; the stages now read the
 record tables of the database. The `seven_class` taxonomy and the database
 box pipelines differ from those info files in a few places:
 
-| Ground truth                                             | Accepted run (info files) | Now (database)    |
-| -------------------------------------------------------- | ------------------------- | ----------------- |
-| forklift                                                 | car                       | truck             |
-| trailer without a truck to merge into                    | not a target              | truck             |
-| construction sign                                        | not a target              | barrier           |
-| truck–trailer merge distance                             | 2.0 m                     | 1.0 m             |
-| ground-plane velocity                                    | as annotated              | clipped at 25 m/s |
-| two-wheeler with `two_wheel_vehicle_state.without_rider` | kept                      | dropped           |
-| box recorded with fewer than 2 lidar points (training)   | kept                      | dropped           |
+| Ground truth                                                           | Accepted run (info files) | Now (database)                       |
+| ---------------------------------------------------------------------- | ------------------------- | ------------------------------------ |
+| forklift                                                               | car                       | truck                                |
+| trailer without a truck to merge into                                  | not a target              | truck                                |
+| construction sign                                                      | not a target              | barrier                              |
+| truck–trailer merge distance                                           | 2.0 m                     | 1.0 m                                |
+| ground-plane velocity                                                  | as annotated              | clipped at 25 m/s                    |
+| two-wheeler with `two_wheel_vehicle_state.without_rider`               | kept                      | dropped                              |
+| box recorded with fewer than 2 lidar points (training)                 | kept                      | dropped                              |
+| box with a non-finite velocity, a zero extent or a speed above 150 m/s | as annotated              | velocity zeroed, the others dropped  |
+| traffic cone / barrier of a scene annotated without them               | background                | not supervised (partial annotations) |
 
 The first three follow the coarse taxonomy every other T4 detector of the
 repository trains, the next three are the shared box pipelines and attribute
-filters of the T4 dataset configs, and the last is the point-count rule of the
+filters of the T4 dataset configs, the next is the point-count rule of the
 evaluation (`min_num_points: 2`) and of the other T4 detectors' training
 pipelines, read from the count the database records with every box since the
-camera pipelines load no point cloud.
+camera pipelines load no point cloud, and the last two are
+`BBoxesPhysicalFilter`, which opens every pipeline, and the partial
+annotations of the T4 stages.
 
 ## Implementation
 
-| Path                                                       | Description                                       |
-| ---------------------------------------------------------- | ------------------------------------------------- |
-| `autoware_ml/models/detection3d/streampetr.py`             | StreamPETR model wrapper                          |
-| `autoware_ml/models/detection3d/heads/streampetr.py`       | Query-based detection head                        |
-| `autoware_ml/models/detection3d/heads/focal2d.py`          | Auxiliary 2D head (FocalHead2D)                   |
-| `autoware_ml/models/detection3d/partial_ignore.py`         | Partial-ignore label handling                     |
-| `autoware_ml/models/common/backbones/vovnet.py`            | Multiview image backbone                          |
-| `autoware_ml/models/common/necks/cp_fpn.py`                | CPFPN neck (reference StreamPETR neck)            |
-| `autoware_ml/models/detection3d/task_modules/`             | Shared assigners, costs, coders, streaming memory |
-| `autoware_ml/datamodule/data_module.py`                    | `streaming` dataloaders (`GroupStreamingSampler`) |
-| `autoware_ml/datamodule/base_dataset.py`                   | Scene grouping of the record table                |
-| `autoware_ml/dataclasses/batch/frame_meta.py`              | Per-frame pose, scene and sample time             |
-| `autoware_ml/transforms/camera/annotations2d.py`           | 2D targets projected from the 3D boxes            |
-| `autoware_ml/transforms/camera/geometry.py`                | `ImageAug3D`, `CameraGlobalRotScaleTrans`         |
-| `autoware_ml/preprocessing/camera/normalize.py`            | Batched image normalization                       |
-| `autoware_ml/utils/schedulers/iter_warmup_epoch_cosine.py` | Warmup + epoch-cosine LR schedule                 |
-| `autoware_ml/configs/tasks/detection3d/streampetr/`        | Task configurations                               |
-| `autoware_ml/configs/database/t4dataset/taxonomy/`         | `seven_class` taxonomy of the T4 stages           |
+| Path                                                                 | Description                                       |
+| -------------------------------------------------------------------- | ------------------------------------------------- |
+| `autoware_ml/models/detection3d/streampetr.py`                       | StreamPETR model wrapper                          |
+| `autoware_ml/models/detection3d/heads/streampetr.py`                 | Query-based detection head                        |
+| `autoware_ml/models/detection3d/heads/focal2d.py`                    | Auxiliary 2D head (FocalHead2D)                   |
+| `autoware_ml/models/detection3d/task_modules/partial_annotations.py` | Annotated class masks of the partial annotations  |
+| `autoware_ml/models/common/backbones/vovnet.py`                      | Multiview image backbone                          |
+| `autoware_ml/models/common/necks/cp_fpn.py`                          | CPFPN neck (reference StreamPETR neck)            |
+| `autoware_ml/models/detection3d/task_modules/`                       | Shared assigners, costs, coders, streaming memory |
+| `autoware_ml/datamodule/data_module.py`                              | `streaming` dataloaders (`GroupStreamingSampler`) |
+| `autoware_ml/datamodule/base_dataset.py`                             | Scene grouping of the record table                |
+| `autoware_ml/dataclasses/batch/frame_meta.py`                        | Per-frame pose, scene and sample time             |
+| `autoware_ml/transforms/camera/annotations2d.py`                     | 2D targets projected from the 3D boxes            |
+| `autoware_ml/transforms/camera/resize.py`                            | `ResizeCropFlipRotImage`, the image augmentation  |
+| `autoware_ml/transforms/camera_lidar/geometry.py`                    | `GlobalRotScaleTrans`, camera-only here           |
+| `autoware_ml/preprocessing/camera/normalize.py`                      | Batched image normalization                       |
+| `autoware_ml/utils/schedulers/iter_warmup_epoch_cosine.py`           | Warmup + epoch-cosine LR schedule                 |
+| `autoware_ml/configs/tasks/detection3d/streampetr/`                  | Task configurations                               |
+| `autoware_ml/configs/database/t4dataset/taxonomy/`                   | `seven_class` taxonomy of the T4 stages           |
 
 An AWML/mmdet3d checkpoint converter
 (`autoware_ml/tools/convert_streampetr_checkpoint.py`) existed during the
