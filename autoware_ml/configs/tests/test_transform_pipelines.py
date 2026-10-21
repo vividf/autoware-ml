@@ -59,6 +59,26 @@ def test_cameras_load_before_the_lidar_augmentations_move_their_calibration(
         assert camera[0] < lidar[0]
 
 
+_GEOMETRIC_AUGMENTATIONS = _LIDAR_AUGMENTATIONS + ("camera.resize.ResizeCropFlipRotImage",)
+_ANNOTATIONS_2D = "camera.annotations2d.LoadAnnotations2DFromBoxes3D"
+
+
+@pytest.mark.parametrize(
+    "config, split, steps", _PIPELINES, ids=[f"{c}:{s}" for c, s, _ in _PIPELINES]
+)
+def test_2d_annotations_are_projected_after_every_geometric_augmentation(
+    config: str, split: str, steps: list[str]
+) -> None:
+    # The projection reads the augmented boxes and calibration, so every geometric
+    # augmentation (image and global 3D) must run first; a later one would leave the 2D
+    # targets silently wrong. Where the range filter goes is a recipe choice (the T4
+    # reference projects before it, the nuScenes one filters before augmenting).
+    annotations = [i for i, t in enumerate(steps) if t.endswith(_ANNOTATIONS_2D)]
+    geometric = [i for i, t in enumerate(steps) if t.endswith(_GEOMETRIC_AUGMENTATIONS)]
+    if annotations:
+        assert all(i < annotations[0] for i in geometric)
+
+
 _DETECTION3D_TEST = [
     (c, s, steps)
     for c, s, steps in _PIPELINES
