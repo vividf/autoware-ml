@@ -4,7 +4,7 @@
 # coarse taxonomy: the classes both share keep their coarse meaning, motorcycles train as
 # bicycles and debris as barriers (the two-wheeler and the static obstacle group, as the
 # previous seven-class mapping did), and animals are no targets.
-_target_: autoware_ml.databases.taxonomy.DetectionTaxonomy
+_target_: autoware_ml.databases.taxonomy.Detection3DTaxonomy
 
 defaults:
   - /database/t4dataset/taxonomy/vocabulary@vocabulary: default_detection3d
