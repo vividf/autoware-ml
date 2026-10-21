@@ -21,10 +21,9 @@ mapping from module names to :class:`ExportSpec` objects.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import inspect
 import logging
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +53,10 @@ class ExportSpec:
             the input and output names. The model declares them here, not in its config.
             The TorchScript exporter (``dynamo=False``) takes them as its ``dynamic_axes``;
             ``torch.export`` (``dynamo=True``) gets one ``Dim`` per name over the inputs.
+        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
+            after the export and before any config-driven graph modifier or precision
+            cast (each takes the path and returns the path it wrote). A stage graph
+            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`.
     """
 
     module: torch.nn.Module
@@ -61,6 +64,7 @@ class ExportSpec:
     input_names: list[str]
     output_names: list[str]
     dynamic_axes: dict[str, dict[int, str]] | None = None
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed, or an axis of no tensor.
@@ -88,6 +92,26 @@ class ExportSpec:
                 f"The export spec declares dynamic_axes for {unknown}, which are not among its "
                 f"inputs {self.input_names} or outputs {self.output_names}."
             )
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
+
+    Args:
+        onnx_path: The freshly exported ``.onnx``.
+        transforms: Callables taking the current path and returning the path they wrote
+            (usually the same file, rewritten in place).
+
+    Returns:
+        The path the last transform returned (``onnx_path`` when there is none).
+    """
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
 
 def validate_cuda_available() -> None:

@@ -25,6 +25,7 @@ from autoware_ml.deployment.stages import artifact_path
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.utils.deploy import (
     ExportSpec,
+    apply_onnx_transforms,
     merge_module_onnx_cfg,
     should_export_stage,
     export_to_onnx,
@@ -111,6 +112,12 @@ class DeploymentExport:
             if should_export_stage(self.deploy_cfg.onnx):
                 validate_module_onnx_precision(export_spec.module, module_onnx_cfg)
                 export_to_onnx(export_spec, module_onnx_cfg, module_onnx_path)
+                # Stage-declared rewrites first: they pattern-match the raw fp32
+                # export (plugin-node fusion); config-driven surgery and the
+                # precision cast see the fused graph.
+                module_onnx_path = apply_onnx_transforms(
+                    module_onnx_path, export_spec.onnx_transforms
+                )
                 modify_graph_cfg = module_onnx_cfg.get("modify_graph", None)
                 if should_modify_graph(modify_graph_cfg):
                     module_onnx_path = modify_onnx_graph(module_onnx_path, modify_graph_cfg)
