@@ -1,7 +1,7 @@
 # TensorRT plugins for sparse-convolution graphs
 
-Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_sparse`
-stage today) export ONNX nodes in the `autoware` domain —
+Models whose deployed graph contains sparse convolutions (BEVFusion's `bevfusion_lidar`
+graph, PTv3's `ptv3_encoder` / `ptv3_seg3d_head` graphs) export ONNX nodes in the `autoware` domain —
 `autoware::GetIndicePairsImplicitGemm` and `autoware::ImplicitGemm`. TensorRT has no
 implementation for them, so an engine build fails with
 
@@ -52,23 +52,7 @@ Without `PLUGINS_SRC` the script fetches the `PLUGINS_REPO` / `PLUGINS_REF` pinn
 top of `build_plugin.sh` (a commit SHA); override them, with a branch, tag or SHA, to build
 a different source (a feature branch for an A/B build, say).
 
-### Sparse INT8
-
-A deploy config whose sparse tower is quantized (`*_int8_spconv`) exports `ImplicitGemm`
-nodes with `precision=1` plus `channel_scale` / `bias_scaled` inputs. Upstream `main` has no
-INT8 path in that plugin yet, so build from the branch that does:
-
-```bash
-PLUGINS_REPO=https://github.com/vividf/autoware.universe.git \
-PLUGINS_REF=feat/tensorrt-plugins-implicit-gemm-int8 \
-  bash docker/tensorrt_plugins/build_plugin.sh
-```
-
-`build_plugin.sh` says which of the two paths the source it used exposes (`do_sort`,
-`precision`), and `CMakeLists.txt` compiles `quantize_ops/quantize_features.cu` when the
-source has it.
-
-## Two traps worth knowing
+## Three traps worth knowing
 
 1. **Header/runtime version match.** The pip TensorRT wheels ship libraries but no C++
    headers, and Ubuntu's `libnvinfer-dev` is usually a different major.minor. Building
@@ -80,6 +64,12 @@ source has it.
 2. **The `do_sort` attribute.** The graphs exported by `autoware_ml.ops.spconv` set
    `do_sort` on `GetIndicePairsImplicitGemm`. A plugin built from a source tree without
    that attribute rejects them; `build_plugin.sh` warns when the source lacks it.
+3. **The index-buffer limit.** `GetIndicePairsImplicitGemm` sizes its hash table and pair
+   buffers statically, for `out_indices_num_limit_` input voxels: 512000 since
+   autoware_universe#13300, 256000 before. A plugin built from an older tree aborts the
+   process on a denser frame (`alloc failed, tensor size too small`), which reads like a
+   memory problem, not a version one; PTv3 multi-sweep frames reach ~290k voxels. The
+   pinned revision includes #13300.
 
 ## CUDA architectures
 
