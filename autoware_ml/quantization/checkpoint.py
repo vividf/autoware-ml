@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 #: Top-level checkpoint key holding the quantization description.
 QUANTIZATION_KEY = "quantization"
+#: Version of the embedded payload. Bump when ``to_payload`` changes shape or meaning;
+#: the loader refuses a checkpoint of another version instead of mis-reading it.
+FORMAT_VERSION = 1
 
 #: ``config`` keys an earlier payload may carry that no longer exist: ``fuse_bn`` was a
 #: flag whose only accepted value was ``true`` (BN is always folded before calibration),
@@ -54,10 +57,10 @@ _DROPPED_CONFIG_KEYS = frozenset({"fuse_bn"})
 class QuantizationDescription:
     """What a quantized checkpoint says about itself.
 
-    The embedded format carries no version field on purpose: checkpoints are
-    reproducible artifacts (re-run ``autoware-ml quantize``), and a format drift
-    fails loudly anyway — ``QuantizationConfig.from_dict`` rejects unknown keys and
-    a missing key raises here.
+    The payload carries :data:`FORMAT_VERSION`; a checkpoint of another version is
+    refused with a pointer to re-run ``autoware-ml quantize`` (checkpoints are
+    reproducible artifacts). Inside one version, ``QuantizationConfig.from_dict``
+    rejects unknown keys and a missing key raises here.
     """
 
     config: QuantizationConfig
@@ -66,6 +69,7 @@ class QuantizationDescription:
     def to_payload(self) -> dict[str, Any]:
         """Serialize for embedding under :data:`QUANTIZATION_KEY`."""
         return {
+            "format": FORMAT_VERSION,
             "config": self.config.to_dict(),
             "placement_record": self.placement_record.to_json_dict(),
         }
@@ -79,6 +83,12 @@ class QuantizationDescription:
                 checkpoint predates a format change; re-produce it with
                 ``autoware-ml quantize``.
         """
+        version = payload.get("format")
+        if version != FORMAT_VERSION:
+            raise ValueError(
+                f"Quantized checkpoint payload format {version!r} is not the supported "
+                f"{FORMAT_VERSION}; re-produce it with `autoware-ml quantize`."
+            )
         # Keys a payload could carry before the option was removed (always at the only
         # value the plan accepted) read as the current behaviour.
         config = {k: v for k, v in payload["config"].items() if k not in _DROPPED_CONFIG_KEYS}
