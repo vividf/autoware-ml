@@ -22,7 +22,6 @@ import torch
 
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.utils.checkpoints import apply_matching_weights
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +48,7 @@ def build_model(
     set_eval: bool = False,
     enforce_full_coverage: bool = False,
     skip_mismatched_weights: bool = False,
+    allow_quantized_weights: bool = True,
 ) -> ModuleBaseModel:
     """
     Build a model from the Hydra configuration.
@@ -63,6 +63,11 @@ def build_model(
         enforce_full_coverage: Whether to enforce that all model parameters are covered by the weights.
         skip_mismatched_weights: Whether to skip, with a warning, weight tensors whose key matches a
             model tensor of a different shape instead of raising.
+        allow_quantized_weights: Whether a checkpoint carrying an embedded quantization
+            description (written by ``autoware-ml quantize``) may be loaded: its quantized
+            module tree is rebuilt from the description before the weights load, so the model
+            comes back quantized. ``False`` refuses such a checkpoint, for stages that need
+            the floating-point model (training, the quantize stage itself).
 
     Returns:
         Pytorch-Lightning ModuleBaseModel for multi-task learning/inference.
@@ -77,15 +82,20 @@ def build_model(
     model = instantiate(cfg.model, data_preprocessor=data_preprocessor).to(device)
 
     if weights_path is not None:
-        apply_matching_weights(
+        # A quantized checkpoint describes itself: the identical quantized module tree is
+        # rebuilt from its embedded description before the weights load. Nothing here reads
+        # a `quantization` config section; an FP checkpoint takes the plain matching-weights
+        # path. The import is local: the quantization engine is only needed with weights.
+        from autoware_ml.quantization.loader import load_model_weights
+
+        load_model_weights(
             model,
             weights_path,
-            map_location=device,
-            device=device,
-            logger=logger,
+            device,
+            set_eval=set_eval,
             enforce_full_coverage=enforce_full_coverage,
             skip_mismatched_shapes=skip_mismatched_weights,
-            set_eval=set_eval,
+            allow_quantized=allow_quantized_weights,
         )
 
     if resume_checkpoint_path is not None:
