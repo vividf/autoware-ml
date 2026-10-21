@@ -26,13 +26,28 @@ from dataclasses import dataclass, field
 import torch
 from scipy.optimize import linear_sum_assignment
 
-from autoware_ml.models.detection3d.task_modules.assigners import AssignResult
 from autoware_ml.models.detection3d.task_modules.boxes2d import (
     bbox_cxcywh_to_xyxy,
     bbox_overlaps,
     bbox_xyxy_to_cxcywh,
 )
 from autoware_ml.models.detection3d.task_modules.match_costs import ClassificationCost
+
+
+@dataclass(frozen=True)
+class AssignResult2D:
+    """Assignment of the dense proposals of one image to its ground truth.
+
+    Attributes:
+        num_gts: Number of ground-truth boxes of the image.
+        gt_inds: Assigned ground-truth index of every proposal, offset by one; background
+            proposals carry 0.
+        labels: Assigned class label of every proposal, -1 for background.
+    """
+
+    num_gts: int
+    gt_inds: torch.Tensor
+    labels: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -105,7 +120,7 @@ class HungarianAssigner2D:
         gt_centers2d: torch.Tensor,
         image_height: int,
         image_width: int,
-    ) -> AssignResult:
+    ) -> AssignResult2D:
         """Assign each proposal to background (0) or a 1-based ground-truth index.
 
         Args:
@@ -129,16 +144,15 @@ class HungarianAssigner2D:
         assigned_gt_inds = bbox_pred.new_zeros((num_queries,), dtype=torch.long)
         assigned_labels = bbox_pred.new_full((num_queries,), -1, dtype=torch.long)
         if num_gts == 0 or num_queries == 0:
-            return AssignResult(
-                num_gts=num_gts,
-                gt_inds=assigned_gt_inds,
-                max_overlaps=None,
-                labels=assigned_labels,
-            )
+            return AssignResult2D(num_gts=num_gts, gt_inds=assigned_gt_inds, labels=assigned_labels)
 
         factor = gt_bboxes.new_tensor([image_width, image_height, image_width, image_height])
+        # The classification cost is batched over padded ground truth; one image is a batch
+        # of one whose ground truth is all valid.
+        valid_masks = torch.ones((1, num_gts), dtype=torch.bool, device=gt_labels.device)
+        cls_cost = self.cls_cost(cls_pred.unsqueeze(0), gt_labels.unsqueeze(0), valid_masks)[0]
         cost = (
-            self.cls_cost(cls_pred, gt_labels)
+            cls_cost
             + self.reg_cost(bbox_pred, gt_bboxes / factor)
             + self.iou_cost(bbox_cxcywh_to_xyxy(bbox_pred) * factor, gt_bboxes)
             + self.centers2d_cost(pred_centers2d, gt_centers2d / factor[:2])
@@ -149,9 +163,4 @@ class HungarianAssigner2D:
         matched_cols = torch.as_tensor(matched_cols, device=bbox_pred.device, dtype=torch.long)
         assigned_gt_inds[matched_rows] = matched_cols + 1
         assigned_labels[matched_rows] = gt_labels[matched_cols].long()
-        return AssignResult(
-            num_gts=num_gts,
-            gt_inds=assigned_gt_inds,
-            max_overlaps=None,
-            labels=assigned_labels,
-        )
+        return AssignResult2D(num_gts=num_gts, gt_inds=assigned_gt_inds, labels=assigned_labels)
