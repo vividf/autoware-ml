@@ -253,6 +253,7 @@ class BEVFusionDetectionModel(ModuleBaseModel):
         scheduler: Callable[[Optimizer], LRScheduler] | None = None,
         metrics: Sequence[MetricSuite] | None = None,
         partial_annotations: PartialAnnotations | None = None,
+        scheduler_config: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize BEVFusion.
 
@@ -268,6 +269,8 @@ class BEVFusionDetectionModel(ModuleBaseModel):
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
             metrics: Detection metrics accumulated during validation and test.
+            scheduler_config: Lightning scheduler metadata (``interval``, ``monitor`` ...),
+                see :class:`~autoware_ml.models.module_base_model.ModuleBaseModel`.
             partial_annotations: Maps the dataset's per-sample annotation flag to the classes
                 the head must not supervise in that sample. None supervises every class.
 
@@ -279,6 +282,7 @@ class BEVFusionDetectionModel(ModuleBaseModel):
             data_preprocessor=data_preprocessor,
             optimizer=optimizer,
             scheduler=scheduler,
+            scheduler_config=scheduler_config,
             metrics=metrics,
             log_dict_configs=log_dict_configs,
         )

@@ -132,6 +132,7 @@ class CenterPointDetectionModel(ModuleBaseModel):
         optimizer: Callable[..., Optimizer] | None = None,
         scheduler: Callable[[Optimizer], LRScheduler] | None = None,
         metrics: Sequence[MetricSuite] | None = None,
+        scheduler_config: Mapping[str, Any] | None = None,
     ) -> None:
         """
         Initialize CenterPoint.
@@ -147,11 +148,14 @@ class CenterPointDetectionModel(ModuleBaseModel):
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
             metrics: Detection metrics accumulated during validation and test.
+            scheduler_config: Lightning scheduler metadata (``interval``, ``monitor`` ...),
+                see :class:`~autoware_ml.models.module_base_model.ModuleBaseModel`.
         """
         super().__init__(
             data_preprocessor=data_preprocessor,
             optimizer=optimizer,
             scheduler=scheduler,
+            scheduler_config=scheduler_config,
             metrics=metrics,
             log_dict_configs=log_dict_configs,
         )
