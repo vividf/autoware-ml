@@ -454,6 +454,37 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
             "outputs of its deployed graphs cannot be scored."
         )
 
+    def build_quantization_rules(self) -> Any | None:
+        """Declare which submodules carry which quantizable module kinds, or ``None``.
+
+        A :class:`~autoware_ml.quantization.plan.QuantRules` object stating, per
+        submodule (a dotted attribute path), the module kinds (``conv`` / ``linear`` /
+        ``spconv``) the quantize stage may replace and the architecture recipes that
+        apply. It is an architecture fact and lives in code; the ``quantization`` config
+        only subtracts from it (``skip_quantize`` / ``disable_recipes``). ``None`` means
+        the model does not support quantization.
+        """
+        return None
+
+    def build_quantization_plan(self, quantization_config: Any) -> Any:
+        """Bind the model's quantization rules to a parsed ``quantization`` config.
+
+        The same plan builds the same quantized module tree in every stage — PTQ, QAT and
+        the deploy / test loader — so a calibrated ``state_dict`` lines up by construction.
+
+        Raises:
+            NotImplementedError: When the model declares no quantization rules.
+        """
+        from autoware_ml.quantization.plan import QuantizationPlan
+
+        rules = self.build_quantization_rules()
+        if rules is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares no quantization rules "
+                "(build_quantization_rules returned None), so it cannot be quantized."
+            )
+        return QuantizationPlan(rules=rules, config=quantization_config)
+
     def build_export_specs(
         self, multi_task_batch_inputs: ModelBatchInputs
     ) -> dict[str, ExportSpec]:
