@@ -20,6 +20,7 @@ forward pass runs through spconv CUDA kernels and is tested on the GPU only.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 
 from spconv.pytorch import SparseConv3d as NativeSparseConv3d
@@ -123,12 +124,14 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
         the bias the fold introduces, while the training encoder keeps its BN layers.
         """
         self.encoder.eval()
-        export_encoder = self.encoder.prepare_for_export()
+        export_encoder = deepcopy(self.encoder)
         batch_norm = self.encoder.conv_input[1]
 
         fused = fold_sparse_encoder_bn(export_encoder)
+        export_encoder = export_encoder.prepare_for_export()
 
         self.assertGreater(fused, 0)
+        self.assertIsInstance(export_encoder.conv_input[0], ExportableSubMConv3d)
         self.assertFalse(
             any(isinstance(module, nn.BatchNorm1d) for module in export_encoder.modules())
         )
@@ -161,7 +164,7 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
         encoder.conv_input = SparseSequential(conv, nn.Identity(), norm, encoder.conv_input[2])
 
         with self.assertRaisesRegex(RuntimeError, "survived the export fold"):
-            fold_sparse_encoder_bn(encoder.prepare_for_export())
+            fold_sparse_encoder_bn(encoder.eval())
 
     def test_prepare_for_export_keeps_the_grid_configuration(self) -> None:
         """Test that the export copy keeps the sparse and dense grid shapes of the original."""

@@ -19,6 +19,7 @@ and the error paths that fire before any TensorRT work."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -291,6 +292,44 @@ class TestOutputLayout:
         assert not (tmp_path / "exports" / "head_modified.onnx").exists()
         initializers = onnx.load(str(tmp_path / "exports" / "head.onnx")).graph.initializer
         assert "modified_marker" in {initializer.name for initializer in initializers}
+
+    def test_stage_declared_transforms_rewrite_the_export_before_the_modifiers(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Input: a spec declaring an ``onnx_transforms`` rewrite that moves the graph to another
+            file, and no graph modifier.
+        Expected: the rewrite runs on the freshly exported file; its result is stamped and
+            shipped as the module's artifact.
+        Check: the paths the transform saw and the reported outputs.
+        """
+        seen: list[Path] = []
+
+        def move_aside(path: Path) -> Path:
+            seen.append(path)
+            target = path.with_name("head_fused.onnx")
+            path.rename(target)
+            return target
+
+        class _TransformModel(_ExportModel):
+            def build_export_specs(self, multi_task_batch_inputs):
+                specs = super().build_export_specs(multi_task_batch_inputs)
+                return {
+                    name: replace(spec, onnx_transforms=(move_aside,))
+                    for name, spec in specs.items()
+                }
+
+        exporter = _exporter(
+            tmp_path, _deploy_cfg({"head": {"dynamo": False}}), model=_TransformModel()
+        )
+
+        outputs = exporter.export()
+
+        assert seen == [tmp_path / "exports" / "head.onnx"]
+        # The rewrite's file is moved back to the module's artifact name.
+        assert list(outputs.onnx_exported_paths) == [tmp_path / "exports" / "head.onnx"]
+        assert not (tmp_path / "exports" / "head_fused.onnx").exists()
+        assert _metadata(onnx.load(str(outputs.onnx_exported_paths[0])))["module"] == "head"
 
     def test_disabled_stages_export_nothing(self, tmp_path: Path) -> None:
         """
