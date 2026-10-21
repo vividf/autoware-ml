@@ -27,8 +27,10 @@ projecting the 3D boxes onto each camera
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from jaxtyping import Bool
 import torch
 import torch.nn as nn
 
@@ -38,11 +40,6 @@ from autoware_ml.losses.detection2d.losses import (
     HeatmapGaussianFocalLoss,
     QualityFocalLoss,
     WeightedL1Loss,
-)
-from autoware_ml.models.detection3d.partial_ignore import (
-    mask_ignored_columns,
-    normalize_status_flags,
-    resolve_partial_ignore_labels,
 )
 from autoware_ml.models.detection3d.task_modules.assigners2d import HungarianAssigner2D
 from autoware_ml.models.detection3d.task_modules.boxes2d import (
@@ -123,7 +120,7 @@ class FocalHead2D(nn.Module):
 
     def __init__(
         self,
-        num_classes: int,
+        class_names: Sequence[str],
         in_channels: int = 256,
         embed_dims: int = 256,
         stride: int = 16,
@@ -133,13 +130,12 @@ class FocalHead2D(nn.Module):
         loss_iou_weight: float = 2.0,
         loss_centers2d_weight: float = 10.0,
         loss_centerness_weight: float = 1.0,
-        class_names: list[str] | None = None,
-        partial_ignore_classes: list[str] | None = None,
     ) -> None:
         """Initialize the auxiliary 2D head.
 
         Args:
-            num_classes: Number of detector classes.
+            class_names: Ordered names of the detector classes. Their count is the number
+                of classification channels.
             in_channels: Neck feature channels.
             embed_dims: Hidden channels of the shared conv towers.
             stride: Feature-map stride relative to the padded image.
@@ -149,19 +145,14 @@ class FocalHead2D(nn.Module):
             loss_iou_weight: GIoU loss weight.
             loss_centers2d_weight: Projected-center L1 loss weight.
             loss_centerness_weight: Gaussian-heatmap centerness loss weight.
-            class_names: Ordered detector class names (for partial-ignore).
-            partial_ignore_classes: Class names that are only partially
-                annotated across scenes.
         """
         super().__init__()
         if embed_dims % 32 != 0:
             raise ValueError(f"embed_dims must be a multiple of 32 (GroupNorm), got {embed_dims}.")
-        self.num_classes = num_classes
+        self.class_names = list(class_names)
+        self.num_classes = len(self.class_names)
         self.stride = stride
         self.assigner = assigner if assigner is not None else HungarianAssigner2D()
-        self.partial_ignore_labels = resolve_partial_ignore_labels(
-            class_names, partial_ignore_classes
-        )
 
         self.shared_cls = nn.Sequential(
             nn.Conv2d(in_channels, embed_dims, kernel_size=3, padding=1),
@@ -173,7 +164,7 @@ class FocalHead2D(nn.Module):
             nn.GroupNorm(32, num_channels=embed_dims),
             nn.ReLU(),
         )
-        self.cls = nn.Conv2d(embed_dims, num_classes, kernel_size=1)
+        self.cls = nn.Conv2d(embed_dims, self.num_classes, kernel_size=1)
         self.centerness = nn.Conv2d(embed_dims, 1, kernel_size=1)
         self.ltrb = nn.Conv2d(embed_dims, 4, kernel_size=1)
         self.center2d = nn.Conv2d(embed_dims, 2, kernel_size=1)
@@ -317,7 +308,7 @@ class FocalHead2D(nn.Module):
         gt_bboxes_2d: list[list[torch.Tensor]],
         gt_labels_2d: list[list[torch.Tensor]],
         centers_2d: list[list[torch.Tensor]],
-        annotation_status: list[bool] | torch.Tensor | None = None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute the five auxiliary 2D losses.
 
@@ -327,9 +318,10 @@ class FocalHead2D(nn.Module):
                 unnormalized ``(x1, y1, x2, y2)`` pixels.
             gt_labels_2d: Per-sample, per-camera class labels.
             centers_2d: Per-sample, per-camera projected 3D centers in pixels.
-            annotation_status: Per-sample annotation-completeness flags for
-                partial-ignore; required when ``partial_ignore_classes`` is
-                configured.
+            gt_annotated_class_masks: True where a class is annotated in a sample; every
+                image of a sample weights its classification by the row of its sample, so
+                the background terms of the unannotated classes are dropped. None
+                supervises every class of every image.
 
         Returns:
             Loss dictionary with ``loss_*2d`` keys.
@@ -354,13 +346,17 @@ class FocalHead2D(nn.Module):
             tensor = torch.as_tensor(value, dtype=torch.float32, device=device)
             return tensor.reshape(-1, columns)
 
+        if gt_annotated_class_masks is not None and gt_annotated_class_masks.shape != (
+            batch_size,
+            self.num_classes,
+        ):
+            raise ValueError(
+                "gt_annotated_class_masks must have shape (batch_size, num_classes) = "
+                f"{(batch_size, self.num_classes)}, got {tuple(gt_annotated_class_masks.shape)}."
+            )
+
         targets: list[_Targets2D] = []
         heatmaps = []
-        image_status: list[bool] = []
-        if self.partial_ignore_labels is not None:
-            annotation_status = normalize_status_flags(annotation_status, batch_size)
-        else:
-            annotation_status = [True] * batch_size
         for sample_index in range(batch_size):
             for camera_index in range(num_cams):
                 image_index = sample_index * num_cams + camera_index
@@ -384,7 +380,6 @@ class FocalHead2D(nn.Module):
                 heatmaps.append(
                     self._build_heatmap(gt_centers, gt_bboxes, image_height, image_width, device)
                 )
-                image_status.append(annotation_status[sample_index])
 
         labels = torch.cat([target.labels for target in targets], dim=0)
         bbox_targets = torch.cat([target.bbox_targets for target in targets], dim=0)
@@ -408,8 +403,8 @@ class FocalHead2D(nn.Module):
         ).detach()
 
         flat_cls_scores = cls_scores.reshape(-1, self.num_classes)
-        class_weights = self._partial_ignore_class_weights(
-            flat_cls_scores, image_status, cls_scores.size(1)
+        class_weights = self._class_weights(
+            gt_annotated_class_masks, num_cams, cls_scores.size(1), cls_scores.dtype
         )
         loss_cls = self.loss_cls2d(
             flat_cls_scores,
@@ -443,19 +438,21 @@ class FocalHead2D(nn.Module):
             "loss_centerness2d": loss_centerness,
         }
 
-    def _partial_ignore_class_weights(
+    def _class_weights(
         self,
-        flat_cls_scores: torch.Tensor,
-        image_status: list[bool],
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None,
+        num_cams: int,
         tokens_per_image: int,
+        dtype: torch.dtype,
     ) -> torch.Tensor | None:
-        """Zero partially annotated class columns on unannotated images."""
-        if self.partial_ignore_labels is None or all(image_status):
+        """Broadcast the annotated class mask of every sample to the tokens of its images."""
+        if gt_annotated_class_masks is None:
             return None
-        class_weights = flat_cls_scores.new_ones(flat_cls_scores.shape)
-        for image_index, status in enumerate(image_status):
-            if not status:
-                start = image_index * tokens_per_image
-                rows = torch.arange(start, start + tokens_per_image, device=flat_cls_scores.device)
-                mask_ignored_columns(class_weights, rows, self.partial_ignore_labels)
-        return class_weights
+        # (batch, C) -> (batch * num_cams, C): the images of a sample follow each other.
+        per_image = gt_annotated_class_masks.repeat_interleave(num_cams, dim=0)
+        return (
+            per_image.unsqueeze(1)
+            .expand(-1, tokens_per_image, -1)
+            .reshape(-1, self.num_classes)
+            .to(dtype=dtype)
+        )

@@ -26,6 +26,7 @@ from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
+from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.task_modules.streaming import (
     memory_refresh,
     transform_reference_points,
@@ -225,6 +226,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         bbox_head: StreamPETRHead,
         log_dict_configs: LogDictConfigs,
         img_roi_head: FocalHead2D | None = None,
+        partial_annotations: PartialAnnotations | None = None,
         optimizer: Callable[..., Optimizer] | None = None,
         scheduler: Callable[[Optimizer], LRScheduler] | None = None,
         optimizer_group_overrides: Mapping[str, Mapping[str, Any]] | None = None,
@@ -242,6 +244,8 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
             img_roi_head: Optional auxiliary 2D head that supervises the image features
                 in training (Focal-PETR style); inference and the exported graphs never
                 run it.
+            partial_annotations: Maps the dataset's per-sample annotation flag to the classes
+                the heads must not supervise in that sample. None supervises every class.
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
             optimizer_group_overrides: Optimizer overrides keyed by the groups of
@@ -263,6 +267,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         )
         self.bbox_head = bbox_head
         self.img_roi_head = img_roi_head
+        self.partial_annotations = partial_annotations
 
     # The memory bank needs lane-contiguous batches.
     requires_streaming: ClassVar[bool] = True
@@ -363,8 +368,8 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
     ) -> dict[str, torch.Tensor]:
         """Compute the head's detection and denoising losses plus the auxiliary 2D losses.
 
-        The traffic cone / barrier annotation status of every frame drives the
-        partial-ignore of the heads that configure it.
+        With ``partial_annotations`` the annotation flag of every frame becomes the mask of
+        the classes both heads supervise in that frame.
 
         Args:
             multi_task_batch_inputs: Model inputs holding the 3D ground truth, and in
@@ -383,10 +388,16 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         if gt_detections is None:
             raise ValueError("StreamPETR losses need the 3D detection ground truth of the batch.")
         gt_boxes, gt_labels = _ground_truth(gt_detections)
-        annotation_status = gt_detections.gt_traffic_cone_barrier_bbox_status
+        gt_annotated_class_masks = (
+            self.partial_annotations.build_annotated_class_masks(
+                gt_detections.gt_traffic_cone_barrier_bbox_status
+            )
+            if self.partial_annotations is not None
+            else None
+        )
         head_outputs = multi_task_outputs.detection3d().streampetr_head()
         losses = self.bbox_head.loss(
-            head_outputs, gt_boxes, gt_labels, annotation_status=annotation_status
+            head_outputs, gt_boxes, gt_labels, gt_annotated_class_masks=gt_annotated_class_masks
         )
         if self.img_roi_head is not None and self.training:
             detection2d = gt_batch.detection2d_gt_batch
@@ -400,7 +411,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
                 gt_bboxes_2d=detection2d.valid_bboxes_2d(),
                 gt_labels_2d=detection2d.valid_labels_2d(),
                 centers_2d=detection2d.valid_centers_2d(),
-                annotation_status=annotation_status,
+                gt_annotated_class_masks=gt_annotated_class_masks,
             )
             losses.update(roi_losses)
             losses["loss"] = losses["loss"] + sum(

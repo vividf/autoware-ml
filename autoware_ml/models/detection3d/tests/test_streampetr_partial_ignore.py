@@ -1,4 +1,4 @@
-"""Tests for StreamPETR partial-ignore and the auxiliary 2D head."""
+"""Tests for the partial annotations of the StreamPETR heads and the auxiliary 2D head."""
 
 from __future__ import annotations
 
@@ -10,11 +10,6 @@ from autoware_ml.dataclasses.models.detection3d.head_outputs import StreamPETRHe
 from autoware_ml.losses.detection3d.focal import SigmoidFocalLoss
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
-from autoware_ml.models.detection3d.partial_ignore import (
-    mask_ignored_columns,
-    normalize_status_flags,
-    resolve_partial_ignore_labels,
-)
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import NMSFreeBBoxCoder3D
 from autoware_ml.models.detection3d.task_modules.match_costs import (
@@ -22,13 +17,20 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
     ClassificationCost,
     IoU3DCost,
 )
+from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 
 CLASS_NAMES = ["car", "truck", "bus", "bicycle", "pedestrian", "traffic_cone", "barrier"]
+PARTIAL_ANNOTATIONS = PartialAnnotations(CLASS_NAMES, ["traffic_cone", "barrier"])
+POINT_CLOUD_RANGE = [-10.0, -10.0, -5.0, 10.0, 10.0, 5.0]
 
 
-def _build_head(partial_ignore: bool) -> StreamPETRHead:
+def _masks(status: list[bool]) -> torch.Tensor:
+    return PARTIAL_ANNOTATIONS.build_annotated_class_masks(torch.tensor(status))
+
+
+def _build_head() -> StreamPETRHead:
     return StreamPETRHead(
-        num_classes=7,
+        class_names=CLASS_NAMES,
         in_channels=32,
         hidden_dim=32,
         num_queries=16,
@@ -48,7 +50,7 @@ def _build_head(partial_ignore: bool) -> StreamPETRHead:
         dn_weight=1.0,
         split=0.5,
         bbox_coder=NMSFreeBBoxCoder3D(
-            pc_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
+            pc_range=POINT_CLOUD_RANGE,
             post_center_range=[-12.0, -12.0, -6.0, 12.0, 12.0, 6.0],
             score_threshold=0.01,
             max_num=8,
@@ -57,40 +59,19 @@ def _build_head(partial_ignore: bool) -> StreamPETRHead:
             cls_cost=ClassificationCost(weight=2.0),
             reg_cost=BBox3DL1Cost(weight=0.25),
             iou_cost=IoU3DCost(weight=0.0),
+            point_cloud_range=POINT_CLOUD_RANGE,
         ),
-        point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
+        point_cloud_range=POINT_CLOUD_RANGE,
         code_weights=[2.0, 2.0] + [1.0] * 8,
-        class_names=CLASS_NAMES if partial_ignore else None,
-        partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
     )
 
 
-def test_resolve_partial_ignore_labels() -> None:
-    assert resolve_partial_ignore_labels(CLASS_NAMES, ["traffic_cone", "barrier"]) == [5, 6]
-    assert resolve_partial_ignore_labels(CLASS_NAMES, None) is None
-
-
-def test_normalize_status_flags_handles_tensors_and_lists() -> None:
-    assert normalize_status_flags([True, False], 2) == [True, False]
-    assert normalize_status_flags(torch.tensor([1.0, 0.0]), 2) == [True, False]
-    assert normalize_status_flags([torch.tensor(False), torch.tensor(True)], 2) == [False, True]
-
-
-def test_normalize_status_flags_rejects_missing_and_mismatched_flags() -> None:
-    with pytest.raises(ValueError, match="annotation_status is required"):
-        normalize_status_flags(None, 2)
-    with pytest.raises(ValueError, match="2 flags for a batch of 3"):
-        normalize_status_flags([True, False], 3)
-
-
-def test_mask_ignored_columns_zeroes_selected_rows_only() -> None:
-    weights = torch.ones(4, 7)
-    mask_ignored_columns(weights, torch.tensor([1, 3]), [5, 6])
-    assert torch.all(weights[[1, 3]][:, [5, 6]] == 0.0)
-    assert torch.all(weights[[0, 2]] == 1.0)
-    assert torch.all(weights[:, :5] == 1.0)
-    # No rows selected: a no-op.
-    mask_ignored_columns(weights, torch.zeros(0, dtype=torch.long), [5, 6])
+def test_partial_annotations_mask_only_the_cone_and_barrier_columns() -> None:
+    masks = _masks([True, False])
+    assert masks.shape == (2, 7)
+    assert masks[0].all()
+    assert not masks[1, [5, 6]].any()
+    assert masks[1, :5].all()
 
 
 def test_sigmoid_focal_loss_classwise_weights_zero_masked_columns() -> None:
@@ -109,8 +90,8 @@ def test_sigmoid_focal_loss_classwise_weights_zero_masked_columns() -> None:
     assert torch.allclose(masked, manual, atol=1e-6)
 
 
-def test_get_targets_zeroes_ignore_columns_on_every_query_of_unannotated_frames() -> None:
-    head = _build_head(partial_ignore=True)
+def test_get_targets_weights_every_query_by_the_mask_of_its_frame() -> None:
+    head = _build_head()
     num_queries = 16
     cls_logits = torch.randn(1, num_queries, 7)
     box_params = torch.randn(1, num_queries, 10)
@@ -118,7 +99,7 @@ def test_get_targets_zeroes_ignore_columns_on_every_query_of_unannotated_frames(
     gt_boxes = [torch.tensor([[0.0, 0.0, 0.0, 4.0, 2.0, 1.5, 0.1, 0.0, 0.0]], dtype=torch.float32)]
     gt_labels = [torch.tensor([0], dtype=torch.long)]
 
-    targets = head._get_targets(cls_logits, box_params, gt_boxes, gt_labels, [False])[0]
+    targets = head._get_targets(cls_logits, box_params, gt_boxes, gt_labels, _masks([False]))[0]
     assert targets.label_weights is not None
     assert targets.label_weights.shape == (num_queries, 7)
 
@@ -126,29 +107,27 @@ def test_get_targets_zeroes_ignore_columns_on_every_query_of_unannotated_frames(
     assert torch.all(targets.label_weights[:, [5, 6]] == 0.0)
     assert torch.all(targets.label_weights[:, :5] == 1.0)
 
-    # A fully annotated batch skips the classwise-weight tensors entirely.
-    annotated = head._get_targets(cls_logits, box_params, gt_boxes, gt_labels, [True])[0]
-    assert annotated.label_weights is None
+    # Without a mask the weights stay uniform (None).
+    plain = head._get_targets(cls_logits, box_params, gt_boxes, gt_labels)[0]
+    assert plain.label_weights is None
 
-    # In a mixed batch every sample gets a weights tensor; the annotated one
-    # stays all-ones so the stacked tensor is uniform.
+    # In a mixed batch every sample carries its own row.
     mixed = head._get_targets(
         cls_logits.repeat(2, 1, 1),
         box_params.repeat(2, 1, 1),
         gt_boxes * 2,
         gt_labels * 2,
-        [True, False],
+        _masks([True, False]),
     )
     assert torch.all(mixed[0].label_weights == 1.0)
     assert torch.all(mixed[1].label_weights[:, [5, 6]] == 0.0)
 
 
-def test_dn_label_weights_mask_all_rows_of_unannotated_samples() -> None:
-    head = _build_head(partial_ignore=True)
+def test_dn_label_weights_mask_every_denoising_query_of_unannotated_samples() -> None:
+    head = _build_head()
     cls_scores = torch.randn(6, 7)
-    known_labels = torch.tensor([0, 7, 7, 1, 7, 5])
     known_bids = torch.tensor([0, 0, 1, 1, 1, 0])
-    weights = head._dn_label_weights(cls_scores, known_labels, known_bids, [True, False])
+    weights = head._dn_label_weights(cls_scores, known_bids, _masks([True, False]))
     assert weights is not None
     # Every row of sample 1 (indices 2, 3, 4) is masked on columns 5/6.
     assert torch.all(weights[[2, 3, 4]][:, [5, 6]] == 0.0)
@@ -156,13 +135,12 @@ def test_dn_label_weights_mask_all_rows_of_unannotated_samples() -> None:
     # Rows of the annotated sample 0 stay fully weighted.
     assert torch.all(weights[[0, 1, 5]] == 1.0)
 
-    assert head._dn_label_weights(cls_scores, known_labels, known_bids, [True, True]) is None
+    assert head._dn_label_weights(cls_scores, known_bids, None) is None
 
 
-def test_head_loss_wiring_applies_annotation_status() -> None:
-    """head.loss must thread the status flags through to the focal loss."""
+def test_head_loss_applies_the_annotated_class_masks() -> None:
     torch.manual_seed(0)
-    head = _build_head(partial_ignore=True).eval()
+    head = _build_head().eval()
     outputs = StreamPETRHeadOutputs(
         all_cls_scores=torch.randn(2, 1, 16, 7),
         all_bbox_preds=torch.rand(2, 1, 16, 10),
@@ -171,31 +149,23 @@ def test_head_loss_wiring_applies_annotation_status() -> None:
     gt_boxes = [torch.tensor([[0.0, 0.0, 0.0, 4.0, 2.0, 1.5, 0.1, 0.0, 0.0]], dtype=torch.float32)]
     gt_labels = [torch.tensor([0], dtype=torch.long)]
 
-    annotated = head.loss(outputs, gt_boxes, gt_labels, annotation_status=torch.tensor([True]))
-    ignored = head.loss(outputs, gt_boxes, gt_labels, annotation_status=torch.tensor([False]))
-    # Masking removes non-negative background terms from the cls loss only.
+    plain = head.loss(outputs, gt_boxes, gt_labels)
+    annotated = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([True]))
+    ignored = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([False]))
+    # An all-True mask is the plain loss; masking removes non-negative background terms from
+    # the classification loss only.
+    torch.testing.assert_close(annotated["loss"], plain["loss"])
     assert ignored["loss_cls"] < annotated["loss_cls"]
     assert torch.allclose(ignored["loss_bbox"], annotated["loss_bbox"])
 
-    with pytest.raises(ValueError, match="annotation_status is required"):
-        head.loss(outputs, gt_boxes, gt_labels)
-
-    # Heads without partial-ignore never require the flags.
-    plain_head = _build_head(partial_ignore=False).eval()
-    plain_losses = plain_head.loss(outputs, gt_boxes, gt_labels)
-    assert torch.isfinite(plain_losses["loss"])
+    with pytest.raises(ValueError, match="batch_size, num_classes"):
+        head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([True, False]))
 
 
-def test_focal_head_2d_forward_and_loss_with_partial_ignore() -> None:
+def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None:
     torch.manual_seed(0)
-    head = FocalHead2D(
-        num_classes=7,
-        in_channels=32,
-        embed_dims=32,
-        stride=16,
-        class_names=CLASS_NAMES,
-        partial_ignore_classes=["traffic_cone", "barrier"],
-    )
+    head = FocalHead2D(class_names=CLASS_NAMES, in_channels=32, embed_dims=32, stride=16)
+    assert head.num_classes == 7
     batch_size, num_cams = 2, 2
     img_features = torch.randn(batch_size, num_cams, 32, 6, 10)
     outputs = head(img_features, image_height=96, image_width=160)
@@ -217,7 +187,7 @@ def test_focal_head_2d_forward_and_loss_with_partial_ignore() -> None:
         "centers_2d": [[gt_centers, empty_centers], [empty_centers, empty_centers]],
     }
 
-    losses = head.loss(outputs, annotation_status=[True, False], **annotations)
+    losses = head.loss(outputs, gt_annotated_class_masks=_masks([True, False]), **annotations)
     for key in (
         "loss_cls2d",
         "loss_bbox2d",
@@ -229,31 +199,26 @@ def test_focal_head_2d_forward_and_loss_with_partial_ignore() -> None:
 
     # Masking removes strictly positive background terms of sample 1's images
     # and touches nothing else.
-    unmasked = head.loss(outputs, annotation_status=[True, True], **annotations)
+    unmasked = head.loss(outputs, gt_annotated_class_masks=_masks([True, True]), **annotations)
+    plain = head.loss(outputs, **annotations)
+    torch.testing.assert_close(unmasked["loss_cls2d"], plain["loss_cls2d"])
     assert losses["loss_cls2d"] < unmasked["loss_cls2d"]
     for key in ("loss_bbox2d", "loss_iou2d", "loss_centers2d", "loss_centerness2d"):
         assert torch.allclose(losses[key], unmasked[key]), key
 
-    with pytest.raises(ValueError, match="annotation_status is required"):
-        head.loss(outputs, **annotations)
+    with pytest.raises(ValueError, match="batch_size, num_classes"):
+        head.loss(outputs, gt_annotated_class_masks=_masks([True]), **annotations)
 
 
-def test_focal_head_2d_partial_ignore_class_weights_select_exact_rows() -> None:
-    head = FocalHead2D(
-        num_classes=7,
-        in_channels=32,
-        embed_dims=32,
-        class_names=CLASS_NAMES,
-        partial_ignore_classes=["traffic_cone", "barrier"],
-    )
+def test_focal_head_2d_class_weights_follow_the_images_of_every_sample() -> None:
+    head = FocalHead2D(class_names=CLASS_NAMES, in_channels=32, embed_dims=32)
     tokens_per_image = 3
-    flat_scores = torch.randn(4 * tokens_per_image, 7)
-    weights = head._partial_ignore_class_weights(
-        flat_scores, [True, False, False, True], tokens_per_image
-    )
+    num_cams = 2
+    weights = head._class_weights(_masks([True, False]), num_cams, tokens_per_image, torch.float32)
     assert weights is not None
-    expected = torch.ones_like(flat_scores)
-    expected[3:9, 5:7] = 0.0
+    expected = torch.ones(2 * num_cams * tokens_per_image, 7)
+    # The two images of sample 1 are rows 6..11.
+    expected[6:12, 5:7] = 0.0
     assert torch.equal(weights, expected)
 
-    assert head._partial_ignore_class_weights(flat_scores, [True] * 4, tokens_per_image) is None
+    assert head._class_weights(None, num_cams, tokens_per_image, torch.float32) is None

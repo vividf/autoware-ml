@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
+from jaxtyping import Bool
 import torch
 import torch.nn as nn
 
@@ -21,11 +22,6 @@ from autoware_ml.dataclasses.models.detection3d.head_outputs import (
 )
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.losses.detection3d.focal import SigmoidFocalLoss
-from autoware_ml.models.detection3d.partial_ignore import (
-    mask_ignored_columns,
-    normalize_status_flags,
-    resolve_partial_ignore_labels,
-)
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import (
     NMSFreeBBoxCoder3D,
@@ -156,8 +152,8 @@ class StreamPETRTargets:
 
     labels: torch.Tensor  # [Q] assigned class, -1 for unmatched queries
     bbox_targets: torch.Tensor  # [Q, 9] matched ground-truth box, zeros where unmatched
-    # [Q, num_classes] classification weights used by partial-ignore;
-    # ``None`` means uniform weights.
+    # [Q, num_classes] classification weights, the annotated class mask of the sample
+    # broadcast to every query; ``None`` means uniform weights.
     label_weights: torch.Tensor | None = None
 
 
@@ -206,7 +202,6 @@ class StreamPETRHead(nn.Module):
         noise_scale: float = 1.0,
         dn_weight: float = 1.0,
         split: float = 0.75,
-        partial_ignore_classes: list[str] | None = None,
         max_stream_gap: float | None = None,
     ) -> None:
         """Initialize the head.
@@ -237,9 +232,6 @@ class StreamPETRHead(nn.Module):
             )
         self.class_names = list(class_names)
         self.num_classes = len(self.class_names)
-        self.partial_ignore_labels = resolve_partial_ignore_labels(
-            self.class_names, partial_ignore_classes
-        )
         self.num_queries = num_queries
         self.num_decoder_layers = num_decoder_layers
         self.hidden_dim = hidden_dim
@@ -836,19 +828,18 @@ class StreamPETRHead(nn.Module):
         box_params: torch.Tensor,
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
-        annotation_status: list[bool] | None = None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
     ) -> list[StreamPETRTargets]:
         """Match the queries of one decoder layer to the ground truth of every sample.
 
         The assigner works on the padded ``[batch, max_num_gts]`` layout, so the per-sample
         lists are padded for one call per layer and the matches are read back per sample.
+        ``gt_annotated_class_masks`` marks the classes annotated in every sample; the mask
+        of a sample becomes the classification weight of every one of its queries, so the
+        background terms of its unannotated classes are dropped (no ground truth of those
+        classes can exist there) while every other term is unchanged.
         """
         batch_size, num_queries = cls_logits.shape[:2]
-        use_classwise_weights = (
-            self.partial_ignore_labels is not None
-            and annotation_status is not None
-            and not all(annotation_status)
-        )
         max_num_gts = max(boxes.shape[0] for boxes in gt_boxes)
         padded_boxes = box_params.new_zeros((batch_size, max_num_gts, 9))
         padded_labels = torch.full(
@@ -882,18 +873,12 @@ class StreamPETRHead(nn.Module):
                 bbox_targets[pos_inds] = padded_boxes[index, matched_gt_inds]
 
             label_weights = None
-            if use_classwise_weights:
-                label_weights = cls_logits.new_ones((num_queries, self.num_classes))
-                if not annotation_status[index]:
-                    # Zero the ignored class columns on every query of the
-                    # un-annotated frame (same semantics as FocalHead2D): no
-                    # GT of those classes can exist here, so only their
-                    # background terms are dropped.
-                    mask_ignored_columns(
-                        label_weights,
-                        torch.arange(num_queries, device=label_weights.device),
-                        self.partial_ignore_labels,
-                    )
+            if gt_annotated_class_masks is not None:
+                label_weights = (
+                    gt_annotated_class_masks[index]
+                    .to(dtype=cls_logits.dtype)
+                    .expand(num_queries, self.num_classes)
+                )
             targets.append(
                 StreamPETRTargets(
                     labels=labels, bbox_targets=bbox_targets, label_weights=label_weights
@@ -907,9 +892,11 @@ class StreamPETRHead(nn.Module):
         bbox_preds: torch.Tensor,
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
-        annotation_status: list[bool] | None = None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        targets = self._get_targets(cls_scores, bbox_preds, gt_boxes, gt_labels, annotation_status)
+        targets = self._get_targets(
+            cls_scores, bbox_preds, gt_boxes, gt_labels, gt_annotated_class_masks
+        )
 
         target_labels = []
         positive_counts = []
@@ -970,36 +957,21 @@ class StreamPETRHead(nn.Module):
         bbox_preds = denoising.bbox_preds.permute(1, 2, 0, 3)[selection].permute(1, 0, 2)
         return cls_scores, bbox_preds
 
+    @staticmethod
     def _dn_label_weights(
-        self,
         cls_scores: torch.Tensor,
-        known_labels: torch.Tensor,
         known_bids: torch.Tensor | None,
-        annotation_status: list[bool] | None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None,
     ) -> torch.Tensor | None:
-        """Build partial-ignore class weights for denoising queries.
+        """Build the classification weights of the denoising queries.
 
-        Every denoising query of an un-annotated frame drops the ignored class
-        columns (same semantics as :meth:`_get_targets`): those classes carry
-        no ground truth there, so only their background terms are removed.
+        Every denoising query carries the annotated class mask of its sample (same semantics
+        as :meth:`_get_targets`): the unannotated classes carry no ground truth there, so
+        only their background terms are removed.
         """
-        if (
-            self.partial_ignore_labels is None
-            or known_bids is None
-            or known_bids.numel() == 0
-            or annotation_status is None
-            or all(annotation_status)
-        ):
+        if gt_annotated_class_masks is None or known_bids is None or known_bids.numel() == 0:
             return None
-        status_tensor = torch.as_tensor(
-            annotation_status, device=known_labels.device, dtype=torch.bool
-        )
-        ignore_rows = torch.nonzero(~status_tensor[known_bids.long()], as_tuple=False).squeeze(-1)
-        if ignore_rows.numel() == 0:
-            return None
-        label_weights = cls_scores.new_ones((known_labels.shape[0], self.num_classes))
-        mask_ignored_columns(label_weights, ignore_rows, self.partial_ignore_labels)
-        return label_weights
+        return gt_annotated_class_masks[known_bids.long()].to(dtype=cls_scores.dtype)
 
     def dn_loss_single(
         self,
@@ -1009,7 +981,7 @@ class StreamPETRHead(nn.Module):
         known_labels: torch.Tensor,
         num_total_pos: float,
         known_bids: torch.Tensor | None = None,
-        annotation_status: list[bool] | None = None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute denoising-query supervision for one decoder layer.
 
@@ -1022,9 +994,7 @@ class StreamPETRHead(nn.Module):
         foreground = known_labels < self.num_classes
         if foreground.any():
             class_targets[foreground, known_labels[foreground]] = 1.0
-        label_weights = self._dn_label_weights(
-            cls_scores, known_labels, known_bids, annotation_status
-        )
+        label_weights = self._dn_label_weights(cls_scores, known_bids, gt_annotated_class_masks)
         # The classification average factor scales the target count by the
         # expected positive rate of the noised queries (reference recipe):
         # a ball of radius ``split`` inside the unit noise cube.
@@ -1192,28 +1162,33 @@ class StreamPETRHead(nn.Module):
         outputs: StreamPETRHeadOutputs,
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
-        annotation_status: torch.Tensor | list[bool] | None = None,
+        gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute multi-layer StreamPETR losses.
 
         ``gt_boxes`` are metric ``[cx, cy, cz, l, w, h, yaw, vx, vy]`` boxes and
         ``gt_labels`` their int64 class indices, one tensor per sample.
-        ``annotation_status`` carries one flag per sample (``False`` = the
-        frame's scene lacks the partially annotated classes); it is required
-        whenever ``partial_ignore_classes`` is configured.
+        ``gt_annotated_class_masks`` is True where a class is annotated in a sample (see
+        :class:`~autoware_ml.models.detection3d.task_modules.partial_annotations.PartialAnnotations`);
+        None supervises every class of every sample.
         """
         all_cls_scores = outputs.all_cls_scores
         all_bbox_preds = outputs.all_bbox_preds
-        if self.partial_ignore_labels is not None:
-            annotation_status = normalize_status_flags(annotation_status, len(gt_boxes))
-        else:
-            annotation_status = None
+        if gt_annotated_class_masks is not None and gt_annotated_class_masks.shape != (
+            len(gt_boxes),
+            self.num_classes,
+        ):
+            raise ValueError(
+                "gt_annotated_class_masks must have shape (batch_size, num_classes) = "
+                f"{(len(gt_boxes), self.num_classes)}, got "
+                f"{tuple(gt_annotated_class_masks.shape)}."
+            )
 
         losses_cls = []
         losses_bbox = []
         for cls_scores, bbox_preds in zip(all_cls_scores, all_bbox_preds):
             loss_cls, loss_bbox = self._loss_single(
-                cls_scores, bbox_preds, gt_boxes, gt_labels, annotation_status
+                cls_scores, bbox_preds, gt_boxes, gt_labels, gt_annotated_class_masks
             )
             losses_cls.append(loss_cls)
             losses_bbox.append(loss_bbox)
@@ -1271,7 +1246,7 @@ class StreamPETRHead(nn.Module):
                     known_labels,
                     dn_avg_factor,
                     known_bids=known_bids,
-                    annotation_status=annotation_status,
+                    gt_annotated_class_masks=gt_annotated_class_masks,
                 )
                 dn_losses_cls.append(dn_loss_cls)
                 dn_losses_bbox.append(dn_loss_bbox)

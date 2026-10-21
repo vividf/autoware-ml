@@ -22,6 +22,7 @@ from autoware_ml.models.detection3d.streampetr import StreamPETRDetection3DModel
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import NMSFreeBBoxCoder3D
 from autoware_ml.models.detection3d.task_modules.streaming import StreamContinuity
+from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.task_modules.match_costs import (
     BBox3DL1Cost,
     ClassificationCost,
@@ -86,19 +87,17 @@ def _build_model(
         data_preprocessor=DataPreprocessor(preprocessor_modules=[]),
         img_backbone=_TinyMultiScaleBackbone(),
         img_neck=GeneralizedLSSFPN(in_channels=[128, 256, 512], out_channels=128),
-        bbox_head=_build_head(partial_ignore=partial_ignore),
+        bbox_head=_build_head(),
         log_dict_configs=LogDictConfigs(prog_bar=False),
         img_roi_head=img_roi_head,
+        partial_annotations=(
+            PartialAnnotations(CLASS_NAMES, ["traffic_cone", "barrier"]) if partial_ignore else None
+        ),
         metrics=metrics,
     )
 
 
-def _build_head(
-    memory_len: int = 32,
-    topk_proposals: int = 8,
-    num_propagated: int = 8,
-    partial_ignore: bool = False,
-):
+def _build_head(memory_len: int = 32, topk_proposals: int = 8, num_propagated: int = 8):
     return StreamPETRHead(
         class_names=CLASS_NAMES,
         in_channels=128,
@@ -135,7 +134,6 @@ def _build_head(
         ),
         point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
         code_weights=[2.0, 2.0] + [1.0] * 8,
-        partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
     )
 
 
@@ -734,16 +732,9 @@ def test_forward_sanitizes_nan_poisoned_memory() -> None:
     assert torch.isfinite(head_outputs.all_bbox_preds).all()
 
 
-def _build_focal_head(partial_ignore: bool = False) -> FocalHead2D:
-    return FocalHead2D(
-        num_classes=3,
-        in_channels=128,
-        embed_dims=32,
-        # The tiny neck emits its tokens at stride 8.
-        stride=8,
-        class_names=CLASS_NAMES,
-        partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
-    )
+def _build_focal_head() -> FocalHead2D:
+    # The tiny neck emits its tokens at stride 8.
+    return FocalHead2D(class_names=CLASS_NAMES, in_channels=128, embed_dims=32, stride=8)
 
 
 def _with_2d_boxes(batch_inputs: ModelBatchInputs) -> ModelBatchInputs:
@@ -830,19 +821,21 @@ def test_evaluation_skips_the_auxiliary_2d_head() -> None:
     assert "loss_cls2d" not in losses
 
 
-def test_partial_ignore_reads_the_cone_barrier_status_of_the_batch() -> None:
+def test_partial_annotations_mask_the_cone_barrier_terms_of_unannotated_frames() -> None:
     torch.manual_seed(0)
-    model = _build_model(partial_ignore=True).eval()
-    batch_inputs = _one_box_batch()
-    with torch.no_grad():
-        outputs = _run(model, batch_inputs)
+    model = _build_model(img_roi_head=_build_focal_head(), partial_ignore=True).train()
+    batch_inputs = _with_2d_boxes(_one_box_batch())
+    outputs = _run(model, batch_inputs)
 
     annotated = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [True]), outputs)
     ignored = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [False]), outputs)
 
-    # Dropping the cone and barrier background terms lowers only the classification loss.
+    # Dropping the cone and barrier background terms lowers only the classification losses
+    # of both heads.
     assert ignored["loss_cls"] < annotated["loss_cls"]
-    torch.testing.assert_close(ignored["loss_bbox"], annotated["loss_bbox"])
-    # The flag is required as soon as partial-ignore is configured.
+    assert ignored["loss_cls2d"] < annotated["loss_cls2d"]
+    for key in ("loss_bbox", "loss_bbox2d", "loss_iou2d", "loss_centers2d", "loss_centerness2d"):
+        torch.testing.assert_close(ignored[key], annotated[key])
+    # The flag is required as soon as partial annotations are configured.
     with pytest.raises(ValueError, match="gt_traffic_cone_barrier_bbox_status"):
         model.compute_metrics(batch_inputs, outputs)
