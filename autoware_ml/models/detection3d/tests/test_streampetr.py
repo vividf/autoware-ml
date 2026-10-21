@@ -82,24 +82,30 @@ def _build_model(
     metrics: Sequence[MetricSuite] | None = None,
     img_roi_head: FocalHead2D | None = None,
     partial_ignore: bool = False,
+    class_names: Sequence[str] = CLASS_NAMES,
 ) -> StreamPETRDetection3DModel:
     return StreamPETRDetection3DModel(
         data_preprocessor=DataPreprocessor(preprocessor_modules=[]),
         img_backbone=_TinyMultiScaleBackbone(),
         img_neck=GeneralizedLSSFPN(in_channels=[128, 256, 512], out_channels=128),
-        bbox_head=_build_head(),
+        bbox_head=_build_head(class_names=class_names),
         log_dict_configs=LogDictConfigs(prog_bar=False),
         img_roi_head=img_roi_head,
         partial_annotations=(
-            PartialAnnotations(CLASS_NAMES, ["traffic_cone", "barrier"]) if partial_ignore else None
+            PartialAnnotations(class_names, ["traffic_cone", "barrier"]) if partial_ignore else None
         ),
         metrics=metrics,
     )
 
 
-def _build_head(memory_len: int = 32, topk_proposals: int = 8, num_propagated: int = 8):
+def _build_head(
+    memory_len: int = 32,
+    topk_proposals: int = 8,
+    num_propagated: int = 8,
+    class_names: Sequence[str] = CLASS_NAMES,
+):
     return StreamPETRHead(
-        class_names=CLASS_NAMES,
+        class_names=class_names,
         in_channels=128,
         hidden_dim=128,
         num_queries=32,
@@ -732,9 +738,9 @@ def test_forward_sanitizes_nan_poisoned_memory() -> None:
     assert torch.isfinite(head_outputs.all_bbox_preds).all()
 
 
-def _build_focal_head() -> FocalHead2D:
+def _build_focal_head(class_names: Sequence[str] = CLASS_NAMES) -> FocalHead2D:
     # The tiny neck emits its tokens at stride 8.
-    return FocalHead2D(class_names=CLASS_NAMES, in_channels=128, embed_dims=32, stride=8)
+    return FocalHead2D(class_names=class_names, in_channels=128, embed_dims=32, stride=8)
 
 
 def _with_2d_boxes(batch_inputs: ModelBatchInputs) -> ModelBatchInputs:

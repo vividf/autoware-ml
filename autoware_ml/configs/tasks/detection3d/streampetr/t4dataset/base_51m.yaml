@@ -17,7 +17,7 @@ camera_names: [CAM_FRONT, CAM_FRONT_LEFT, CAM_BACK_LEFT, CAM_FRONT_RIGHT, CAM_BA
 
 # Largest GT distance of every class, from the detection taxonomy of the database. The GT of
 # the training and the evaluation pipelines is limited to the +-51.2 m pc_range SQUARE by
-# BBoxesRangeFilter, and the seven_class taxonomy evaluates every class up to 121 m, a no-op
+# BBoxesRangeFilter, and the dynamic taxonomy evaluates every class up to 121 m, a no-op
 # inside the square. A radial cap at the pc_range would remove the square's corners from the
 # GT while corner predictions stayed and became guaranteed FPs, a semantics AWML's T4MetricV2
 # (bev buckets, radial on both GT and predictions) cannot reproduce. The headline 0-121m mAP

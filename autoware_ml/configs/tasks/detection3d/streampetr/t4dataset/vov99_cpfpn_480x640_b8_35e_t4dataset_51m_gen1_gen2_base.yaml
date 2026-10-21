@@ -11,8 +11,8 @@ defaults:
   - /datamodule/t4dataset/datasets/detection3d@datasets.gen2_test: default_detection3d_test_dataset
   - /database@database: t4dataset/t4dataset_gen1_base
   - /database@gen2_database: t4dataset/t4dataset_gen2_base
-  - override /database/t4dataset/taxonomy@database.taxonomy: seven_class
-  - override /database/t4dataset/taxonomy@gen2_database.taxonomy: seven_class
+  - override /database/t4dataset/taxonomy@database.taxonomy: default_dynamic
+  - override /database/t4dataset/taxonomy@gen2_database.taxonomy: default_dynamic
   - _self_
 
 batch_size: 8

@@ -1,9 +1,0 @@
-# Seven-class taxonomy of T4dataset: the coarse segmentation classes and the seven detection
-# classes the camera detectors train
-_target_: autoware_ml.databases.taxonomy.DatabaseTaxonomy
-_convert_: all
-
-defaults:
-  - /database/t4dataset/taxonomy/detection3d@detection3d: seven_class
-  - /database/t4dataset/taxonomy/segmentation3d@segmentation3d: default_coarse
-  - _self_

@@ -23,7 +23,11 @@ from omegaconf import OmegaConf
 from autoware_ml.configs.tests.test_task_configs import EXPERIMENT_CONFIGS, compose_experiment
 
 STAGES = [config for config in EXPERIMENT_CONFIGS if "/streampetr/" in config]
-SEVEN_CLASSES = ["car", "truck", "bus", "bicycle", "pedestrian", "traffic_cone", "barrier"]
+# The nuScenes taxonomy and the dynamic T4 taxonomy are the same seven classes with the last
+# two swapped. Stage 1 -> 2 therefore crosses taxonomies: `--weights` loads by shape, so the
+# classification rows of the stage-1 checkpoint are permuted first (docs/models/streampetr.md).
+NUSCENES_CLASSES = ["car", "truck", "bus", "bicycle", "pedestrian", "traffic_cone", "barrier"]
+T4_CLASSES = ["car", "truck", "bus", "bicycle", "pedestrian", "barrier", "traffic_cone"]
 
 
 def test_the_three_stages_are_bundled() -> None:
@@ -35,17 +39,19 @@ def test_the_three_stages_are_bundled() -> None:
 
 
 @pytest.mark.parametrize("config_name", STAGES)
-def test_every_stage_streams_the_seven_classes_in_the_same_order(config_name: str) -> None:
+def test_every_stage_streams_the_seven_classes_of_its_taxonomy(config_name: str) -> None:
     cfg = compose_experiment(config_name)
 
-    # Every stage trains the same classes in the same order, so a stage initializes from the
-    # previous one without dropping or permuting the classification layers.
+    # Every stage trains the seven classes in the order of its database taxonomy: the nuScenes
+    # order in stage 1, the dynamic T4 order (the one the other T4 detectors train and the
+    # deployed node decodes) in stages 2 and 3, on both databases of stage 2.
+    expected = T4_CLASSES if "/t4dataset/" in config_name else NUSCENES_CLASSES
     for database in (cfg.database, cfg.get("gen2_database")):
         if database is not None:
             taxonomy = hydra.utils.instantiate(database.taxonomy)
-            assert list(taxonomy.detection3d.class_names) == SEVEN_CLASSES
-    assert list(OmegaConf.to_container(cfg.model.bbox_head.class_names)) == SEVEN_CLASSES
-    assert list(OmegaConf.to_container(cfg.model.img_roi_head.class_names)) == SEVEN_CLASSES
+            assert list(taxonomy.detection3d.class_names) == expected
+    assert list(OmegaConf.to_container(cfg.model.bbox_head.class_names)) == expected
+    assert list(OmegaConf.to_container(cfg.model.img_roi_head.class_names)) == expected
     # The head carries a temporal memory across batches, so every dataloader streams scenes.
     assert cfg.datamodule.streaming
     assert not cfg.datamodule.train_dataloader.shuffle
@@ -72,7 +78,12 @@ def test_t4_stages_ignore_the_cones_and_barriers_of_the_scenes_without_them(
 ) -> None:
     cfg = compose_experiment(config_name)
     partial_annotations = hydra.utils.instantiate(cfg.model.partial_annotations)
+    # The pair resolves by name, whichever order the taxonomy lists it in.
     assert list(partial_annotations.partial_ignore_class_ids) == [5, 6]
+    assert {T4_CLASSES[index] for index in partial_annotations.partial_ignore_class_ids} == {
+        "traffic_cone",
+        "barrier",
+    }
 
 
 def test_the_nuscenes_stage_supervises_every_class() -> None:

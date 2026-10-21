@@ -51,16 +51,44 @@ exact recipe (GPU count, per-GPU batch, LRs) of the accepted run. There is no
 | 2     | `t4dataset/vov99_cpfpn_480x640_b8_35e_t4dataset_51m_gen1_gen2_base` | `t4dataset_gen1_base` + `t4dataset_gen2_base` | 35     | 32 / 2e-4        | stage-1 `best.ckpt`            |
 | 3     | `t4dataset/vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base`   | `t4dataset_j6gen2_base`                       | 35     | 64 / 4e-4        | stage-2 `best.ckpt`            |
 
-`--weights` accepts the previous stage's Lightning checkpoint directly — no
-conversion between stages. Every stage trains the same 7 classes in the same
-order (car, truck, bus, bicycle, pedestrian, traffic_cone, barrier): the T4
-stages select the `seven_class` taxonomy of the database, which is the
-`default_dynamic` taxonomy with its last two classes in the nuScenes order
-(`default_dynamic` lists barrier before traffic_cone; a checkpoint loads into
-either, so the order must be pinned, not checked). Motorcycles train as
-bicycles, debris and pushable/pullable objects as barriers, and animals are no
-targets. Stage 2 reads the gen1 and the gen2 base corpora as two dataset
-sources of one datamodule, both under the same taxonomy.
+`--weights` accepts the previous stage's Lightning checkpoint directly, and
+stage 2 -> 3 needs nothing else. Every stage trains the same 7 classes, but
+stage 1 -> 2 crosses taxonomies whose last two classes are swapped: the
+nuScenes taxonomy lists `car, truck, bus, bicycle, pedestrian, traffic_cone,
+barrier`, the T4 stages select the `default_dynamic` taxonomy of the database
+(the one the other T4 detectors train), which lists `barrier, traffic_cone`.
+`--weights` loads by shape, so a stage-1 checkpoint loads into stage 2 without
+a warning and the rows of class 5 and 6 of the `bbox_head.cls_branches.*`
+final Linear layers (one per decoder layer, 6 in the production head) and of
+the `img_roi_head.cls` conv (FocalHead2D) would be swapped silently: the
+decoder would start stage 2 scoring barriers as traffic cones. Permute those
+rows of the stage-1 checkpoint into the T4 order first (no other tensor
+depends on the class order):
+
+```python
+import torch
+
+NUSCENES = ["car", "truck", "bus", "bicycle", "pedestrian", "traffic_cone", "barrier"]
+T4 = ["car", "truck", "bus", "bicycle", "pedestrian", "barrier", "traffic_cone"]
+rows = [NUSCENES.index(name) for name in T4]  # [0, 1, 2, 3, 4, 6, 5]
+
+checkpoint = torch.load("stage1_best.ckpt", map_location="cpu", weights_only=False)
+state = checkpoint["state_dict"]
+for key, value in list(state.items()):
+    is_decoder_cls = key.startswith("bbox_head.cls_branches.") and value.shape[0] == len(T4)
+    if is_decoder_cls or key.startswith("img_roi_head.cls."):
+        state[key] = value[rows].clone()
+torch.save(checkpoint, "stage1_best_t4_order.ckpt")
+```
+
+`autoware_ml/models/detection3d/tests/test_streampetr_class_permutation.py`
+checks this permutation: the per-class logits of the permuted model are those
+of the source model with the columns reordered. Motorcycles train as bicycles,
+debris and pushable/pullable objects as barriers, and animals are no targets.
+Stage 2 reads the gen1 and the gen2 base corpora as two dataset sources of one
+datamodule, both under the same taxonomy. The deployed node's class list
+follows the export metainfo order: barrier before traffic_cone for a
+T4-trained model.
 
 The T4 stages train `traffic_cone`/`barrier` with partial annotations
 (`model.partial_annotations`, as the other T4 detectors): a frame whose
@@ -127,12 +155,15 @@ published result is 0.4697).
 ```bash
 autoware-ml train \
     --config-name detection3d/streampetr/t4dataset/vov99_cpfpn_480x640_b8_35e_t4dataset_51m_gen1_gen2_base \
-    --weights mlruns/streampetr/NuScenesDataset-base-v1.0.0/nuscenes/vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain/<run_id>/artifacts/checkpoints/best.ckpt
+    --weights stage1_best_t4_order.ckpt
 ```
 
+`stage1_best_t4_order.ckpt` is the stage-1 `best.ckpt` with its
+classification rows permuted into the T4 class order (see the snippet above);
+the raw stage-1 checkpoint loads too, with the cone and barrier rows swapped.
 Cross-stage checkpoint loads must report `Loaded matching weight tensors:
 894/894` — full coverage, nothing dropped (the nuScenes and T4 stages share the
-same 7-class head).
+same 7-class head shapes).
 
 Accepted run: val mAP **0.4420** at epoch 34. That run used the older
 5-class base infos (no cone/barrier at all — a 35-epoch supervision gap for
@@ -239,7 +270,7 @@ Two evaluation-side conditions make mAP comparable with AWML T4MetricV2:
    `BBoxesRangeFilter`. An additional radial cap at 51.2/54 m removed the
    square's corners from the GT while corner *predictions* stayed and became
    guaranteed false positives — a semantics T4MetricV2 (radial on both GT
-   and predictions) cannot reproduce. The `seven_class` taxonomy therefore
+   and predictions) cannot reproduce. The `default_dynamic` taxonomy therefore
    evaluates every class up to 121 m (a no-op inside the square), and the
    T4 distance buckets mirror T4MetricV2's (0-50 / 50-90 / 90-121 / 0-121 m).
 
@@ -253,7 +284,7 @@ test` on one device scores every frame.
 ### Ground truth against the accepted run
 
 The accepted run read AWML-generated info files; the stages now read the
-record tables of the database. The `seven_class` taxonomy and the database
+record tables of the database. The `default_dynamic` taxonomy and the database
 box pipelines differ from those info files in a few places:
 
 | Ground truth                                                           | Accepted run (info files) | Now (database)                       |
@@ -297,7 +328,7 @@ annotations of the T4 stages.
 | `autoware_ml/preprocessing/camera/normalize.py`                      | Batched image normalization                       |
 | `autoware_ml/utils/schedulers/iter_warmup_epoch_cosine.py`           | Warmup + epoch-cosine LR schedule                 |
 | `autoware_ml/configs/tasks/detection3d/streampetr/`                  | Task configurations                               |
-| `autoware_ml/configs/database/t4dataset/taxonomy/`                   | `seven_class` taxonomy of the T4 stages           |
+| `autoware_ml/configs/database/t4dataset/taxonomy/`                   | `default_dynamic` taxonomy of the T4 stages       |
 
 An AWML/mmdet3d checkpoint converter
 (`autoware_ml/tools/convert_streampetr_checkpoint.py`) existed during the

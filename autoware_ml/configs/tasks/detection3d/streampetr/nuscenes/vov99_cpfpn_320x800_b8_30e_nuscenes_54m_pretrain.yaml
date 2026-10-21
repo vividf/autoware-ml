@@ -6,8 +6,10 @@
 # 4 GPUs x batch 8 (total batch 32), lr 8.0e-4 / 8.0e-5 (the reference total-batch-16 recipe
 # uses 4.0e-4 / 4.0e-5; rescale both LRs by N/32 for another total batch size N). Watch the
 # first few hundred iterations: at this LR a loss spike or NaN means both LRs should back off
-# (e.g. to 6e-4 / 6e-5). The nuScenes detection taxonomy and the T4 seven_class taxonomy are
-# the same seven classes in the same order, so the checkpoint loads into stage 2 whole.
+# (e.g. to 6e-4 / 6e-5). The nuScenes detection taxonomy and the dynamic T4 taxonomy of stage 2
+# are the same seven classes with the last two swapped (traffic_cone, barrier here; barrier,
+# traffic_cone there), so permute the classification rows of the checkpoint before stage 2
+# loads it (see docs/models/streampetr.md).
 defaults:
   - base_54m
   - ../focal2d_head
