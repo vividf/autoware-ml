@@ -12,81 +12,174 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the frame metadata of the nuScenes dataset."""
+"""Tests for the samples the nuScenes dataset serves from a nuScenes record."""
 
 from __future__ import annotations
 
-import unittest
+from types import MappingProxyType
 
 import numpy as np
 import polars as pl
+import pytest
 
 from autoware_ml.databases.schemas.dataset_schemas import DatasetTableSchema
+from autoware_ml.databases.schemas.image_frames import ImageFrameDataModel
+from autoware_ml.databases.schemas.lidar_frames import LidarFrameDataModel
+from autoware_ml.datamodule.common.detection3d import Detection3DTask
 from autoware_ml.datamodule.nuscenes.dataset import NuScenesDataset
+from autoware_ml.types.geometry import Box3DFieldIndex
+
+_SCENE_NAME = "scene-0061"
+_SAMPLE_LIDAR = (
+    "samples/LIDAR_TOP/n008-2018-08-01-15-16-36-0400__LIDAR_TOP__1533151603547590.pcd.bin"
+)
+_SWEEP_LIDAR = "sweeps/LIDAR_TOP/n008-2018-08-01-15-16-36-0400__LIDAR_TOP__1533151603597909.pcd.bin"
+_SAMPLE_IMAGE = "samples/CAM_FRONT/n008-2018-08-01-15-16-36-0400__CAM_FRONT__1533151603512404.jpg"
 
 
-def build_records_dataframe(scene_names: list[str]) -> pl.DataFrame:
-    """One record per scene name, every record holding the same nuScenes lidar path layout."""
-    lidar_frames = [
-        [
+def lidar_frame(frame_id: str, relative_path: str, keyframe: bool) -> dict:
+    """
+    Record table entry of one lidar frame, stored as the nuScenes generator stores it.
+
+    Args:
+      frame_id: Sample data token of the frame.
+      relative_path: Path of the frame relative to the database root.
+      keyframe: Whether the frame is the sample frame.
+
+    Returns:
+      dict: The lidar frame as the record table stores it.
+    """
+    return LidarFrameDataModel(
+        lidar_frame_id=frame_id,
+        lidar_keyframe=keyframe,
+        lidar_sensor_id="lidar-sensor",
+        lidar_sensor_channel_name="LIDAR_TOP",
+        lidar_timestamp_seconds=1533151603.5 if keyframe else 1533151603.55,
+        lidar_pointcloud_relative_path=relative_path,
+        lidar_pointcloud_source_relative_path=None,
+        lidar_pointcloud_num_features=5,
+        lidar_sensor_to_ego_pose_matrix=np.eye(4),
+        lidar_frame_ego_pose_to_global_matrix=np.eye(4),
+        lidar_sensor_to_lidar_sweep_matrix=np.eye(4),
+        lidar_pointcloud_semantic_mask_relative_path=None,
+    ).to_dictionary()
+
+
+def image_frame(relative_path: str) -> dict:
+    """
+    Record table entry of one camera keyframe, stored as the nuScenes generator stores it.
+
+    Args:
+      relative_path: Path of the image relative to the database root.
+
+    Returns:
+      dict: The image frame as the record table stores it.
+    """
+    return ImageFrameDataModel(
+        image_frame_id="cam-front-token",
+        image_keyframe=True,
+        image_sensor_id="cam-front-sensor",
+        image_sensor_channel_name="CAM_FRONT",
+        image_timestamp_seconds=1533151603.5,
+        image_relative_path=relative_path,
+        image_height=900,
+        image_width=1600,
+        cam2img=np.eye(3),
+        # nuScenes images ship rectified
+        image_distortion_coefficients=[],
+        image_distortion_model="",
+        image_sensor_to_ego_pose_matrix=np.eye(4),
+        image_frame_ego_pose_to_global_matrix=np.eye(4),
+        lidar2cam=np.eye(4),
+        lidar2img=np.eye(4),
+    ).to_dictionary()
+
+
+def nuscenes_records() -> pl.DataFrame:
+    """One nuScenes record: a sample frame, one sweep, one camera and one car."""
+    box = np.zeros(len(Box3DFieldIndex), dtype=np.float64)
+    box[Box3DFieldIndex.LENGTH] = 4.0
+    box[Box3DFieldIndex.WIDTH] = 2.0
+    box[Box3DFieldIndex.HEIGHT] = 1.5
+    row = {
+        DatasetTableSchema.SCENARIO_ID.name: _SCENE_NAME,
+        DatasetTableSchema.SAMPLE_ID.name: "sample-token",
+        DatasetTableSchema.SAMPLE_INDEX.name: 0,
+        DatasetTableSchema.TIMESTAMP_SECONDS.name: 1533151603.5,
+        DatasetTableSchema.LOCATION.name: None,
+        DatasetTableSchema.VEHICLE_TYPE.name: None,
+        DatasetTableSchema.SCENARIO_NAME.name: _SCENE_NAME,
+        DatasetTableSchema.TRAFFIC_CONE_BARRIER_BBOX_STATUS.name: True,
+        DatasetTableSchema.LIDAR_FRAMES.name: [
+            lidar_frame("lidar-sample-token", _SAMPLE_LIDAR, keyframe=True),
+            lidar_frame("lidar-sweep-token", _SWEEP_LIDAR, keyframe=False),
+        ],
+        DatasetTableSchema.LIDAR_SOURCES.name: [],
+        DatasetTableSchema.IMAGE_FRAMES.name: [[image_frame(_SAMPLE_IMAGE)]],
+        DatasetTableSchema.CATEGORY_MAPPING.name: None,
+        DatasetTableSchema.BOXES_3D.name: [
             {
-                "lidar_frame_id": f"frame_{index}",
-                "lidar_keyframe": True,
-                "lidar_sensor_id": "lidar",
-                "lidar_sensor_channel_name": "LIDAR_TOP",
-                "lidar_timestamp_seconds": float(index),
-                "lidar_pointcloud_path": f"/nuscenes/samples/LIDAR_TOP/{index}.pcd.bin",
-                "lidar_pointcloud_source_path": None,
-                "lidar_pointcloud_num_features": 5,
-                "lidar_sensor_to_ego_pose_matrix": np.eye(4).tolist(),
-                "lidar_frame_ego_pose_to_global_matrix": np.eye(4).tolist(),
-                "lidar_sensor_to_lidar_sweep_matrix": np.eye(4).tolist(),
-                "lidar_pointcloud_semantic_mask_path": None,
+                "box3d_params": box.tolist(),
+                "box3d_instance_id": "car-instance",
+                "box3d_dataset_label_name": "vehicle.car",
+                "box3d_label_name": "car",
+                "box3d_label_index": 0,
+                "box3d_num_lidar_points": 64,
+                "box3d_num_radar_points": 0,
+                "box3d_valid": True,
+                "box3d_attributes": [],
+                "box3d_coordinate": "gravity_center",
             }
-        ]
-        for index in range(len(scene_names))
-    ]
-    return pl.DataFrame(
-        {
-            DatasetTableSchema.LIDAR_FRAMES.name: lidar_frames,
-            DatasetTableSchema.SCENARIO_ID.name: scene_names,
-            DatasetTableSchema.TIMESTAMP_SECONDS.name: [float(i) for i in range(len(scene_names))],
-        },
-        schema={
-            DatasetTableSchema.LIDAR_FRAMES.name: DatasetTableSchema.LIDAR_FRAMES.dtype,
-            DatasetTableSchema.SCENARIO_ID.name: DatasetTableSchema.SCENARIO_ID.dtype,
-            DatasetTableSchema.TIMESTAMP_SECONDS.name: DatasetTableSchema.TIMESTAMP_SECONDS.dtype,
-        },
+        ],
+    }
+    return pl.DataFrame([row], schema=DatasetTableSchema.to_polars_schema())
+
+
+def build_dataset(database_root_path: str) -> NuScenesDataset:
+    """Dataset over the one nuScenes record, serving the 3D boxes."""
+    return NuScenesDataset(
+        database_root_path=database_root_path,
+        max_num_3d_gt_bboxes=8,
+        dataset_records_dataframe=nuscenes_records(),
+        transforms=None,
+        dataset_tasks=MappingProxyType({"detection3d": Detection3DTask}),
+        lidar_intensity_scale=255.0,
     )
 
 
-class TestNuScenesFrameMeta(unittest.TestCase):
-    """The scene identity of a nuScenes record is its scene name, not a path fragment."""
+@pytest.mark.parametrize("root", ["/data/nuscenes", "/workspace/data/sets/nuscenes"])
+def test_a_nuscenes_record_is_served_under_the_root_of_the_dataset(root: str) -> None:
+    """
+    Input: a nuScenes record as the generator stores it, with its frame paths relative to the
+        root and its scene name as scenario id, read by datasets over roots of different depths.
+    Expected: the sample resolves every frame under the root of the dataset reading it, and its
+        frame metadata names the scene of the record, which the flat nuScenes layout cannot be
+        read off a frame path. nuScenes ships no lanelet maps, so the frame carries none.
+    Check: the frame paths, the scene token, the map path and the boxes of the sample.
+    """
+    sample = build_dataset(root).get_data_sample(0)
 
-    def test_scene_token_is_the_scene_name(self) -> None:
-        """
-        Input: two records of different nuScenes scenes whose lidar paths share the
-        ``samples/LIDAR_TOP`` layout under a one-directory root.
-        Expected: a path fragment would be the same for both (or fail on the shallow root);
-        the scene token is the record's scenario id, so the frames of different scenes
-        differ and a streaming model resets its memory between them.
-        Check: the scene tokens and the sample times of the frame metadata.
-        """
-        dataset = NuScenesDataset(
-            "/nuscenes",
-            dataset_records_dataframe=build_records_dataframe(["scene-0001", "scene-0002"]),
-            transforms=None,
-            dataset_tasks={},
-            lidar_intensity_scale=1.0,
-            det3d_supervised=False,
-            seg3d_supervised=False,
-        )
-
-        metas = [dataset.get_frame_meta_sample(index, None) for index in range(2)]
-
-        self.assertEqual([meta.scene_token for meta in metas], ["scene-0001", "scene-0002"])
-        self.assertEqual([meta.timestamp for meta in metas], [0.0, 1.0])
+    assert sample.lidar_point_cloud_samples is not None
+    assert [frame.point_cloud_path for frame in sample.lidar_point_cloud_samples] == [
+        f"{root}/{_SAMPLE_LIDAR}",
+        f"{root}/{_SWEEP_LIDAR}",
+    ]
+    assert sample.image_samples is not None
+    assert [image.image_path for image in sample.image_samples] == [f"{root}/{_SAMPLE_IMAGE}"]
+    assert sample.frame_meta.scene_token == _SCENE_NAME
+    assert sample.frame_meta.lanelet_map_path is None
+    assert sample.detection3d_gt_bboxes_3d is not None
+    assert len(sample.detection3d_gt_bboxes_3d) == 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_the_frame_meta_composes_the_lidar_mounting_into_the_map_transform() -> None:
+    """
+    Input: the record read without a lidar source view.
+    Expected: the map transform of the frame is the ego pose of the frame composed with the
+        lidar mounting, both the identity here, so the sample frame maps onto itself.
+    Check: the transform.
+    """
+    frame_meta = build_dataset("/data/nuscenes").get_frame_meta_sample(0, None)
+
+    assert frame_meta.scene_token == _SCENE_NAME
+    assert np.allclose(frame_meta.ego2global.numpy(), np.eye(4))

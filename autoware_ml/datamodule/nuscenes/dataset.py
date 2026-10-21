@@ -21,38 +21,22 @@ class NuScenesDataset(T4Dataset):
     """
     Dataset serving every task from the record table of a nuScenes database.
 
-    The nuScenes record generator stores every frame path as a complete path, so frame paths
-    are used as stored instead of being resolved against the database root.
+    The records store every frame path relative to the database root, as the T4 records do,
+    so the frames are read the same way. The nuScenes layout keeps the files of every scene
+    together under ``samples/`` and ``sweeps/`` rather than in a directory per scene, so the
+    scene of a frame cannot be read off its path and comes from the scene name of the record.
     """
 
-    def _update_frame_path(self, frame_path: str) -> str:
+    def scene_token(self, idx: int, lidar_frame: LidarFrameDataModel) -> str:
         """
-        Return the frame path unchanged, since NuScenesRecordsGenerator already stores
-        full, directly-usable absolute paths.
-
-        Args:
-          frame_path: Frame path as stored in the parquet record.
-
-        Returns:
-          str: The same path, unmodified.
-        """
-
-        return frame_path
-
-    def get_scene_token(self, idx: int, lidar_frame: LidarFrameDataModel) -> str:
-        """
-        Return the nuScenes scene name of the record.
-
-        The T4 scene directory cannot be read off a nuScenes path (``samples/LIDAR_TOP/...``
-        is shared by every scene, and a shallow root has too few components), so the record's
-        ``scenario_id`` names the scene; nuScenes has no lanelet map to resolve from it.
+        Scene token of a record, the scene name the nuScenes records generator keys it by.
 
         Args:
           idx: Index of the record.
-          lidar_frame: Keyframe lidar frame of the record, unused.
+          lidar_frame: Keyframe lidar frame of the record, unused: the nuScenes paths carry
+            no scene.
 
         Returns:
-          str: The scene name of the record.
+          str: Scene name of the record, such as ``scene-0061``.
         """
-        del lidar_frame
-        return str(self.dataset_records_dataframe.item(idx, DatasetTableSchema.SCENARIO_ID.name))
+        return self.dataset_records_dataframe.item(idx, DatasetTableSchema.SCENARIO_ID.name)
