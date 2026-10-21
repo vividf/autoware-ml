@@ -11,7 +11,7 @@ import polars as pl
 import torch
 
 from autoware_ml.databases.schemas.dataset_schemas import DatasetTableSchema
-from autoware_ml.datamodule.detection3d import Detection3DTask
+from autoware_ml.datamodule.common.detection3d import Detection3DTask
 from autoware_ml.datamodule.samplers import GroupStreamingSampler
 from autoware_ml.datamodule.t4dataset.dataset import T4Dataset
 from autoware_ml.datamodule.tests.corpus import SCENE, write_corpus
@@ -19,7 +19,7 @@ from autoware_ml.datamodule.tests.test_camera_pipeline_smoke import CAMERAS, wri
 from autoware_ml.models.common.necks.lss_fpn import GeneralizedLSSFPN
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
-from autoware_ml.models.detection3d.streampetr import StreamPETRDetectionModel
+from autoware_ml.models.detection3d.streampetr import StreamPETRDetection3DModel
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import NMSFreeBBoxCoder3D
 from autoware_ml.models.detection3d.task_modules.match_costs import (
@@ -27,17 +27,25 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
     ClassificationCost,
     IoU3DCost,
 )
-from autoware_ml.preprocessing.base import DataPreprocessing
+from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
+from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.preprocessing.camera.grid_mask import BatchGridMask
 from autoware_ml.preprocessing.camera.normalize import BatchNormalizeImages
+from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.transforms.base import TransformsCompose
-from autoware_ml.transforms.boxes3d.filters import BBoxesLabelNameFilter, BBoxesRangeFilter
+from autoware_ml.transforms.boxes3d.filters import (
+    BBoxesLabelNameFilter,
+    BBoxesPhysicalFilter,
+    BBoxesRangeFilter,
+)
 from autoware_ml.transforms.camera.annotations2d import LoadAnnotations2DFromBoxes3D
-from autoware_ml.transforms.camera.geometry import CameraGlobalRotScaleTrans, ImageAug3D
 from autoware_ml.transforms.camera.loading import LoadImagesFromFile
+from autoware_ml.transforms.camera.resize import ResizeCropFlipRotImage
+from autoware_ml.transforms.camera_lidar.geometry import GlobalRotScaleTrans
 
 POINT_CLOUD_RANGE = [-10.0, -10.0, -5.0, 10.0, 10.0, 5.0]
 IMAGE_SIZE = [32, 48]
+CLASS_NAMES = ["car"]
 
 
 class _TinyBackbone(torch.nn.Module):
@@ -53,13 +61,23 @@ class _TinyBackbone(torch.nn.Module):
         return c3, c4, self.stage3(c4)
 
 
-def build_model() -> StreamPETRDetectionModel:
-    """A small StreamPETR with the auxiliary 2D head, both on stride-8 tokens."""
-    return StreamPETRDetectionModel(
+def build_model() -> StreamPETRDetection3DModel:
+    """A small StreamPETR with the auxiliary 2D head, both on stride-8 tokens.
+
+    The preprocessor and the partial annotations are the T4 recipe's, with the single class
+    of the corpus standing in for the traffic cones and barriers.
+    """
+    return StreamPETRDetection3DModel(
+        data_preprocessor=DataPreprocessor(
+            preprocessor_modules=[
+                BatchNormalizeImages(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                BatchGridMask(prob=1.0),
+            ]
+        ),
         img_backbone=_TinyBackbone(),
         img_neck=GeneralizedLSSFPN(in_channels=[16, 32, 64], out_channels=32),
         bbox_head=StreamPETRHead(
-            num_classes=1,
+            class_names=CLASS_NAMES,
             in_channels=32,
             hidden_dim=32,
             num_queries=8,
@@ -79,11 +97,14 @@ def build_model() -> StreamPETRDetectionModel:
                 cls_cost=ClassificationCost(weight=2.0),
                 reg_cost=BBox3DL1Cost(weight=0.25),
                 iou_cost=IoU3DCost(weight=0.0),
+                point_cloud_range=POINT_CLOUD_RANGE,
             ),
             point_cloud_range=POINT_CLOUD_RANGE,
             code_weights=[2.0, 2.0] + [1.0] * 8,
         ),
-        img_roi_head=FocalHead2D(num_classes=1, in_channels=32, embed_dims=32, stride=8),
+        log_dict_configs=LogDictConfigs(prog_bar=False),
+        img_roi_head=FocalHead2D(class_names=CLASS_NAMES, in_channels=32, embed_dims=32, stride=8),
+        partial_annotations=PartialAnnotations(CLASS_NAMES, CLASS_NAMES),
     )
 
 
@@ -91,17 +112,17 @@ def build_transforms() -> TransformsCompose:
     """The training pipeline of the T4 configs, shrunk to the synthetic images."""
     return TransformsCompose(
         pipeline=[
-            BBoxesLabelNameFilter(label_names_to_keep=["car"], class_names=["car"]),
+            BBoxesPhysicalFilter(),
+            BBoxesLabelNameFilter(label_names_to_keep=CLASS_NAMES, class_names=CLASS_NAMES),
             LoadImagesFromFile(shuffle_order=True),
-            ImageAug3D(
-                final_dim=IMAGE_SIZE,
-                resize_lim=[-0.02, 0.02],
-                resize_relative=True,
-                bot_pct_lim=[0.0, 0.0],
-                rand_flip=True,
+            ResizeCropFlipRotImage(
+                target_size=IMAGE_SIZE,
+                resize_range=0.02,
+                bottom_crop_ratio_range=[0.0, 0.0],
+                random_horizontal_flip=True,
                 training=True,
             ),
-            CameraGlobalRotScaleTrans(yaw_rot_range=[-0.3, 0.3], scale_ratio_range=[0.95, 1.05]),
+            GlobalRotScaleTrans(yaw_rot_range=[-0.3, 0.3], scale_ratio_range=[0.95, 1.05]),
             LoadAnnotations2DFromBoxes3D(),
             BBoxesRangeFilter(point_cloud_range=POINT_CLOUD_RANGE),
         ]
@@ -121,6 +142,11 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         records = write_images(root, write_corpus(root, num_records=4)).with_columns(
             pl.Series(DatasetTableSchema.SCENARIO_ID.name, ["b", "a", "b", "a"]),
             pl.Series(DatasetTableSchema.TIMESTAMP_SECONDS.name, [21.0, 10.5, 20.0, 10.0]),
+            # Scene a was annotated without the partially annotated classes.
+            pl.Series(
+                DatasetTableSchema.TRAFFIC_CONE_BARRIER_BBOX_STATUS.name,
+                [True, False, True, False],
+            ),
         )
         self.dataset = T4Dataset(
             lidar_intensity_scale=255.0,
@@ -128,16 +154,10 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
             max_num_3d_gt_bboxes=8,
             dataset_records_dataframe=records,
             transforms=build_transforms(),
-            dataset_tasks={"Detection3D": Detection3DTask},
+            dataset_tasks={"detection3d": Detection3DTask},
             det3d_supervised=True,
             seg3d_supervised=True,
             camera_names=CAMERAS,
-        )
-        self.preprocessing = DataPreprocessing(
-            [
-                BatchNormalizeImages(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                BatchGridMask(prob=1.0),
-            ]
         )
 
     def test_a_lane_streams_every_scene_in_time_order(self) -> None:
@@ -150,6 +170,7 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         model.log_dict = lambda *args, **kwargs: None
         sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False)
         continuity = []
+        statuses = []
         stream_continuity = model.bbox_head.stream_continuity
 
         def record_continuity(scene_tokens, timestamp):
@@ -161,12 +182,16 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
 
         for index in sampler:
             batch = self.dataset.collate_fn([self.dataset[index]])
-            batch_inputs = self.preprocessing(batch, is_training=True)
-            frame_meta = batch_inputs.multi_task_gt_batch.frame_meta_batch
+            # The preprocessor runs where Lightning hands the batch to the model.
+            batch_inputs = model.on_after_batch_transfer(batch, dataloader_idx=0)
+            gt_batch = batch_inputs.multi_task_gt_batch
+            frame_meta = gt_batch.frame_meta_batch
             assert frame_meta is not None
             # The augmentation of the frame is folded into its pose for the memory warp.
             self.assertFalse(torch.equal(frame_meta.ego2globals[0], torch.eye(4)))
-            assert batch_inputs.multi_task_gt_batch.detection2d_gt_batch is not None
+            assert gt_batch.detection2d_gt_batch is not None
+            assert gt_batch.detection3d_gt_batch is not None
+            statuses.append(gt_batch.detection3d_gt_batch.gt_traffic_cone_barrier_bbox_status)
 
             loss = model.training_step(batch_inputs, batch_idx=0)
             loss.backward()
@@ -184,6 +209,23 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
                 ([SCENE], [10.5], [1.0]),
             ],
         )
+        # The annotation flag of the record reaches the batch, where the partial annotations
+        # read it.
+        self.assertEqual(
+            [status.tolist() for status in statuses], [[True], [True], [False], [False]]
+        )
         self.assertTrue(
             all(parameter.grad is not None for parameter in model.img_roi_head.parameters())
         )
+
+    def test_evaluation_decodes_the_streamed_frames(self) -> None:
+        model = build_model().eval()
+        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False)
+        for index in sampler:
+            batch = self.dataset.collate_fn([self.dataset[index]])
+            with torch.no_grad():
+                batch_inputs = model.on_after_batch_transfer(batch, dataloader_idx=0)
+                outputs = model(batch_inputs)
+                predictions = model.decode_outputs(batch_inputs, outputs)
+            self.assertIsNone(outputs.detection3d().streampetr_head().auxiliary_2d)
+            self.assertEqual(len(predictions.detection3d_predictions), 1)
