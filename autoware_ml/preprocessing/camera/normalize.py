@@ -21,9 +21,10 @@ from collections.abc import Sequence
 import torch
 
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
+from autoware_ml.preprocessing.data_preprocessor_modules import DataPreprocessorModule
 
 
-class BatchNormalizeImages:
+class BatchNormalizeImages(DataPreprocessorModule):
     """Standardize every channel of every image of a collated batch.
 
     The images arrive in [0, 1], so the statistics are given in that range as well, for

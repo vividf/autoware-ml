@@ -9,6 +9,7 @@ from autoware_ml.dataclasses.geometry.images import ImageGTBatch
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.models.tests.batch_inputs_fixtures import build_batch_inputs
 from autoware_ml.preprocessing.camera.normalize import BatchNormalizeImages
+from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -63,3 +64,12 @@ def test_rejects_inconsistent_statistics() -> None:
         BatchNormalizeImages([0.5, 0.5], IMAGENET_STD)
     with pytest.raises(ValueError):
         BatchNormalizeImages(IMAGENET_MEAN, [0.2, 0.0, 0.2])
+
+
+def test_runs_inside_the_data_preprocessor() -> None:
+    # DataPreprocessor accepts only DataPreprocessorModule instances, so the normalization
+    # has to be one to sit first in `data_preprocessor.preprocessor_modules`.
+    preprocessor = DataPreprocessor(
+        preprocessor_modules=[BatchNormalizeImages(mean=[0.5] * 3, std=[0.5] * 3)]
+    )
+    assert len(preprocessor.preprocessor_modules) == 1
