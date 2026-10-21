@@ -47,7 +47,7 @@ from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import P
 from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import PointPillarsScatter
 from autoware_ml.models.detection3d.heads.centerhead import CenterHead
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -103,7 +103,7 @@ class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
 
 #: CenterPoint's quantization declaration: which submodules carry which quantizable
 #: module kinds. An architecture fact, so it lives in code; the `quantization` config only
-#: subtracts from it (`skip_quantize` / `disable_recipes`).
+#: subtracts from it (`skip_quantize`).
 CENTERPOINT_QUANT_RULES = QuantRules(
     quantize_submodules={
         "pts_backbone": ("conv", "linear"),

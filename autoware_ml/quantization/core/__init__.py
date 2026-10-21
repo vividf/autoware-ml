@@ -21,8 +21,8 @@ calibration (:mod:`.calibration`), and quantizer state operations
 (:mod:`.quantizer_state`). :mod:`.modelopt` holds the modelopt bug workarounds and is imported
 here first so every quantizer built by this package sees them.
 
-Architecture-specific placement lives in :mod:`autoware_ml.quantization.recipes`; the deployment
-interface (rules / plan / placement record) lives in :mod:`autoware_ml.quantization.plan`.
+The deployment interface (rules / plan / placement record) lives in
+:mod:`autoware_ml.quantization.rules` and :mod:`autoware_ml.quantization.plan`.
 """
 
 from . import modelopt as _modelopt_patches  # noqa: F401  (import applies the patches)
