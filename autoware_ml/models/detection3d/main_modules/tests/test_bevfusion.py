@@ -52,6 +52,7 @@ from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_att
 from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.heads.transfusions.transfusion_head import TransFusionHead
 from autoware_ml.models.detection3d.main_modules.bevfusion import (
+    BEVFUSION_LIDAR_QUANT_RULES,
     BEVFusionDetection3DModel,
     _BEVFusionExportWrapper,
     _BEVFusionLidarExportWrapper,
@@ -80,6 +81,7 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
 from autoware_ml.models.detection3d.view_transforms.depth_lss import DepthLSSTransform
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
@@ -639,7 +641,11 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             {name: {0: "voxels_num"} for name in ("voxels", "coors", "num_points_per_voxel")},
         )
         self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
-        self.assertEqual(graph.onnx_transforms, (fuse_sparse_graph,))
+        # Fusion first: the INT8 rewrite reads the folded bias.
+        fuse, int8 = graph.onnx_transforms
+        self.assertIs(fuse, fuse_sparse_graph)
+        self.assertIs(int8.func, sparse_int8_transform)
+        self.assertIs(int8.keywords["module"], self.model.lidar_network.pts_middle_encoder)
 
     @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
     def test_stage_graph_exports_the_sparse_encoder_with_folded_batchnorm(self) -> None:
@@ -674,6 +680,16 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
                 for m in model.lidar_network.pts_middle_encoder.modules()
             )
         )
+
+    def test_quantization_rules_are_the_model_declaration(self) -> None:
+        """Test that the rules name the lidar branch's towers by their dotted paths."""
+        self.assertIs(self.model.build_quantization_rules(), BEVFUSION_LIDAR_QUANT_RULES)
+        self.assertEqual(
+            BEVFUSION_LIDAR_QUANT_RULES.quantize_submodules["lidar_network.pts_middle_encoder"],
+            {"spconv": "int8"},
+        )
+        for name in BEVFUSION_LIDAR_QUANT_RULES.quantize_submodules:
+            self.model.get_submodule(name)
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
         """Test that a multi-sample batch is refused instead of exporting only its first sample."""
