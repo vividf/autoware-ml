@@ -149,7 +149,12 @@ class MyModel(ModuleBaseModel):
 8. **Use hooks when needed** - If your model needs custom batch size inference,
    prediction formatting, or an explicit deployment wrapper, override the
    appropriate `ModuleBaseModel` hook instead of bypassing the shared training and
-   deployment flow.
+   deployment flow. A temporal model that carries a memory across batches sets the
+   `requires_streaming` class variable to `True`; `ModuleBaseModel.setup()` then refuses a
+   datamodule that does not stream scene-contiguous frames (`datamodule.streaming`) or that
+   combines streaming with `train_frame_sampling`. Models that override the epoch-start
+   hooks (`on_validation_epoch_start`, `on_test_epoch_start`) must call `super()`, which
+   resets the metric suites.
 
 ## Step 2: Choose the Data
 
@@ -497,9 +502,7 @@ def forward(self, multi_task_batch_inputs: ModelBatchInputs) -> ModelOutputs:
     features = self.backbone(multi_task_batch_inputs.voxels_data)
     return ModelOutputs(
         detection3d_head_outputs=Detection3DHeadOutputs(
-            center_head_outputs=None,
-            transfusion_head_outputs=self.bbox_head(features),
-            streampetr_head_outputs=None,
+            center_head_outputs=None, transfusion_head_outputs=self.bbox_head(features)
         ),
         segmentation3d_head_outputs=Segmentation3DHeadOutputs(logits=self.seg3d_head(features)),
     )

@@ -8,6 +8,7 @@ multi-layer decoder supervision, and optional denoising queries.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -180,7 +181,7 @@ class StreamPETRHead(nn.Module):
 
     def __init__(
         self,
-        num_classes: int,
+        class_names: Sequence[str],
         in_channels: int,
         hidden_dim: int,
         num_queries: int,
@@ -205,13 +206,14 @@ class StreamPETRHead(nn.Module):
         noise_scale: float = 1.0,
         dn_weight: float = 1.0,
         split: float = 0.75,
-        class_names: list[str] | None = None,
         partial_ignore_classes: list[str] | None = None,
         max_stream_gap: float | None = None,
     ) -> None:
         """Initialize the head.
 
         Args:
+            class_names: Ordered names of the foreground classes. Their count is the number
+                of classification channels.
             memory_len: Entries of the temporal memory bank.
             topk_proposals: Proposals of every frame that enter the bank.
             num_propagated: Bank entries that extend the queries of the next frame; the
@@ -233,14 +235,14 @@ class StreamPETRHead(nn.Module):
                 f"topk_proposals ({topk_proposals}) must cover the {num_propagated} propagated "
                 "entries, which are the strongest proposals of the previous frame."
             )
-        self.num_classes = num_classes
+        self.class_names = list(class_names)
+        self.num_classes = len(self.class_names)
         self.partial_ignore_labels = resolve_partial_ignore_labels(
-            class_names, partial_ignore_classes
+            self.class_names, partial_ignore_classes
         )
         self.num_queries = num_queries
         self.num_decoder_layers = num_decoder_layers
         self.hidden_dim = hidden_dim
-        self.point_cloud_range = point_cloud_range
         self.assigner = assigner
         self.bbox_coder = bbox_coder
         self.memory_len = memory_len
@@ -836,39 +838,53 @@ class StreamPETRHead(nn.Module):
         gt_labels: list[torch.Tensor],
         annotation_status: list[bool] | None = None,
     ) -> list[StreamPETRTargets]:
+        """Match the queries of one decoder layer to the ground truth of every sample.
+
+        The assigner works on the padded ``[batch, max_num_gts]`` layout, so the per-sample
+        lists are padded for one call per layer and the matches are read back per sample.
+        """
+        batch_size, num_queries = cls_logits.shape[:2]
         use_classwise_weights = (
             self.partial_ignore_labels is not None
             and annotation_status is not None
             and not all(annotation_status)
         )
-        targets: list[StreamPETRTargets] = []
-        for sample_index, (
-            sample_logits,
-            sample_boxes,
-            sample_gt_boxes,
-            sample_gt_labels,
-        ) in enumerate(zip(cls_logits, box_params, gt_boxes, gt_labels)):
-            num_queries = sample_logits.shape[0]
-            labels = sample_gt_labels.new_full((num_queries,), -1)
-            bbox_targets = sample_boxes.new_zeros((num_queries, 9))
+        max_num_gts = max(boxes.shape[0] for boxes in gt_boxes)
+        padded_boxes = box_params.new_zeros((batch_size, max_num_gts, 9))
+        padded_labels = torch.full(
+            (batch_size, max_num_gts), -1, dtype=torch.long, device=cls_logits.device
+        )
+        valid_masks = torch.zeros(
+            (batch_size, max_num_gts), dtype=torch.bool, device=cls_logits.device
+        )
+        for index, (sample_gt_boxes, sample_gt_labels) in enumerate(zip(gt_boxes, gt_labels)):
+            count = sample_gt_boxes.shape[0]
+            padded_boxes[index, :count] = sample_gt_boxes
+            padded_labels[index, :count] = sample_gt_labels
+            valid_masks[index, :count] = True
 
-            assigned = self.assigner.assign(
-                bboxes=denormalize_boxes3d(sample_boxes),
-                gt_bboxes=sample_gt_boxes,
-                gt_labels=sample_gt_labels,
-                cls_pred=sample_logits.transpose(0, 1),
-                point_cloud_range=self.point_cloud_range,
-            )
-            pos_inds = torch.nonzero(assigned.gt_inds > 0, as_tuple=False).squeeze(-1)
+        assigned = self.assigner.assign(
+            bboxes=denormalize_boxes3d(box_params),
+            gt_bboxes=padded_boxes,
+            gt_labels=padded_labels,
+            cls_pred=cls_logits,
+            valid_masks=valid_masks,
+        )
+
+        targets: list[StreamPETRTargets] = []
+        for index in range(batch_size):
+            labels = padded_labels.new_full((num_queries,), -1)
+            bbox_targets = box_params.new_zeros((num_queries, 9))
+            pos_inds = torch.nonzero(assigned.gt_inds[index] > 0, as_tuple=False).squeeze(-1)
             if pos_inds.numel() > 0:
-                matched_gt_inds = assigned.gt_inds[pos_inds] - 1
-                labels[pos_inds] = sample_gt_labels[matched_gt_inds]
-                bbox_targets[pos_inds] = sample_gt_boxes[matched_gt_inds]
+                matched_gt_inds = assigned.gt_inds[index, pos_inds] - 1
+                labels[pos_inds] = padded_labels[index, matched_gt_inds]
+                bbox_targets[pos_inds] = padded_boxes[index, matched_gt_inds]
 
             label_weights = None
             if use_classwise_weights:
-                label_weights = sample_logits.new_ones((num_queries, self.num_classes))
-                if not annotation_status[sample_index]:
+                label_weights = cls_logits.new_ones((num_queries, self.num_classes))
+                if not annotation_status[index]:
                     # Zero the ignored class columns on every query of the
                     # un-annotated frame (same semantics as FocalHead2D): no
                     # GT of those classes can exist here, so only their

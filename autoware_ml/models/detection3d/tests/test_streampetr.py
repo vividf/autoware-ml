@@ -14,10 +14,11 @@ from autoware_ml.dataclasses.batch.frame_meta import FrameMetaBatch
 from autoware_ml.dataclasses.geometry.images import ImageGTBatch
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
+from autoware_ml.metrics.base import EvalStage, MetricSuite
 from autoware_ml.models.common.necks.lss_fpn import GeneralizedLSSFPN
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
-from autoware_ml.models.detection3d.streampetr import StreamPETRDetectionModel
+from autoware_ml.models.detection3d.streampetr import StreamPETRDetection3DModel, _ground_truth
 from autoware_ml.models.detection3d.task_modules.assigners import HungarianAssigner3D
 from autoware_ml.models.detection3d.task_modules.bbox_coders import NMSFreeBBoxCoder3D
 from autoware_ml.models.detection3d.task_modules.streaming import StreamContinuity
@@ -26,13 +27,16 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
     ClassificationCost,
     IoU3DCost,
 )
+from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.models.tests.batch_inputs_fixtures import (
     build_batch_inputs,
-    build_detection_gt_batch,
+    build_detection3d_gt_batch,
 )
+from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 
 NUM_CAMS = 6
 IMAGE_HW = (96, 160)
+CLASS_NAMES = ["car", "traffic_cone", "barrier"]
 
 
 class _TinyMultiScaleBackbone(torch.nn.Module):
@@ -49,17 +53,43 @@ class _TinyMultiScaleBackbone(torch.nn.Module):
         return c3, c4, c5
 
 
-CLASS_NAMES = ["car", "traffic_cone", "barrier"]
+class _ResetCountingSuite(MetricSuite[None]):
+    """A stateless suite that only counts how often it is reset."""
+
+    prefix = "fake"
+
+    def __init__(self) -> None:
+        super().__init__(components=[])
+        self.resets = 0
+
+    def runs_at(self, stage: EvalStage) -> bool:
+        del stage
+        return True
+
+    def reset(self) -> None:
+        super().reset()
+        self.resets += 1
+
+    def update(self, eval_out: dict) -> None:
+        del eval_out
+
+    def state_for(self, metric_range, metric_filter) -> None:
+        del metric_range, metric_filter
 
 
 def _build_model(
-    img_roi_head: FocalHead2D | None = None, partial_ignore: bool = False
-) -> StreamPETRDetectionModel:
-    return StreamPETRDetectionModel(
-        img_roi_head=img_roi_head,
+    metrics: Sequence[MetricSuite] | None = None,
+    img_roi_head: FocalHead2D | None = None,
+    partial_ignore: bool = False,
+) -> StreamPETRDetection3DModel:
+    return StreamPETRDetection3DModel(
+        data_preprocessor=DataPreprocessor(preprocessor_modules=[]),
         img_backbone=_TinyMultiScaleBackbone(),
         img_neck=GeneralizedLSSFPN(in_channels=[128, 256, 512], out_channels=128),
         bbox_head=_build_head(partial_ignore=partial_ignore),
+        log_dict_configs=LogDictConfigs(prog_bar=False),
+        img_roi_head=img_roi_head,
+        metrics=metrics,
     )
 
 
@@ -70,7 +100,7 @@ def _build_head(
     partial_ignore: bool = False,
 ):
     return StreamPETRHead(
-        num_classes=3,
+        class_names=CLASS_NAMES,
         in_channels=128,
         hidden_dim=128,
         num_queries=32,
@@ -101,27 +131,62 @@ def _build_head(
                 weight=0.25, code_weights=(2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)
             ),
             iou_cost=IoU3DCost(weight=0.0),
+            point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
         ),
         point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
         code_weights=[2.0, 2.0] + [1.0] * 8,
-        class_names=CLASS_NAMES if partial_ignore else None,
         partial_ignore_classes=["traffic_cone", "barrier"] if partial_ignore else None,
     )
 
 
-def _build_images(img: torch.Tensor) -> ImageGTBatch:
-    """Image batch with identity calibration for the given ``(B, N, 3, H, W)`` images."""
+def _build_images(
+    img: torch.Tensor,
+    camera_intrinsics: torch.Tensor | None = None,
+    pixel_affines: torch.Tensor | None = None,
+    lidar2cams: torch.Tensor | None = None,
+) -> ImageGTBatch:
+    """Image batch for the given ``(B, N, 3, H, W)`` images, identity calibration by default.
+
+    ``pixel_affines`` ``(B, N, 3, 3)`` are the image-space augmentations applied to the raw
+    pixels; ``lidar2images`` is composed from the augmented intrinsics as the loaders do.
+    """
     batch_size, num_cams = img.shape[:2]
     identity_4x4 = torch.eye(4).expand(batch_size, num_cams, 4, 4).clone()
+    if camera_intrinsics is None:
+        camera_intrinsics = torch.eye(3).expand(batch_size, num_cams, 3, 3).clone()
+    if pixel_affines is None:
+        pixel_affines = torch.eye(3).expand(batch_size, num_cams, 3, 3).clone()
+    if lidar2cams is None:
+        lidar2cams = identity_4x4.clone()
+    augmentation_matrices = identity_4x4.clone()
+    augmentation_matrices[..., :2, :2] = pixel_affines[..., :2, :2]
+    augmentation_matrices[..., :2, 3] = pixel_affines[..., :2, 2]
+    augmented_intrinsics = pixel_affines @ camera_intrinsics
+    homogeneous_intrinsics = identity_4x4.clone()
+    homogeneous_intrinsics[..., :3, :3] = augmented_intrinsics
     return ImageGTBatch(
         images=img,
         depth_maps=None,
-        camera_intrinsics=torch.eye(3).expand(batch_size, num_cams, 3, 3).clone(),
-        image_augmentation_matrices=identity_4x4.clone(),
-        lidar2images=identity_4x4.clone(),
-        lidar2cams=identity_4x4.clone(),
+        camera_intrinsics=camera_intrinsics,
+        image_augmentation_matrices=augmentation_matrices,
+        lidar2images=homogeneous_intrinsics @ lidar2cams,
+        lidar2cams=lidar2cams,
         calibration_statuses=None,
     )
+
+
+def _resize_crop_flip_affines(batch_size: int) -> torch.Tensor:
+    """Per-camera pixel affines of a resize, a bottom crop and a flip of every other camera."""
+    affines = torch.eye(3).repeat(batch_size, NUM_CAMS, 1, 1)
+    for index in range(NUM_CAMS):
+        scale = 0.5 + 0.01 * index
+        affines[:, index, 0, 0] = scale
+        affines[:, index, 1, 1] = scale
+        affines[:, index, 1, 2] = -20.0 - index
+        if index % 2 == 1:
+            flip = torch.tensor([[-1.0, 0.0, IMAGE_HW[1] - 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+            affines[:, index] = flip @ affines[:, index]
+    return affines
 
 
 def _build_frame_meta(
@@ -133,6 +198,7 @@ def _build_frame_meta(
     return FrameMetaBatch(
         ego2globals=torch.eye(4).repeat(batch_size, 1, 1) if ego2globals is None else ego2globals,
         scene_tokens=list(scene_tokens or [f"db/scene_{index}/0" for index in range(batch_size)]),
+        lanelet_map_paths=[None] * batch_size,
         timestamps=torch.tensor(timestamps, dtype=torch.float64),
     )
 
@@ -149,7 +215,7 @@ def _build_batch_inputs(
     batch_size = img.shape[0]
     detection = None
     if gt_boxes is not None and gt_labels is not None:
-        detection = build_detection_gt_batch(gt_boxes, gt_labels)
+        detection = build_detection3d_gt_batch(gt_boxes, gt_labels)
     return build_batch_inputs(
         detection=detection,
         images=_build_images(img),
@@ -164,8 +230,8 @@ def _collated_box(*values: float) -> torch.Tensor:
     return torch.tensor([values], dtype=torch.float32)
 
 
-def _run(model: StreamPETRDetectionModel, batch_inputs: ModelBatchInputs):
-    return model(**model.forward_inputs(batch_inputs))
+def _run(model: StreamPETRDetection3DModel, batch_inputs: ModelBatchInputs):
+    return model(batch_inputs)
 
 
 def test_streampetr_forward_returns_per_layer_decoder_outputs() -> None:
@@ -178,33 +244,50 @@ def test_streampetr_forward_returns_per_layer_decoder_outputs() -> None:
     assert head_outputs.all_bbox_preds.shape == (3, 2, 40, 10)
 
 
-def test_forward_inputs_read_the_images_calibration_and_stream_metadata() -> None:
-    model = _build_model()
+def test_forward_reads_the_calibration_and_the_stream_metadata_of_the_batch() -> None:
+    """The lane memory follows the scene tokens and the poses the batch carries."""
+    model = _build_model().eval()
+    head = model.bbox_head
     ego2global = torch.eye(4)
     ego2global[:3, 3] = torch.tensor([65460.2, 675.7, 715.4])
-    batch_inputs = _build_batch_inputs(
-        torch.randn(1, NUM_CAMS, 3, *IMAGE_HW),
-        timestamps=[1.7e9],
-        scene_tokens=["db/scene_a/0"],
-        gt_boxes=[_collated_box(1.0, 2.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.3, 0.4, 0.9)],
-        gt_labels=[torch.tensor([1])],
-        ego2globals=ego2global.unsqueeze(0),
+    img = torch.randn(1, NUM_CAMS, 3, *IMAGE_HW)
+
+    with torch.no_grad():
+        _run(model, _build_batch_inputs(img, timestamps=[1.7e9], scene_tokens=["db/scene_a/0"]))
+        _run(
+            model,
+            _build_batch_inputs(
+                img,
+                timestamps=[1.7e9 + 0.1],
+                scene_tokens=["db/scene_a/0"],
+                ego2globals=ego2global.unsqueeze(0),
+            ),
+        )
+
+    assert head.stream_continuity.scene_tokens == ["db/scene_a/0"]
+    assert head.stream_continuity.timestamps.dtype == torch.float64
+    # The bank is stored in the map frame, so the stored pose is the frame's pose.
+    torch.testing.assert_close(head.memory_egopose[0, 0], ego2global)
+
+
+def test_forward_rejects_a_batch_without_images_or_frame_meta() -> None:
+    model = _build_model()
+    with pytest.raises(ValueError, match="images and the frame metadata"):
+        model(build_batch_inputs(images=_build_images(torch.randn(1, NUM_CAMS, 3, *IMAGE_HW))))
+
+
+def test_ground_truth_drops_the_vertical_velocity() -> None:
+    gt_detections = build_detection3d_gt_batch(
+        [_collated_box(1.0, 2.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.3, 0.4, 0.9)], [torch.tensor([1])]
     )
 
-    inputs = model.forward_inputs(batch_inputs)
+    gt_boxes, gt_labels = _ground_truth(gt_detections)
 
-    assert inputs["img"] is batch_inputs.image_data.images
-    assert inputs["lidar2img"] is batch_inputs.image_data.lidar2images
-    assert inputs["timestamp"].dtype == torch.float64
-    assert list(inputs["scene_tokens"]) == ["db/scene_a/0"]
-    torch.testing.assert_close(
-        inputs["ego_pose_inv"][0] @ ego2global, torch.eye(4), atol=1e-4, rtol=0
-    )
     # The head regresses [x, y, z, l, w, h, yaw, vx, vy]; the vertical velocity is dropped.
     torch.testing.assert_close(
-        inputs["gt_boxes"][0], torch.tensor([[1.0, 2.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.3, 0.4]])
+        gt_boxes[0], torch.tensor([[1.0, 2.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.3, 0.4]])
     )
-    assert inputs["gt_labels"][0].dtype == torch.int64
+    assert gt_labels[0].dtype == torch.int64
 
 
 def test_training_step_runs_with_denoising_queries_and_predicts() -> None:
@@ -223,7 +306,7 @@ def test_training_step_runs_with_denoising_queries_and_predicts() -> None:
     loss = model.training_step(batch_inputs, batch_idx=0)
     loss.backward()
     outputs = _run(model, batch_inputs)
-    predictions = model.predict_outputs(batch_inputs, outputs)
+    predictions = model.decode_outputs(batch_inputs, outputs)
 
     assert torch.isfinite(loss)
     assert outputs.detection3d().streampetr_head().denoising is not None
@@ -302,7 +385,7 @@ def _far_pose(x: float, y: float, yaw: float) -> torch.Tensor:
 
 
 def _exported_head_outputs(
-    model: StreamPETRDetectionModel,
+    model: StreamPETRDetection3DModel,
     batch_inputs: ModelBatchInputs,
     pose: torch.Tensor,
     pre_memory: tuple[torch.Tensor, ...],
@@ -313,13 +396,13 @@ def _exported_head_outputs(
     img_features = model.image_feature_extractor(img)
     pos_embed, cone = head.position_embedding(
         img_features,
-        batch_inputs.image_data.camera_intrinsics,
+        batch_inputs.image_data.augmented_camera_intrinsics(),
         *IMAGE_HW,
         img2lidar=torch.inverse(batch_inputs.image_data.lidar2images),
     )
     specs = model.build_export_specs(batch_inputs)
     assert list(specs) == ["extract_img_feat", "position_embedding", "pts_head_memory"]
-    # The runtime binds the inverse pose; computed in float64 like forward_inputs does, a
+    # The runtime binds the inverse pose; computed in float64 like forward does, a
     # float32 LU at kilometer scale would move the bank by 1e-4 m and fail the bit-exact
     # comparison for a reason that has nothing to do with the graphs.
     outputs = specs["pts_head_memory"].module(
@@ -441,6 +524,25 @@ def test_exported_head_matches_eval_forward_on_the_first_frame_of_a_stream() -> 
     )
 
 
+def test_export_wrappers_are_built_in_eval_mode() -> None:
+    """The exporter restores the wrapper's mode onto the shared head after tracing.
+
+    A wrapper left in training mode would switch the decoder dropout on in the head for
+    every run after the export, so the export verification would compare the graph against
+    a stochastic reference.
+    """
+    model = _build_model().eval()
+    batch_inputs = _build_batch_inputs(torch.randn(1, NUM_CAMS, 3, *IMAGE_HW))
+
+    with torch.no_grad():
+        specs = model.build_export_specs(batch_inputs)
+
+    for name in ("position_embedding", "pts_head_memory"):
+        assert not specs[name].module.training
+        assert not specs[name].module.head.training
+    assert specs["position_embedding"].module.head is specs["pts_head_memory"].module.head
+
+
 def test_pseudo_reference_points_cover_the_whole_range_on_every_axis() -> None:
     points = _build_model().bbox_head.pseudo_reference_points
     assert points.shape == (8, 3)
@@ -480,6 +582,59 @@ def test_every_token_carries_the_focal_length_of_its_own_camera() -> None:
     torch.testing.assert_close(cone[0, :, 1], expected)
 
 
+def test_position_embedding_and_export_see_the_intrinsics_of_the_augmented_images() -> None:
+    """The batch carries the raw intrinsics; the head and the graph need the augmented ones.
+
+    Regression test: with the raw intrinsics the cone focal input is off by the resize factor
+    (3.9x on the production recipe) and the exported ``intrinsics`` no longer match what the
+    runtime binds, which composes the resize into the intrinsics it hands the graph.
+    """
+    model = _build_model().eval()
+    head = model.bbox_head
+    batch_size = 2
+    raw_intrinsics = torch.eye(3).repeat(batch_size, NUM_CAMS, 1, 1)
+    raw_intrinsics[..., 0, 0] = 1000.0
+    raw_intrinsics[..., 1, 1] = 1100.0
+    raw_intrinsics[..., 0, 2] = IMAGE_HW[1]
+    raw_intrinsics[..., 1, 2] = IMAGE_HW[0]
+    lidar2cams = torch.eye(4).repeat(batch_size, NUM_CAMS, 1, 1)
+    lidar2cams[..., :3, 3] = torch.randn(batch_size, NUM_CAMS, 3)
+    image_data = _build_images(
+        torch.randn(batch_size, NUM_CAMS, 3, *IMAGE_HW),
+        camera_intrinsics=raw_intrinsics,
+        pixel_affines=_resize_crop_flip_affines(batch_size),
+        lidar2cams=lidar2cams,
+    )
+    batch_inputs = build_batch_inputs(images=image_data, frame_meta=_build_frame_meta([0.0, 0.0]))
+    expected = image_data.augmented_camera_intrinsics()
+    # The augmented intrinsics are what lidar2images carries on top of the extrinsics.
+    torch.testing.assert_close(
+        (image_data.lidar2images @ torch.inverse(image_data.lidar2cams))[..., :3, :3],
+        expected,
+        atol=1e-3,
+        rtol=1e-5,
+    )
+    assert not torch.allclose(expected, raw_intrinsics)
+
+    seen: dict[str, torch.Tensor] = {}
+    original = head.position_embedding
+
+    def spy(img_features, camera_intrinsics, *args, **kwargs):
+        seen["intrinsics"] = camera_intrinsics
+        return original(img_features, camera_intrinsics, *args, **kwargs)
+
+    head.position_embedding = spy
+    with torch.no_grad():
+        _run(model, batch_inputs)
+    head.position_embedding = original
+    torch.testing.assert_close(seen["intrinsics"], expected)
+
+    with torch.no_grad():
+        specs = model.build_export_specs(batch_inputs)
+    # The export binds the first sample's augmented intrinsics, padded to 4x4.
+    torch.testing.assert_close(specs["position_embedding"].args[1][..., :3, :3], expected[:1])
+
+
 def test_phase_hooks_start_new_streams() -> None:
     model = _build_model().eval()
     with torch.no_grad():
@@ -489,6 +644,25 @@ def test_phase_hooks_start_new_streams() -> None:
     model.on_validation_epoch_start()
 
     assert model.bbox_head.memory_embedding is None
+    assert model.bbox_head.stream_continuity.scene_tokens is None
+
+
+def test_phase_hooks_reset_the_metrics_before_starting_new_streams() -> None:
+    """Regression test: the stream hooks used to hide the metric reset of the eval mixin.
+
+    Without the reset, the detection metric accumulated across validation epochs and the
+    monitored mAP, hence the checkpoint selection, drifted with the history of the run.
+    """
+    model = _build_model(metrics=[_ResetCountingSuite()])
+    val_suite = model._stage_metrics(EvalStage.VAL)[0]
+    test_suite = model._stage_metrics(EvalStage.TEST)[0]
+    resets_after_construction = (val_suite.resets, test_suite.resets)
+
+    model.on_validation_epoch_start()
+    model.on_test_epoch_start()
+
+    assert val_suite.resets == resets_after_construction[0] + 1
+    assert test_suite.resets == resets_after_construction[1] + 1
     assert model.bbox_head.stream_continuity.scene_tokens is None
 
 
@@ -624,9 +798,7 @@ def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
     assert all(torch.isfinite(losses[key]) for key in roi_keys)
     gt_detections = batch_inputs.multi_task_gt_batch.detection3d_gt_batch
     without_roi = model.bbox_head.loss(
-        outputs.detection3d().streampetr_head(),
-        [boxes[:, :9] for boxes in gt_detections.valid_bboxes_3d()],
-        gt_detections.valid_labels_3d(),
+        outputs.detection3d().streampetr_head(), *_ground_truth(gt_detections)
     )
     # The total adds the five auxiliary terms to the detection loss.
     torch.testing.assert_close(

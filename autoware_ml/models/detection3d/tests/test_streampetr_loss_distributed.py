@@ -48,14 +48,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 _WORLD_SIZE = 2
-_NUM_CLASSES = 3
+_CLASS_NAMES = ["car", "truck", "bus"]
+_NUM_CLASSES = len(_CLASS_NAMES)
 _NUM_QUERIES = 32
 
 
 def _build_head() -> StreamPETRHead:
     torch.manual_seed(0)
     return StreamPETRHead(
-        num_classes=_NUM_CLASSES,
+        class_names=_CLASS_NAMES,
         in_channels=128,
         hidden_dim=128,
         num_queries=_NUM_QUERIES,
@@ -86,6 +87,7 @@ def _build_head() -> StreamPETRHead:
                 weight=0.25, code_weights=(2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)
             ),
             iou_cost=IoU3DCost(weight=0.0),
+            point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
         ),
         point_cloud_range=[-10.0, -10.0, -5.0, 10.0, 10.0, 5.0],
         code_weights=[2.0, 2.0] + [1.0] * 8,

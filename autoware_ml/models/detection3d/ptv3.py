@@ -522,7 +522,6 @@ class PTv3Detection3DModel(PTv3BaseModel):
             detection3d_head_outputs=Detection3DHeadOutputs(
                 center_head_outputs=None,
                 transfusion_head_outputs=self.bbox_head(self.bev_neck(point)),
-                streampetr_head_outputs=None,
             )
         )
 
