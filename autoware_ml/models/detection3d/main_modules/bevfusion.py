@@ -62,7 +62,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers impo
     export_detection_outputs,
 )
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.quantization.plan import QuantRules
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
@@ -242,15 +242,16 @@ class _BEVFusionExportWrapper(_BEVFusionExportWrapperBase):
 #: towers of the lidar branch quantize with Q/DQ; the sparse middle encoder quantizes as
 #: the ``spconv`` kind — its layers deploy as ``autoware::ImplicitGemm`` plugin nodes
 #: carrying per-layer INT8 scales rather than Q/DQ (the plugin has no FP8 path, so the
-#: kind is pinned INT8 rather than following ``default_precision``). The decoder's Linear
-#: layers are pinned FP8: INT8 linears cost accuracy for nothing while E4M3 held it. The
-#: pillar encoder has no weights to quantize.
+#: kind is pinned INT8 rather than following ``default_precision``). The pillar encoder
+#: has no weights to quantize.
 BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
     quantize_submodules={
         "lidar_network.pts_middle_encoder": {"spconv": "int8"},
         "lidar_network.pts_backbone": ("conv",),
         "lidar_network.pts_neck": ("conv",),
-        "bbox_head": {"conv": None, "linear": "fp8"},
+        # The head's shared conv and heatmap head (Conv2d); its decoder is skipped by every
+        # shipped config and its Conv1d prediction heads are not a replaceable kind.
+        "bbox_head": ("conv",),
     },
 )
 

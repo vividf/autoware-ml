@@ -57,7 +57,8 @@ def _is_standard_op(node: onnx.NodeProto, op_type: str) -> bool:
     return node.op_type == op_type and node.domain in _STANDARD_DOMAINS
 
 
-def _set_attribute(node: onnx.NodeProto, name: str, value: int) -> None:
+def replace_attribute(node: onnx.NodeProto, name: str, value: int | float) -> None:
+    """Set ``name`` on ``node``, replacing an existing attribute of that name."""
     kept = [attribute for attribute in node.attribute if attribute.name != name]
     del node.attribute[:]
     node.attribute.extend(kept)
@@ -117,7 +118,7 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
             and add.output[0] not in graph_outputs
         ):
             relu = activation[0]
-            _set_attribute(gemm, "act_type", ACT_RELU)
+            replace_attribute(gemm, "act_type", ACT_RELU)
             fused_activations += 1
             removed.append(relu)
             last, last_output = relu, relu.output[0]

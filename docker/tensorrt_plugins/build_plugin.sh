@@ -17,8 +17,8 @@
 set -euo pipefail
 
 PLUGINS_REPO="${PLUGINS_REPO:-https://github.com/vividf/autoware.universe.git}"
-# Pinned to a plugin revision that reads the do_sort attribute and sizes its index buffers
-# for 512k input voxels (autoware_universe#13300); bump deliberately.
+# Pinned to the INT8-capable plugin (do_sort + precision fields; autoware_universe#13369,
+# rebased on a main with #13300's 512k-voxel index buffers); bump deliberately.
 PLUGINS_REF="${PLUGINS_REF:-a5ac4b5e0d5e26c94b1e86dc31c8689daa81672b}"
 PLUGINS_SRC="${PLUGINS_SRC:-}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/plugins}"
@@ -170,6 +170,14 @@ if grep -q '"do_sort"' \
 else
     log "WARNING: source does NOT expose the do_sort attribute — engine builds will reject"
     log "         graphs exported by autoware_ml.ops.spconv."
+fi
+
+# Sparse INT8 (deploy configs whose sparse tower is quantized) needs the ImplicitGemm
+# plugin's INT8 path; without it the engine build fails on precision=1 nodes.
+if grep -q '"precision"' "$PLUGIN_SRC_DIR/src/implicit_gemm_plugin_creator.cpp" 2>/dev/null; then
+    log "Source exposes the ImplicitGemm INT8 path (precision attribute)"
+else
+    log "WARNING: source has no ImplicitGemm INT8 path — sparse-INT8 graphs will fail to build."
 fi
 
 # --- build ----------------------------------------------------------------------------
