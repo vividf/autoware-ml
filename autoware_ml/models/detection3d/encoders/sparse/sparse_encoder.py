@@ -109,10 +109,10 @@ def fold_sparse_encoder_bn(encoder: nn.Module) -> int:
 
     Inference-identity rewrite for the plugin graph: a plugin node has no BatchNormalization
     to fuse at engine build (a dense graph keeps its BN nodes for the runtime to fuse), so
-    the deployed sparse graph has to carry the folded weights. The fold happens on the
-    export copy before :meth:`SparseEncoder.prepare_for_export` builds the wrappers, so a
-    wrapper is constructed with the bias the fold introduces; ``prepare_for_export`` itself
-    keeps the weights as trained.
+    the deployed sparse graph has to carry the folded weights. Call it on an eval-mode
+    copy of the encoder *before* :meth:`SparseEncoder.prepare_for_export`, which builds a
+    wrapper with the bias the fold introduces; ``prepare_for_export`` itself keeps the
+    weights as trained.
 
     The fold pairs a convolution with the BatchNorm declared *next to* it. Insert anything
     between the two, or hang the norm one container deeper, and the pair stops matching;

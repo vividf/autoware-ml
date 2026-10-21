@@ -63,6 +63,9 @@ deploy:
           class_names: ${database.taxonomy.segmentation3d.class_names}
   tensorrt:
     enabled: false
+    # Implements the autoware:: sparse-convolution ops (the cpe layers) of the encoder and
+    # head graphs; built by the image (docker/tensorrt_plugins/README.md).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # The pytorch reference runs the export modules (shuffle_orders off), so the raw outputs
   # are comparable across backends.
   verification:

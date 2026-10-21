@@ -77,6 +77,10 @@ deploy:
           attention_node_name_substring: /bbox_head/decoder
   tensorrt:
     enabled: false
+    # Implements the encoder graph's autoware:: sparse-convolution ops (the cpe layers).
+    # Building the engines also needs deploy.tensorrt.input_shapes, which no detection
+    # config ships yet.
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # No verification: as in BEVFusion, the TransFusion head outputs per query after its
   # top-k, so the raw outputs do not line up by position across backends. Compare the
   # backends by evaluation mAP instead.

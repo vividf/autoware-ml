@@ -25,6 +25,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import lightning as L
@@ -50,6 +51,10 @@ class ExportSpec:
         output_names: Names of the exported output tensors, in order.
         dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
             the export arguments. Used only when exporting with ``dynamo=False``.
+        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
+            after the export and before any config-driven graph modifier or precision
+            cast (each takes the path and returns the path it wrote). A stage graph
+            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`.
     """
 
     module: torch.nn.Module
@@ -57,6 +62,27 @@ class ExportSpec:
     input_names: list[str]
     output_names: list[str]
     dynamic_axes: dict[str, dict[int, str]] | None = None
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
+
+    Args:
+        onnx_path: The freshly exported ``.onnx``.
+        transforms: Callables taking the current path and returning the path they wrote
+            (usually the same file, rewritten in place).
+
+    Returns:
+        The path the last transform returned (``onnx_path`` when there is none).
+    """
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed.
