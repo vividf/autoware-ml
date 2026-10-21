@@ -5,6 +5,10 @@ voxel_size: [0.17, 0.17, 0.2]
 out_size_factor: 8
 
 model:
+  bbox_head:
+    # Export without the softmax max-subtraction so TensorRT fuses the decoder attention into
+    # one MHA kernel (0.68 -> 0.25 ms on this graph). Export only; the deploy evaluation gates it.
+    fuse_export_attention: true
   lidar_network:
     pts_middle_encoder:
       # (Y, X, Z) voxel grid and dense (Y, X, Z) output of the sparse encoder.
