@@ -140,13 +140,20 @@ def stamp_onnx_meta(
     model.model_version = release_to_model_version(release)
     model.doc_string = f"{module} {release or UNVERSIONED}"
 
-    props = {
-        "release": release or UNVERSIONED,
-        "module": module,
-        "config_name": config_name,
-        "export_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "exported_with": exported_with,
-    }
+    # Keep what earlier export passes recorded (a stage transform's runtime contract, say);
+    # only the identity / provenance keys below are owned here.
+    props = {prop.key: prop.value for prop in model.metadata_props}
+    props.update(
+        {
+            "release": release or UNVERSIONED,
+            "module": module,
+            "config_name": config_name,
+            "export_date": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            "exported_with": exported_with,
+        }
+    )
     if tracker is not None:
         props["tracker"] = tracker
     if run_id is not None:
