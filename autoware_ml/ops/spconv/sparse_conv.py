@@ -61,7 +61,7 @@ def _apply_activation(
     raise NotImplementedError(f"Unsupported sparse activation type: {act_type!r}")
 
 
-def _resolve_output_spatial_shape(
+def resolve_output_spatial_shape(
     spatial_shape: list[int],
     *,
     subm: bool,
@@ -129,6 +129,13 @@ class SparseConvolution(SparseConvolutionBase):
     The wrapper preserves eager spconv behavior while routing export through
     the custom ONNX-friendly sparse functional bridges defined by autoware-ml.
     """
+
+    #: Whether pair-mask generation argsorts its result, baked into the exported
+    #: ``GetIndicePairsImplicitGemm`` and used by this wrapper's own execution so the
+    #: PyTorch reference matches the engine. Sorting only improves memory locality — it
+    #: does not change the pairing math — so it is a hardware-specific latency
+    #: trade-off; the owning encoder sets it (see ``SparseEncoder.export_do_sort``).
+    export_do_sort: bool = True
 
     def _validate_export_configuration(
         self,
@@ -380,6 +387,7 @@ class SparseConvolution(SparseConvolutionBase):
                         not self.subm,
                         input_tensor.thrust_allocator,
                         input_tensor._timer,
+                        self.export_do_sort,
                     )
                 )
             except Exception as exc:
@@ -558,7 +566,7 @@ class SparseConvolution(SparseConvolutionBase):
         indices = input.indices
         spatial_shape = input.spatial_shape
         batch_size = input.batch_size
-        out_spatial_shape = _resolve_output_spatial_shape(
+        out_spatial_shape = resolve_output_spatial_shape(
             spatial_shape,
             subm=self.subm,
             transposed=self.transposed,
