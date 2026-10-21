@@ -17,16 +17,13 @@ Quantization framework (model-agnostic).
 
 PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layers:
 
-- :mod:`~autoware_ml.quantization.plan`    — the single interface between deployment
-  stages and quantization: ``QuantRules`` (a model's declaration) + ``QuantizationPlan``
-  (rules bound to config; ``prepare`` builds the tree AND records a ``PlacementRecord``
-  of every placement decision).
+- :mod:`~autoware_ml.quantization.rules`   — ``QuantRules``, a model's declaration; the
+  one module a model imports (no modelopt behind it).
+- :mod:`~autoware_ml.quantization.plan`    — ``QuantizationPlan`` (rules bound to config;
+  ``prepare`` builds the tree AND records a ``PlacementRecord`` of every placement decision).
 - :mod:`~autoware_ml.quantization.core`    — model-agnostic engine on nvidia-modelopt
   (descriptor tables, in-place module conversion through modelopt's ``QuantModuleRegistry``,
   BN fusion, calibration, quantizer state).
-- :mod:`~autoware_ml.quantization.recipes` — architecture-specific Q/DQ placement as
-  matcher+action recipes: quantized block classes selected by ``ResidualBlockSpec`` /
-  ``ESEBlockSpec`` rows (residual blocks, VoVNet eSE), plus the MaxPool input wrapper.
 - :mod:`~autoware_ml.quantization.config`  — typed view of the Hydra ``quantization`` section.
 - :mod:`~autoware_ml.quantization.checkpoint` — self-describing quantized checkpoints (config +
   placement record embedded next to the ``state_dict``; no sidecar files).
@@ -35,77 +32,79 @@ PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layer
   into frozen-amax QAT fine-tuning.
 
 A model's quantization declaration (e.g. CenterPoint's ``QuantRules``) lives next to the model
-and is exposed through the model's ``build_quantization_plan()`` hook — the engine never imports
-a model.
+and is exposed through its ``build_quantization_rules()`` hook — the engine never imports a
+model.
 
 The invariant every stage preserves: the quantize stage (PTQ / QAT) and the loader all build the
-quantized module tree by calling the *same* ``build_quantization_plan(config).prepare(model)``,
+quantized module tree by calling the *same* ``QuantizationPlan.for_model(model, config).prepare(model)``,
 so the calibrated ``state_dict`` and the later ``load_state_dict`` line up by construction —
 and the placement record embedded in the checkpoint lets the loader machine-check that instead
 of trusting it. Because the config travels inside the checkpoint, ``deploy`` and ``test`` need
 no ``quantization`` section at all.
 
 The names exported here are the package's real external API. Deeper internals (descriptor
-tables, the single Conv-BN fold, the block registry) stay importable from their defining
+tables, the single Conv-BN fold) stay importable from their defining
 modules but are deliberately not re-exported.
+
+The exports load on first access. Importing ``autoware_ml.quantization.rules`` runs this
+``__init__`` first, and every model imports ``rules`` through
+``models/module_base_model.py``; eager re-exports would pull modelopt (and its import-time
+patches) into every model import.
 """
 
-from autoware_ml.utils.bn_fusion import fuse_model_bn
+from __future__ import annotations
 
-from .checkpoint import (
-    QUANTIZATION_KEY,
-    QuantizationDescription,
-    find_quantization,
-    read_quantization,
-    save_quantized_checkpoint,
-)
-from .config import CalibrationConfig, PTQConfig, QATConfig, QuantizationConfig
-from .core.calibration import Calibrator
-from .core.quantizer_state import (
-    disable_quantizers_in,
-    print_quantizer_status,
-    quantizers_disabled,
-    set_quantizers_enabled,
-    validate_quantizer_amax,
-)
-from .core.replace import (
-    expand_skip_quantize,
-    match_skip_quantize_roots,
-    replace_quantizable_modules,
-)
-from .loader import load_quantized_model
-from .plan import PlacementDecision, PlacementRecord, QuantizationPlan, QuantRules
+from importlib import import_module
+from typing import Any
 
-__all__ = [
+# Defining module -> the names re-exported from it.
+_EXPORTS: dict[str, tuple[str, ...]] = {
     # Typed config
-    "QuantizationConfig",
-    "CalibrationConfig",
-    "PTQConfig",
-    "QATConfig",
+    ".config": ("QuantizationConfig", "CalibrationConfig", "PTQConfig", "QATConfig"),
     # Plan (the single interface between deployment stages and quantization)
-    "QuantRules",
-    "QuantizationPlan",
-    "PlacementRecord",
-    "PlacementDecision",
+    ".rules": ("QuantRules",),
+    ".plan": ("QuantizationPlan", "PlacementRecord", "PlacementDecision"),
     # Self-describing checkpoints
-    "QUANTIZATION_KEY",
-    "QuantizationDescription",
-    "save_quantized_checkpoint",
-    "read_quantization",
-    "find_quantization",
-    "load_quantized_model",
+    ".checkpoint": (
+        "QUANTIZATION_KEY",
+        "QuantizationDescription",
+        "save_quantized_checkpoint",
+        "read_quantization",
+        "find_quantization",
+    ),
+    ".loader": ("load_quantized_model",),
     # Replace / placement
-    "replace_quantizable_modules",
-    "expand_skip_quantize",
-    "match_skip_quantize_roots",
+    ".core.replace": (
+        "replace_quantizable_modules",
+        "expand_skip_quantize",
+        "match_skip_quantize_roots",
+    ),
     # Calibration
-    "Calibrator",
+    ".core.calibration": ("Calibrator",),
     # Fusion
-    "fuse_model_bn",
+    "autoware_ml.utils.bn_fusion": ("fuse_model_bn",),
     # Quantizer state
-    "disable_quantizers_in",
-    "quantizers_disabled",
-    "set_quantizers_enabled",
-    "validate_quantizer_amax",
-    "print_quantizer_status",
-]
+    ".core.quantizer_state": (
+        "disable_quantizers_in",
+        "quantizers_disabled",
+        "set_quantizers_enabled",
+        "validate_quantizer_amax",
+        "print_quantizer_status",
+    ),
+}
+_MODULE_OF = {name: module for module, names in _EXPORTS.items() for name in names}
+
+__all__ = list(_MODULE_OF)
+
+
+def __getattr__(name: str) -> Any:
+    module = _MODULE_OF.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
