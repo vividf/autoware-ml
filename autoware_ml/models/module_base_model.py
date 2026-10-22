@@ -40,6 +40,7 @@ from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.types.dataset import SplitType
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
@@ -431,6 +432,19 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
             NotImplementedError: If the model declares no deployment stage graph.
         """
         raise NotImplementedError(f"{type(self).__name__} declares no deployment stage graph.")
+
+    def build_quantization_rules(self) -> QuantRules | None:
+        """Declare which submodules carry which quantizable module kinds, or ``None``.
+
+        A :class:`~autoware_ml.quantization.rules.QuantRules` object stating, per
+        submodule (a dotted path of the module tree), the module kinds (``conv`` /
+        ``linear`` / ``spconv``) the quantize stage may replace. It is an architecture
+        fact and lives in code; the ``quantization`` config only subtracts from it
+        (``skip_quantize``). ``None`` means the model does not support quantization.
+        Every stage binds it to a config through
+        :meth:`~autoware_ml.quantization.plan.QuantizationPlan.for_model`.
+        """
+        return None
 
     def build_export_specs(
         self, multi_task_batch_inputs: ModelBatchInputs
