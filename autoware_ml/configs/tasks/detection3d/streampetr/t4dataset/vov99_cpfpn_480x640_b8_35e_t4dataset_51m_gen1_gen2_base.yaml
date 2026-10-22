@@ -29,6 +29,7 @@ datasets:
     database_root_path: ${gen2_database.root_path}
     lidar_intensity_scale: ${gen2_database.lidar_intensity_scale}
     camera_names: ${camera_names}
+    max_num_2d_gt_bboxes: ${datasets.train.max_num_2d_gt_bboxes}
     transforms: ${datasets.train.transforms}
   gen2_test:
     database_root_path: ${gen2_database.root_path}

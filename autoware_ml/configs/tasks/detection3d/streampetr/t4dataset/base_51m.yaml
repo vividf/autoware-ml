@@ -49,6 +49,10 @@ model:
 datasets:
   train:
     camera_names: ${camera_names}
+    # LoadAnnotations2DFromBoxes3D projects every 3D box of a frame onto a camera at most once,
+    # so a camera cannot see more 2D boxes than the frame has 3D boxes, and the 3D maximum of
+    # the dataset (max_num_3d_gt_bboxes: 500) bounds every camera too.
+    max_num_2d_gt_bboxes: 500
     transforms:
       _target_: autoware_ml.transforms.base.TransformsCompose
       _convert_: all
@@ -80,12 +84,13 @@ datasets:
 
           min_points: 2
 
-        # The reference recipe shuffles the camera order every training frame
-        # (StreamPETRDataset shuffle_cameras=True); train-time only.
         - _target_: autoware_ml.transforms.camera.loading.LoadImagesFromFile
           _convert_: all
 
-          shuffle_order: true
+        # The reference recipe shuffles the camera order every training frame
+        # (StreamPETRDataset shuffle_cameras=True); train-time only.
+        - _target_: autoware_ml.transforms.camera.order.ShuffleCameraOrder
+          _convert_: all
 
         # +-0.02 around the factor at which every camera covers 480x640, so the cameras of
         # every vehicle keep the same framing whatever their resolution.

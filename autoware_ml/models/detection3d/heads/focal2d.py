@@ -314,10 +314,12 @@ class FocalHead2D(nn.Module):
 
         Args:
             outputs: Dense 2D predictions of the head.
-            gt_bboxes_2d: Per-sample, per-camera projected 2D boxes in
-                unnormalized ``(x1, y1, x2, y2)`` pixels.
+            gt_bboxes_2d: Per-sample, per-camera 2D boxes, one unnormalized
+                ``(x_min, y_min, x_max, y_max)`` row per box in pixels: the edge columns of
+                the Box2DFieldIndex rows, without the center.
             gt_labels_2d: Per-sample, per-camera class labels.
-            centers_2d: Per-sample, per-camera projected 3D centers in pixels.
+            centers_2d: Per-sample, per-camera object centers, one ``(center_x, center_y)``
+                row per box in pixels: the center columns of the Box2DFieldIndex rows.
             gt_annotated_class_masks: True where a class is annotated in a sample; every
                 image of a sample weights its classification by the row of its sample, so
                 the background terms of the unannotated classes are dropped. None

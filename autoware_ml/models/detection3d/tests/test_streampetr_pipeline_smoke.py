@@ -40,6 +40,7 @@ from autoware_ml.transforms.boxes3d.filters import (
 )
 from autoware_ml.transforms.camera.annotations2d import LoadAnnotations2DFromBoxes3D
 from autoware_ml.transforms.camera.loading import LoadImagesFromFile
+from autoware_ml.transforms.camera.order import ShuffleCameraOrder
 from autoware_ml.transforms.camera.resize import ResizeCropFlipRotImage
 from autoware_ml.transforms.camera_lidar.geometry import GlobalRotScaleTrans
 
@@ -114,7 +115,8 @@ def build_transforms() -> TransformsCompose:
         pipeline=[
             BBoxesPhysicalFilter(),
             BBoxesLabelNameFilter(label_names_to_keep=CLASS_NAMES, class_names=CLASS_NAMES),
-            LoadImagesFromFile(shuffle_order=True),
+            LoadImagesFromFile(),
+            ShuffleCameraOrder(),
             ResizeCropFlipRotImage(
                 target_size=IMAGE_SIZE,
                 resize_range=0.02,
@@ -152,6 +154,7 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
             lidar_intensity_scale=255.0,
             database_root_path=str(root),
             max_num_3d_gt_bboxes=8,
+            max_num_2d_gt_bboxes=8,
             dataset_records_dataframe=records,
             transforms=build_transforms(),
             dataset_tasks={"detection3d": Detection3DTask},

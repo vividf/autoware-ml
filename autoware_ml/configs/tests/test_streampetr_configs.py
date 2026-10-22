@@ -81,6 +81,52 @@ def test_every_pipeline_filters_the_physical_boxes_before_anything_else(config_n
         assert steps[0].endswith("boxes3d.filters.BBoxesPhysicalFilter"), (config_name, split)
 
 
+@pytest.mark.parametrize("config_name", STAGES)
+def test_every_dataset_projecting_2d_boxes_pads_them_to_its_3d_maximum(config_name: str) -> None:
+    """
+    Input: the composed datasets of every stage.
+    Expected: a dataset whose pipeline projects the 3D boxes onto the cameras collates its 2D
+    boxes to a fixed count, without which its first batch is refused; a camera cannot see more
+    2D boxes than its frame has 3D boxes, so the 3D maximum serves as the 2D one, on the gen2
+    source of stage 2 too.
+    Check: every dataset with LoadAnnotations2DFromBoxes3D in its pipeline, and at least the
+    training dataset, sets max_num_2d_gt_bboxes to its max_num_3d_gt_bboxes.
+    """
+    cfg = compose_experiment(config_name)
+    projecting = [
+        name
+        for name, dataset in cfg.datasets.items()
+        if any(
+            step["_target_"].endswith("LoadAnnotations2DFromBoxes3D")
+            for step in dataset.transforms.pipeline
+        )
+    ]
+    assert "train" in projecting
+    for name in projecting:
+        dataset = cfg.datasets[name]
+        assert dataset.max_num_2d_gt_bboxes == dataset.max_num_3d_gt_bboxes, name
+
+
+@pytest.mark.parametrize("config_name", STAGES)
+def test_only_the_t4_training_pipelines_shuffle_the_loaded_cameras(config_name: str) -> None:
+    """
+    Input: the training and test pipelines of every stage.
+    Expected: the T4 reference recipe shuffles the camera order of every training frame, and
+    never at evaluation, while the nuScenes reference recipe does not shuffle at all.
+    Check: ShuffleCameraOrder directly follows LoadImagesFromFile in the T4 training pipelines
+    and appears in no other pipeline.
+    """
+    cfg = compose_experiment(config_name)
+    for split in ("train", "test"):
+        steps = [
+            step["_target_"].rsplit(".", 1)[1] for step in cfg.datasets[split].transforms.pipeline
+        ]
+        shuffles = split == "train" and "/t4dataset/" in config_name
+        loading = steps.index("LoadImagesFromFile")
+        assert (steps[loading + 1] == "ShuffleCameraOrder") == shuffles, split
+        assert ("ShuffleCameraOrder" in steps) == shuffles, split
+
+
 @pytest.mark.parametrize("config_name", [stage for stage in STAGES if "/t4dataset/" in stage])
 def test_t4_stages_ignore_the_cones_and_barriers_of_the_scenes_without_them(
     config_name: str,

@@ -25,6 +25,10 @@ filter_attributes: []
 datasets:
   train:
     camera_names: ${camera_names}
+    # LoadAnnotations2DFromBoxes3D projects every 3D box of a frame onto a camera at most once,
+    # so a camera cannot see more 2D boxes than the frame has 3D boxes, and the 3D maximum of
+    # the dataset (max_num_3d_gt_bboxes: 500) bounds every camera too.
+    max_num_2d_gt_bboxes: 500
     transforms:
       _target_: autoware_ml.transforms.base.TransformsCompose
       _convert_: all

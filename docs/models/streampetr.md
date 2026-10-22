@@ -361,7 +361,9 @@ annotations of the T4 stages.
 | `autoware_ml/datamodule/samplers.py`                                 | `GroupStreamingSampler`, the scene lanes          |
 | `autoware_ml/datamodule/base_dataset.py`                             | Scene grouping of the record table                |
 | `autoware_ml/dataclasses/batch/frame_meta.py`                        | Per-frame pose, scene and sample time             |
+| `autoware_ml/dataclasses/batch/detection2d.py`                       | 2D boxes padded to `max_num_2d_gt_bboxes`         |
 | `autoware_ml/transforms/camera/annotations2d.py`                     | 2D targets projected from the 3D boxes            |
+| `autoware_ml/transforms/camera/order.py`                             | `ShuffleCameraOrder`, T4 training only            |
 | `autoware_ml/transforms/camera/resize.py`                            | `ResizeCropFlipRotImage`, the image augmentation  |
 | `autoware_ml/transforms/camera_lidar/geometry.py`                    | `GlobalRotScaleTrans`, camera-only here           |
 | `autoware_ml/preprocessing/camera/normalize.py`                      | Batched image normalization                       |

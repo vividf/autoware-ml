@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
+from autoware_ml.dataclasses.batch.detection2d import Detection2DGTBatch
 from autoware_ml.dataclasses.batch.detection3d import Detection3DGTBatch
 from autoware_ml.dataclasses.models.detection3d.head_outputs import (
     Detection3DHeadOutputs,
@@ -35,7 +36,7 @@ from autoware_ml.models.detection3d.task_modules.streaming import (
 )
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.types.geometry import Box3DFieldIndex
+from autoware_ml.types.geometry import Box2DFieldIndex, Box3DFieldIndex
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -57,6 +58,29 @@ def _ground_truth(
     """
     gt_boxes = [boxes[:, : Box3DFieldIndex.VELOCITY_Z] for boxes in gt_detections.valid_bboxes_3d()]
     return gt_boxes, gt_detections.valid_labels_3d()
+
+
+def _ground_truth_2d(
+    gt_detections_2d: Detection2DGTBatch,
+) -> tuple[list[list[torch.Tensor]], list[list[torch.Tensor]], list[list[torch.Tensor]]]:
+    """Unpad the 2D boxes of every camera of every sample into the 2D head's layout.
+
+    A collated row holds the box edges and the object center, laid out by
+    ``Box2DFieldIndex``. FocalHead2D takes the ``(x_min, y_min, x_max, y_max)`` edges and the
+    ``(center_x, center_y)`` centers as separate tensors and reshapes the boxes to four
+    columns, so the rows are split here: whole rows would be reshaped into wrong boxes.
+
+    Returns:
+        The edges, the labels and the object centers of every camera of every sample.
+    """
+    edges = slice(Box2DFieldIndex.X_MIN, Box2DFieldIndex.Y_MAX + 1)
+    center = slice(Box2DFieldIndex.CENTER_X, Box2DFieldIndex.CENTER_Y + 1)
+    rows = gt_detections_2d.valid_bboxes_2d()
+    gt_bboxes_2d = [[camera_rows[:, edges] for camera_rows in sample_rows] for sample_rows in rows]
+    gt_centers_2d = [
+        [camera_rows[:, center] for camera_rows in sample_rows] for sample_rows in rows
+    ]
+    return gt_bboxes_2d, gt_detections_2d.valid_labels_2d(), gt_centers_2d
 
 
 class _StreamPETRPositionEmbeddingExportWrapper(nn.Module):
@@ -384,11 +408,12 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
                     "The auxiliary 2D head trains on the 2D boxes of the batch; add "
                     "LoadAnnotations2DFromBoxes3D to the training transforms."
                 )
+            gt_bboxes_2d, gt_labels_2d, gt_centers_2d = _ground_truth_2d(detection2d)
             roi_losses = self.img_roi_head.loss(
                 head_outputs.auxiliary_2d,
-                gt_bboxes_2d=detection2d.valid_bboxes_2d(),
-                gt_labels_2d=detection2d.valid_labels_2d(),
-                centers_2d=detection2d.valid_centers_2d(),
+                gt_bboxes_2d=gt_bboxes_2d,
+                gt_labels_2d=gt_labels_2d,
+                centers_2d=gt_centers_2d,
                 gt_annotated_class_masks=gt_annotated_class_masks,
             )
             losses.update(roi_losses)

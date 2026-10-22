@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 import math
+from unittest import mock
 
 import pytest
 import torch
@@ -34,6 +35,7 @@ from autoware_ml.models.tests.batch_inputs_fixtures import (
     build_detection3d_gt_batch,
 )
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.types.geometry import Box2DFieldIndex
 
 NUM_CAMS = 6
 IMAGE_HW = (96, 160)
@@ -1001,20 +1003,26 @@ def _build_focal_head(class_names: Sequence[str] = CLASS_NAMES) -> FocalHead2D:
     return FocalHead2D(class_names=class_names, in_channels=128, embed_dims=32, stride=8)
 
 
-def _with_2d_boxes(batch_inputs: ModelBatchInputs) -> ModelBatchInputs:
-    """Give every camera of every sample one 2D box of class 0, the last camera none."""
+def _with_2d_boxes(
+    batch_inputs: ModelBatchInputs, rows: torch.Tensor | None = None
+) -> ModelBatchInputs:
+    """Give every camera of every sample the 2D rows, of class 0, the last camera none.
+
+    The rows are laid out by Box2DFieldIndex; by default one box with its center in the middle.
+    """
+    if rows is None:
+        rows = torch.tensor([[10.0, 10.0, 60.0, 60.0, 35.0, 35.0]])
     num_samples = batch_inputs.batch_size()
     samples = [
         Detection2DGTSample(
-            gt_bboxes_2d=[torch.tensor([[10.0, 10.0, 60.0, 60.0]])] * (NUM_CAMS - 1)
-            + [torch.zeros(0, 4)],
-            gt_centers_2d=[torch.tensor([[35.0, 35.0]])] * (NUM_CAMS - 1) + [torch.zeros(0, 2)],
-            gt_labels_2d=[torch.tensor([0])] * (NUM_CAMS - 1) + [torch.zeros(0, dtype=torch.int64)],
+            gt_bboxes_2d=[rows] * (NUM_CAMS - 1) + [torch.zeros(0, len(Box2DFieldIndex))],
+            gt_labels_2d=[torch.zeros(len(rows), dtype=torch.int32)] * (NUM_CAMS - 1)
+            + [torch.zeros(0, dtype=torch.int32)],
         )
         for _ in range(num_samples)
     ]
     gt_batch = batch_inputs.multi_task_gt_batch._replace(
-        detection2d_gt_batch=Detection2DGTBatch.collate_gt_samples(samples)
+        detection2d_gt_batch=Detection2DGTBatch.collate_gt_samples(samples, max_num_2d_gt_bboxes=4)
     )
     return batch_inputs.replace(multi_task_gt_batch=gt_batch)
 
@@ -1061,6 +1069,38 @@ def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
     )
     losses["loss"].backward()
     assert all(parameter.grad is not None for parameter in model.img_roi_head.cls.parameters())
+
+
+def test_auxiliary_2d_head_takes_the_box_edges_and_the_object_centers_apart() -> None:
+    """
+    Input: a training batch whose cameras hold two 2D rows each, laid out by Box2DFieldIndex,
+    with the object centers off the box middles, and a last camera without boxes.
+    Expected: FocalHead2D takes the box edges and the object centers as separate tensors and
+    reshapes the boxes to four columns, so the model splits every row; whole six-column rows
+    would be reshaped into three wrong boxes per camera without an error.
+    Check: the boxes, centers and labels the 2D loss receives equal the first four columns,
+    the last two columns and the labels of the rows, camera by camera.
+    """
+    model = _build_model(img_roi_head=_build_focal_head()).train()
+    rows = torch.tensor(
+        [[10.0, 10.0, 60.0, 60.0, 30.0, 40.0], [70.0, 20.0, 110.0, 80.0, 95.0, 45.0]]
+    )
+    batch_inputs = _with_2d_boxes(_one_box_batch(), rows)
+    outputs = _run(model, batch_inputs)
+
+    with mock.patch.object(model.img_roi_head, "loss", wraps=model.img_roi_head.loss) as loss:
+        model.compute_metrics(batch_inputs, outputs)
+
+    received = loss.call_args.kwargs
+    for camera_index in range(NUM_CAMS):
+        visible = camera_index < NUM_CAMS - 1
+        torch.testing.assert_close(
+            received["gt_bboxes_2d"][0][camera_index], rows[:, :4] if visible else rows[:0, :4]
+        )
+        torch.testing.assert_close(
+            received["centers_2d"][0][camera_index], rows[:, 4:] if visible else rows[:0, 4:]
+        )
+        assert received["gt_labels_2d"][0][camera_index].tolist() == ([0, 0] if visible else [])
 
 
 def test_auxiliary_2d_head_needs_the_2d_boxes_in_training() -> None:
