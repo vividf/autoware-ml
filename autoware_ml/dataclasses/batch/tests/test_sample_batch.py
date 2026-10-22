@@ -33,6 +33,7 @@ from autoware_ml.dataclasses.geometry.transformation import LiDARTransformationS
 from autoware_ml.geometry.bbox_3d.lidar_bbox3d import LidarBBoxes3D
 from autoware_ml.geometry.points.lidar_points import LiDARPoints
 from autoware_ml.types.geometry import (
+    Box2DFieldIndex,
     Box3DCenterCoordinateType,
     Box3DFieldIndex,
     PointFeatureName,
@@ -189,8 +190,7 @@ class TestModelGTBatchDetection2DCollation(unittest.TestCase):
             None
             if num_boxes is None
             else Detection2DGTSample(
-                gt_bboxes_2d=[torch.ones((num_boxes, 4))],
-                gt_centers_2d=[torch.ones((num_boxes, 2))],
+                gt_bboxes_2d=[torch.ones((num_boxes, len(Box2DFieldIndex)))],
                 gt_labels_2d=[torch.zeros(num_boxes, dtype=torch.int32)],
             )
         )
@@ -205,12 +205,22 @@ class TestModelGTBatchDetection2DCollation(unittest.TestCase):
         )
 
     def test_collates_and_moves_the_2d_boxes(self) -> None:
+        """
+        Input: two samples of one camera holding 2 and 1 boxes, collated with
+        max_num_2d_gt_bboxes 3, then moved to the CPU.
+        Expected: the batch carries the 2D boxes padded to the given size in
+        detection2d_gt_batch, and to_device moves them with the rest of the batch.
+        Check: the valid counts, the label shape, and the moved boxes equal the collated ones.
+        """
         batch = ModelGTBatch.collate_gt_samples(
-            [self._build_sample(2), self._build_sample(1)], max_num_3d_gt_bboxes=0
+            [self._build_sample(2), self._build_sample(1)],
+            max_num_3d_gt_bboxes=0,
+            max_num_2d_gt_bboxes=3,
         )
 
         assert batch.detection2d_gt_batch is not None
         self.assertEqual(batch.detection2d_gt_batch.gt_valid_bboxes_2d.tolist(), [[2], [1]])
+        self.assertEqual(batch.detection2d_gt_batch.gt_labels_2d.shape, (2, 1, 3))
         moved = batch.to_device(torch.device("cpu"))
         assert moved.detection2d_gt_batch is not None
         self.assertTrue(
@@ -220,6 +230,11 @@ class TestModelGTBatchDetection2DCollation(unittest.TestCase):
         )
 
     def test_samples_without_2d_boxes_collate_to_none(self) -> None:
+        """
+        Input: two samples without 2D boxes, collated without max_num_2d_gt_bboxes.
+        Expected: the 2D part of the batch is absent, so it needs no padding size.
+        Check: detection2d_gt_batch is None.
+        """
         batch = ModelGTBatch.collate_gt_samples(
             [self._build_sample(None), self._build_sample(None)], max_num_3d_gt_bboxes=0
         )
@@ -227,9 +242,28 @@ class TestModelGTBatchDetection2DCollation(unittest.TestCase):
         self.assertIsNone(batch.detection2d_gt_batch)
 
     def test_rejects_2d_boxes_on_only_some_samples(self) -> None:
+        """
+        Input: a sample carrying 2D boxes next to a sample carrying none.
+        Expected: the batch cannot hold 2D boxes for only some of its samples.
+        Check: a ValueError naming detection2d_gt_sample is raised.
+        """
         with self.assertRaisesRegex(ValueError, "detection2d_gt_sample"):
             ModelGTBatch.collate_gt_samples(
-                [self._build_sample(1), self._build_sample(None)], max_num_3d_gt_bboxes=0
+                [self._build_sample(1), self._build_sample(None)],
+                max_num_3d_gt_bboxes=0,
+                max_num_2d_gt_bboxes=3,
+            )
+
+    def test_rejects_2d_boxes_without_max_num_2d_gt_bboxes(self) -> None:
+        """
+        Input: samples carrying 2D boxes, collated without max_num_2d_gt_bboxes.
+        Expected: the 2D boxes are padded to a fixed size the dataset sets, as the 3D boxes
+        are, so a dataset serving 2D boxes without one is a configuration error.
+        Check: a ValueError naming max_num_2d_gt_bboxes is raised.
+        """
+        with self.assertRaisesRegex(ValueError, "max_num_2d_gt_bboxes"):
+            ModelGTBatch.collate_gt_samples(
+                [self._build_sample(2), self._build_sample(1)], max_num_3d_gt_bboxes=0
             )
 
 

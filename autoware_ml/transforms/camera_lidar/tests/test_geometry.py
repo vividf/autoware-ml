@@ -37,12 +37,7 @@ from autoware_ml.geometry.bbox_3d.lidar_bbox3d import LidarBBoxes3D
 from autoware_ml.geometry.cameras.base_images import BaseImages
 from autoware_ml.geometry.points.lidar_points import LiDARPoints
 from autoware_ml.transforms.camera.annotations2d import LoadAnnotations2DFromBoxes3D
-from autoware_ml.transforms.camera.tests.pinhole_fixtures import (
-    LIDAR2CAM_FORWARD,
-    build_boxes,
-    build_pinhole_images,
-    build_sample,
-)
+from autoware_ml.transforms.camera.tests.pinhole_camera_test_case import PinholeCameraTestCase
 from autoware_ml.transforms.camera_lidar.geometry import (
     GlobalBEVRandomFlip,
     GlobalRotScaleTrans,
@@ -887,7 +882,7 @@ class TestGlobalRotScaleTrans(BaseCameraLidarGeometryTestCase):
         )
 
 
-class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
+class TestGlobalRotScaleTransCameraOnly(PinholeCameraTestCase):
     """The global 3D augmentation of a camera-only sample, as a camera-only pipeline serves.
 
     The sample holds the images, their calibration and the boxes but no points, which
@@ -898,8 +893,9 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
 
     def build_camera_sample(self) -> ModelGTSample:
         """A camera-only sample with one box in front of a forward-looking camera."""
-        return build_sample(build_pinhole_images([LIDAR2CAM_FORWARD], 160, 96))._replace(
-            detection3d_gt_bboxes_3d=build_boxes([[10.0, 1.0, 0.5, 4.0, 2.0, 1.5, 0.3]], [0])
+        images = self.build_pinhole_images([self.LIDAR2CAM_FORWARD], 160, 96)
+        return self.build_sample(images)._replace(
+            detection3d_gt_bboxes_3d=self.build_boxes([[10.0, 1.0, 0.5, 4.0, 2.0, 1.5, 0.3]], [0])
         )
 
     def augment(self, sample: ModelGTSample, seed: int) -> ModelGTSample:
@@ -912,6 +908,14 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
         )(sample)
 
     def test_moves_the_boxes_and_records_the_augmentation_without_points(self) -> None:
+        """
+        Input: a camera-only sample (images, calibration and one box, no points) through a
+        random rotation, scale and translation.
+        Expected: without points the augmentation still moves the box and records its matrix,
+        which the frame metadata folds into the ego pose.
+        Check: the sample holds no points, the recorded matrix is not the identity, and the box
+        center is the raw center moved by that matrix.
+        """
         sample = self.build_camera_sample()
         raw_center = torch.cat([sample.detection3d_gt_bboxes_3d.center[0], torch.ones(1)])
 
@@ -925,7 +929,13 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
         )
 
     def test_keeps_the_2d_targets(self) -> None:
-        # The boxes and the calibration move together, so the projection does not change.
+        """
+        Input: the 2D targets projected from a camera-only sample before and after a random
+        rotation, scale and translation.
+        Expected: the boxes and the calibration move together, so the projection, box edges
+        and projected center alike, does not change.
+        Check: the labels are equal and the box rows agree within 1e-3 pixels.
+        """
         sample = self.build_camera_sample()
         before = LoadAnnotations2DFromBoxes3D()(sample).detection2d_gt_sample
 
@@ -933,15 +943,17 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
 
         self.assertEqual(before.gt_labels_2d[0].tolist(), after.gt_labels_2d[0].tolist())
         torch.testing.assert_close(before.gt_bboxes_2d[0], after.gt_bboxes_2d[0], atol=1e-3, rtol=0)
-        torch.testing.assert_close(
-            before.gt_centers_2d[0], after.gt_centers_2d[0], atol=1e-3, rtol=0
-        )
 
     def test_frames_augmented_on_their_own_stay_aligned_through_the_folded_poses(self) -> None:
-        # One parked car seen from two ego poses, 0.1 s apart. Every frame draws its own
-        # augmentation, and the frame metadata folds it into the pose, so a temporal model maps
-        # the box of the previous frame onto the box of the current one through the folded
-        # poses alone.
+        """
+        Input: one parked car seen from two ego poses 0.1 s apart, every frame augmented with
+        its own random rotation, scale and translation.
+        Expected: the frame metadata folds every augmentation into its pose, so a temporal
+        model maps the box of the previous frame onto the box of the current one through the
+        folded poses alone.
+        Check: the previous box center mapped through both folded poses lands on the current
+        box center within 1 cm.
+        """
         global_box = torch.tensor([3012.0, -1180.0, 0.5, 1.0])
         poses = []
         for translation, yaw in (([3000.0, -1200.0, 0.0], 0.3), ([3002.0, -1198.5, 0.0], 0.35)):
@@ -954,8 +966,9 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
         augmented = []
         for seed, (pose, timestamp_seconds) in enumerate(zip(poses, (10.0, 10.1), strict=True)):
             local_box = (torch.linalg.inv(pose) @ global_box)[:3]
-            sample = build_sample(build_pinhole_images([LIDAR2CAM_FORWARD], 160, 96))._replace(
-                detection3d_gt_bboxes_3d=build_boxes(
+            images = self.build_pinhole_images([self.LIDAR2CAM_FORWARD], 160, 96)
+            sample = self.build_sample(images)._replace(
+                detection3d_gt_bboxes_3d=self.build_boxes(
                     [[*local_box.tolist(), 4.0, 2.0, 1.5, 0.0]], [0]
                 ),
                 frame_meta=FrameMetaSample(
