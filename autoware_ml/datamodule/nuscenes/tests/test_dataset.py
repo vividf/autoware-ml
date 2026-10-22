@@ -184,5 +184,5 @@ def test_the_frame_meta_composes_the_lidar_mounting_into_the_map_transform() -> 
     frame_meta = build_dataset("/data/nuscenes").get_frame_meta_sample(0, None)
 
     assert frame_meta.scene_token == _SCENE_NAME
-    assert frame_meta.timestamp == 1533151603.5
+    assert frame_meta.timestamp_seconds == 1533151603.5
     assert np.allclose(frame_meta.ego2global.numpy(), np.eye(4))

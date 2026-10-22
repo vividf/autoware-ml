@@ -24,10 +24,12 @@ from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
+from autoware_ml.models.common.multiview_image_encoder import MultiviewImageEncoder
 from autoware_ml.models.detection3d.heads.focal2d import FocalHead2D
 from autoware_ml.models.detection3d.heads.streampetr import StreamPETRHead
 from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.task_modules.streaming import (
+    compose_poses,
     memory_refresh,
     transform_reference_points,
 )
@@ -55,53 +57,6 @@ def _ground_truth(
     """
     gt_boxes = [boxes[:, : Box3DFieldIndex.VELOCITY_Z] for boxes in gt_detections.valid_bboxes_3d()]
     return gt_boxes, gt_detections.valid_labels_3d()
-
-
-class MultiviewImageFeatureExtractor(nn.Module):
-    """Encode multiview image batches into the neck features the head attends to.
-
-    The submodules keep the ``img_backbone`` / ``img_neck`` names: the checkpoint keys and
-    the AWML converter prefixes are ``image_feature_extractor.img_backbone.*`` and
-    ``image_feature_extractor.img_neck.*``.
-    """
-
-    def __init__(self, img_backbone: nn.Module, img_neck: nn.Module) -> None:
-        """Initialize the multiview image feature extractor.
-
-        Args:
-            img_backbone: Backbone run on every camera image.
-            img_neck: Neck fusing the backbone's scales; its first output feeds the head.
-        """
-        super().__init__()
-        self.img_backbone = img_backbone
-        self.img_neck = img_neck
-
-    def forward(self, image_batch: torch.Tensor) -> torch.Tensor:
-        """Encode multiview image batches into neck features.
-
-        Args:
-            image_batch: Multiview images ``(B, N, C, H, W)``.
-
-        Returns:
-            Primary image neck feature tensor with shape ``(B, N, C, H, W)``.
-
-        Raises:
-            ValueError: If the images are not a ``(B, N, C, H, W)`` tensor.
-        """
-        if image_batch.dim() != 5:
-            raise ValueError(
-                f"Expected image batch with shape (B, N, C, H, W), got {tuple(image_batch.shape)}"
-            )
-        batch_size, num_cams = image_batch.shape[:2]
-        flat_images = image_batch.float().view(batch_size * num_cams, *image_batch.shape[2:])
-        image_features = self.img_backbone(flat_images)
-        if isinstance(image_features, torch.Tensor):
-            image_features = (image_features,)
-        image_features = self.img_neck(image_features)
-        primary_feature = (
-            image_features[0] if isinstance(image_features, (list, tuple)) else image_features
-        )
-        return primary_feature.view(batch_size, num_cams, *primary_feature.shape[1:])
 
 
 class _StreamPETRPositionEmbeddingExportWrapper(nn.Module):
@@ -146,14 +101,28 @@ class _StreamPETRHeadMemoryExportWrapper(nn.Module):
     feeds the first ``memory_len`` entries of the previous frame's post-memory
     back as pre-memory and manages timestamps outside the graph.
 
-    A stream starts with an all-zero bank: the runtime wipes the five tensors
-    at start-up and on every reset. The graph recognizes a lane whose bank
-    poses are all zero (every written entry carries a pose with a unit last
-    row) and seeds it as the head does for ``prev_exists = 0``, with the pseudo
-    reference points and the identity pose in the first ``num_propagated``
-    entries, so the first frame of a stream predicts what the head predicts.
-    Without that, moving the zero bank by the inverse ego pose would put every
-    entry at the map origin as seen from the vehicle, kilometers away.
+    ``all_cls_scores`` and ``all_bbox_preds`` hold the predictions of the last
+    decoder layer only, the layer :meth:`StreamPETRHead.predict` decodes offline:
+    ``(1, num_classes, Q)`` logits and ``(1, 10, Q)`` boxes for the
+    ``Q = num_queries + num_propagated`` queries, ``(1, 7, 900)`` and
+    ``(1, 10, 900)`` for the seven T4 classes and the 644 + 256 queries of the
+    reference recipe. The runtime decodes every row of them, so its
+    ``num_proposals`` parameter must be ``Q`` (900) for graphs exported from
+    this version; earlier exports stacked every decoder layer (5400 rows with
+    six layers), and the runtime published boxes of the intermediate layers too.
+
+    A stream starts with an all-zero bank, so the runtime must clear the five
+    tensors when it allocates them, before the first frame, and on every
+    reset: device allocations are not zeroed, leftover values would read as a
+    continuing stream, and a leftover NaN or infinity survives the reset of
+    the entries, which multiplies them by zero. The graph recognizes a lane
+    whose bank poses are all zero (every written entry carries a pose with a
+    unit last row) and seeds it as the head does for ``prev_exists = 0``,
+    with the pseudo reference points and the identity pose in the first
+    ``num_propagated`` entries, so the first frame of a stream predicts what
+    the head predicts. Without that, moving the zero bank by the inverse ego
+    pose would put every entry at the map origin as seen from the vehicle,
+    kilometers away.
     """
 
     def __init__(self, head: StreamPETRHead) -> None:
@@ -193,7 +162,9 @@ class _StreamPETRHeadMemoryExportWrapper(nn.Module):
                 transform_reference_points(pre_memory_reference_point, data_ego_pose_inv),
                 prev_exists,
             ),
-            memory_refresh(data_ego_pose_inv.unsqueeze(1) @ pre_memory_egopose, prev_exists),
+            memory_refresh(
+                compose_poses(data_ego_pose_inv.unsqueeze(1), pre_memory_egopose), prev_exists
+            ),
         )
 
         memory, pos_embed = head.embed_tokens(x, pos_embed, cone)
@@ -204,9 +175,10 @@ class _StreamPETRHeadMemoryExportWrapper(nn.Module):
         post_memory = head.push_memory(
             data_ego_pose, all_cls_scores, all_bbox_preds, decoder_outputs
         )
+        # Only the last decoder layer leaves the graph (see the class docstring).
         return (
-            all_cls_scores.flatten(0, 2).unsqueeze(0).transpose(2, 1),
-            all_bbox_preds.flatten(0, 2).unsqueeze(0).transpose(2, 1),
+            all_cls_scores[-1:].flatten(0, 2).unsqueeze(0).transpose(2, 1),
+            all_bbox_preds[-1:].flatten(0, 2).unsqueeze(0).transpose(2, 1),
             *post_memory,
         )
 
@@ -262,7 +234,9 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
             scheduler_config=scheduler_config,
             metrics=metrics,
         )
-        self.image_feature_extractor = MultiviewImageFeatureExtractor(
+        # The attribute keeps the checkpoint keys and the AWML converter prefixes,
+        # image_feature_extractor.img_backbone.* and image_feature_extractor.img_neck.*.
+        self.image_feature_extractor = MultiviewImageEncoder(
             img_backbone=img_backbone, img_neck=img_neck
         )
         self.bbox_head = bbox_head
@@ -283,6 +257,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
 
     def on_train_epoch_start(self) -> None:
         """Start new streams for the shuffled scenes of the epoch."""
+        super().on_train_epoch_start()
         self._start_streams()
 
     def on_validation_epoch_start(self) -> None:
@@ -297,6 +272,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
 
     def on_predict_epoch_start(self) -> None:
         """Start new streams for the predict scenes."""
+        super().on_predict_epoch_start()
         self._start_streams()
 
     def forward(self, multi_task_batch_inputs: ModelBatchInputs) -> ModelOutputs:
@@ -336,14 +312,16 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
             # and the deployed graph both see the intrinsics of the augmented images.
             camera_intrinsics=image_data.augmented_camera_intrinsics(),
             lidar2img=image_data.lidar2images,
-            timestamp=frame_meta.timestamps,
+            timestamp=frame_meta.timestamps_seconds,
             prev_exists=self.bbox_head.stream_continuity(
-                frame_meta.scene_tokens, frame_meta.timestamps
+                frame_meta.scene_tokens, frame_meta.timestamps_seconds
             ),
             ego_pose=frame_meta.ego2globals,
-            # The poses and the bank are float32 in the map frame, so the geometry resolves
-            # to one ulp of the translation (4 mm at 65 km) however the inverse is computed;
-            # the float64 inverse only keeps the LU from adding its own rounding on top.
+            # The poses and the bank are float32 in the map frame: a stored translation at 65 km
+            # resolves to one ulp (4 mm), and the head keeps the geometry at that resolution
+            # only because it composes the poses elementwise, in IEEE float32 under any matmul
+            # precision (a TF32 GEMM loses tens of meters there). The float64 inverse keeps the
+            # LU from adding its own rounding on top.
             ego_pose_inv=torch.linalg.inv(frame_meta.ego2globals.double()).float(),
             gt_boxes=gt_boxes,
             gt_labels=gt_labels,
@@ -459,7 +437,8 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         ``extract_img_feat`` encodes multiview images, ``position_embedding``
         turns static calibration into cached geometric embeddings, and
         ``pts_head_memory`` runs the recurrent detection step carrying the
-        five temporal memory tensors in and out of the graph.
+        five temporal memory tensors in and out of the graph and emitting the
+        predictions of the last decoder layer.
 
         Args:
             batch_inputs: Batched model inputs; the first sample traces the graphs.

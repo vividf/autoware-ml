@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 import math
 
 import pytest
@@ -28,7 +28,7 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
     ClassificationCost,
     IoU3DCost,
 )
-from autoware_ml.models.module_base_model import LogDictConfigs
+from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.models.tests.batch_inputs_fixtures import (
     build_batch_inputs,
     build_detection3d_gt_batch,
@@ -202,8 +202,8 @@ def _build_frame_meta(
     return FrameMetaBatch(
         ego2globals=torch.eye(4).repeat(batch_size, 1, 1) if ego2globals is None else ego2globals,
         scene_tokens=list(scene_tokens or [f"db/scene_{index}/0" for index in range(batch_size)]),
+        timestamps_seconds=torch.tensor(timestamps, dtype=torch.float64),
         lanelet_map_paths=[None] * batch_size,
-        timestamps=torch.tensor(timestamps, dtype=torch.float64),
     )
 
 
@@ -272,6 +272,20 @@ def test_forward_reads_the_calibration_and_the_stream_metadata_of_the_batch() ->
     assert head.stream_continuity.timestamps.dtype == torch.float64
     # The bank is stored in the map frame, so the stored pose is the frame's pose.
     torch.testing.assert_close(head.memory_egopose[0, 0], ego2global)
+
+
+def test_checkpoint_keys_keep_the_image_encoder_prefixes() -> None:
+    """Trained checkpoints and the AWML converter name the image weights by these prefixes."""
+    keys = _build_model().state_dict()
+
+    encoder_prefixes = {
+        ".".join(key.split(".")[:2]) for key in keys if not key.startswith("bbox_head.")
+    }
+
+    assert encoder_prefixes == {
+        "image_feature_extractor.img_backbone",
+        "image_feature_extractor.img_neck",
+    }
 
 
 def test_forward_rejects_a_batch_without_images_or_frame_meta() -> None:
@@ -471,19 +485,19 @@ def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
         "post_memory_egopose",
         "post_memory_velo",
     ]
-    num_layers, _, num_queries, _ = reference.all_bbox_preds.shape
-    assert exported["all_cls_scores"].shape == (1, head.num_classes, num_layers * num_queries)
+    # Only the last decoder layer leaves the graph, the one predict() decodes: the runtime
+    # decodes every row of the two outputs, so nothing else may be there.
+    num_queries = reference.all_bbox_preds.shape[2]
+    assert num_queries == head.num_queries + head.num_propagated
+    assert exported["all_cls_scores"].shape == (1, head.num_classes, num_queries)
+    assert exported["all_bbox_preds"].shape == (1, 10, num_queries)
     assert exported["post_memory_embedding"].shape == (
         1,
         head.memory_len + head.topk_proposals,
         head.hidden_dim,
     )
-    exported_boxes = exported["all_bbox_preds"].transpose(2, 1).view(num_layers, 1, num_queries, 10)
-    exported_scores = (
-        exported["all_cls_scores"].transpose(2, 1).view(num_layers, 1, num_queries, -1)
-    )
-    torch.testing.assert_close(exported_boxes, reference.all_bbox_preds)
-    torch.testing.assert_close(exported_scores, reference.all_cls_scores)
+    torch.testing.assert_close(exported["all_bbox_preds"][0].T, reference.all_bbox_preds[-1, 0])
+    torch.testing.assert_close(exported["all_cls_scores"][0].T, reference.all_cls_scores[-1, 0])
     # The graph emits the concatenated bank; the head keeps the first memory_len entries.
     for name, expected in zip(
         ("embedding", "reference_point", "timestamp", "egopose", "velo"), reference_memory
@@ -496,7 +510,7 @@ def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
 
 
 def test_exported_head_matches_eval_forward_on_the_first_frame_of_a_stream() -> None:
-    """A wiped (all-zero) bank, as the runtime feeds at start-up, is the head's reset state.
+    """A wiped (all-zero) bank, which the runtime must feed first, is the head's reset state.
 
     The eval head seeds the first ``num_propagated`` entries of a fresh bank with the
     pseudo reference points in the lidar frame; the graph has no ``prev_exists`` input and
@@ -520,9 +534,7 @@ def test_exported_head_matches_eval_forward_on_the_first_frame_of_a_stream() -> 
         reference_points = head.memory_reference_point
         exported = _exported_head_outputs(model, first, pose, zero_bank)
 
-    num_layers, _, num_queries, _ = reference.all_bbox_preds.shape
-    exported_boxes = exported["all_bbox_preds"].transpose(2, 1).view(num_layers, 1, num_queries, 10)
-    torch.testing.assert_close(exported_boxes, reference.all_bbox_preds)
+    torch.testing.assert_close(exported["all_bbox_preds"][0].T, reference.all_bbox_preds[-1, 0])
     torch.testing.assert_close(
         exported["post_memory_reference_point"][:, : head.memory_len], reference_points
     )
@@ -567,6 +579,29 @@ def test_rejects_a_bank_too_small_for_the_propagated_entries() -> None:
         _build_head(memory_len=4, topk_proposals=8, num_propagated=8)
     with pytest.raises(ValueError, match="topk_proposals"):
         _build_head(memory_len=32, topk_proposals=4, num_propagated=8)
+
+
+def test_rejects_a_top_k_larger_than_the_queries_of_a_frame() -> None:
+    """A frame has 32 + 8 queries; asking for more would shorten the bank the graph emits.
+
+    The runtime reads ``memory_len + topk_proposals`` post-bank entries without checking, so
+    a silently clipped top-k would make it read past the end of the graph's output.
+    """
+    with pytest.raises(ValueError, match="exceeds the 40 queries"):
+        _build_head(memory_len=64, topk_proposals=41, num_propagated=8)
+    head = _build_head(memory_len=64, topk_proposals=40, num_propagated=8)
+    num_layers, num_slots = head.num_decoder_layers, head.num_queries + head.num_propagated
+    pose = torch.eye(4).unsqueeze(0)
+    head.pre_update_memory(torch.zeros(1, dtype=torch.float64), torch.zeros(1), pose)
+
+    bank = head.push_memory(
+        pose,
+        torch.randn(num_layers, 1, num_slots, head.num_classes),
+        torch.randn(num_layers, 1, num_slots, 10),
+        torch.randn(num_layers, 1, num_slots, head.hidden_dim),
+    )
+
+    assert all(tensor.shape[1] == head.memory_len + 40 for tensor in bank)
 
 
 def test_every_token_carries_the_focal_length_of_its_own_camera() -> None:
@@ -670,8 +705,29 @@ def test_phase_hooks_reset_the_metrics_before_starting_new_streams() -> None:
     assert model.bbox_head.stream_continuity.scene_tokens is None
 
 
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "on_train_epoch_start",
+        "on_validation_epoch_start",
+        "on_test_epoch_start",
+        "on_predict_epoch_start",
+    ],
+)
+def test_every_phase_hook_runs_the_base_hook(hook: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stream reset must not hide a base hook, as it once hid the metric reset."""
+    calls: list[str] = []
+    monkeypatch.setattr(ModuleBaseModel, hook, lambda self: calls.append(hook))
+    model = _build_model()
+
+    getattr(model, hook)()
+
+    assert calls == [hook]
+    assert model.bbox_head.stream_continuity.scene_tokens is None
+
+
 def test_stream_continuity_breaks_over_a_long_gap() -> None:
-    continuity = StreamContinuity(max_time_gap=1.0)
+    continuity = StreamContinuity(max_stream_gap=1.0)
     continuity(["a", "b"], torch.tensor([0.0, 0.0]))
 
     assert continuity(["a", "b"], torch.tensor([0.5, 1.5])).tolist() == [1.0, 0.0]
@@ -722,6 +778,63 @@ def test_memory_alignment_preserves_meter_motion_under_bf16_autocast() -> None:
     assert head.memory_egopose.dtype == torch.float32
     local_point = head.memory_reference_point[0, 0]
     assert torch.allclose(local_point, torch.tensor([-2.5, 0.0, 0.0]), atol=0.05)
+
+
+@pytest.fixture
+def cli_matmul_precision() -> Iterator[None]:
+    """Run a test under the float32 matmul precision the CLI runtime sets, then restore it."""
+    previous = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("medium")
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(previous)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="TF32 matmuls run on CUDA only")
+@pytest.mark.usefixtures("cli_matmul_precision")
+def test_memory_alignment_keeps_millimeters_under_the_cli_matmul_precision() -> None:
+    """The bank's geometry must not depend on the global float32 matmul precision.
+
+    Regression test: the CLI runtime calls ``torch.set_float32_matmul_precision("medium")``,
+    TF32 on CUDA, and at batch size 1 the bank's pose products ran as TF32 GEMMs, which left
+    16 m of error in the relative pose of every entry here, 65 km from the map origin. In IEEE
+    float32 a stored translation there resolves to 4 mm.
+    """
+    device = torch.device("cuda")
+    head = _build_head().to(device).eval()
+    first_pose = _far_pose(65460.2, 675.7, 0.4).to(device)
+    second_pose = _far_pose(65461.4, 676.5, 0.41).to(device)
+    num_layers, num_slots = head.num_decoder_layers, head.num_queries + head.num_propagated
+    # Every query predicts the same center, so every entry pushed to the bank carries it.
+    local_center = torch.tensor([12.3, -4.5, 0.7], device=device)
+    boxes = torch.zeros(num_layers, 1, num_slots, 10, device=device)
+    boxes[..., :3] = local_center
+    zero_time = torch.zeros(1, dtype=torch.float64, device=device)
+
+    head.reset_memory()
+    head.pre_update_memory(
+        zero_time, torch.zeros(1, device=device), torch.linalg.inv(first_pose.double()).float()
+    )
+    head.post_update_memory(
+        zero_time,
+        first_pose,
+        torch.randn(num_layers, 1, num_slots, head.num_classes, device=device),
+        boxes,
+        torch.randn(num_layers, 1, num_slots, head.hidden_dim, device=device),
+    )
+    head.pre_update_memory(
+        zero_time, torch.ones(1, device=device), torch.linalg.inv(second_pose.double()).float()
+    )
+
+    relative = (torch.linalg.inv(second_pose.double()) @ first_pose.double())[0]
+    pushed_poses = head.memory_egopose[0, : head.topk_proposals].double()
+    assert (pushed_poses[:, :3, 3] - relative[:3, 3]).norm(dim=-1).max() < 0.01
+    # The reference points the bank stores are map-frame too and move by elementwise products
+    # as well, so they hold the same precision.
+    pushed_centers = head.memory_reference_point[0, : head.topk_proposals].double()
+    expected_center = relative[:3, :3] @ local_center.double() + relative[:3, 3]
+    assert (pushed_centers - expected_center).norm(dim=-1).max() < 0.01
 
 
 def test_forward_sanitizes_nan_poisoned_memory() -> None:

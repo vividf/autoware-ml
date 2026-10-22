@@ -32,6 +32,7 @@ from autoware_ml.models.detection3d.task_modules.streaming import (
     ModulatedLayerNorm,
     SELayerLinear,
     StreamContinuity,
+    compose_poses,
     inverse_sigmoid,
     memory_refresh,
     nerf_positional_encoding,
@@ -162,8 +163,8 @@ class StreamPETRHead(nn.Module):
 
     The constructor exposes the knobs of the reference recipe (``LID``,
     ``with_ego_pos``, ``num_propagated``, ``with_dn``, the denoising noise) so a
-    config reads like the reference one; the shipped configs pin them to the
-    reference values.
+    config reads like the reference one; their defaults are the reference
+    values.
     """
 
     # The five-tensor temporal memory bank; ``None`` until the first frame.
@@ -210,7 +211,10 @@ class StreamPETRHead(nn.Module):
             class_names: Ordered names of the foreground classes. Their count is the number
                 of classification channels.
             memory_len: Entries of the temporal memory bank.
-            topk_proposals: Proposals of every frame that enter the bank.
+            topk_proposals: Proposals of every frame that enter the bank, at most the
+                ``num_queries + num_propagated`` queries of a frame. The deployed graph emits
+                a bank of ``memory_len + topk_proposals`` entries, which the runtime reads
+                without checking.
             num_propagated: Bank entries that extend the queries of the next frame; the
                 strongest proposals of the previous frame, so at most ``topk_proposals``.
             max_stream_gap: Longest gap in seconds between two frames of a lane that keeps
@@ -218,7 +222,8 @@ class StreamPETRHead(nn.Module):
             Other arguments follow the reference StreamPETR recipe.
 
         Raises:
-            ValueError: If the bank is too small for the propagated entries.
+            ValueError: If the bank is too small for the propagated entries, or a frame has
+                fewer queries than ``topk_proposals``.
         """
         super().__init__()
         if memory_len < num_propagated:
@@ -229,6 +234,11 @@ class StreamPETRHead(nn.Module):
             raise ValueError(
                 f"topk_proposals ({topk_proposals}) must cover the {num_propagated} propagated "
                 "entries, which are the strongest proposals of the previous frame."
+            )
+        if topk_proposals > num_queries + num_propagated:
+            raise ValueError(
+                f"topk_proposals ({topk_proposals}) exceeds the {num_queries + num_propagated} "
+                "queries of a frame (num_queries + num_propagated) that can enter the bank."
             )
         self.class_names = list(class_names)
         self.num_classes = len(self.class_names)
@@ -310,7 +320,7 @@ class StreamPETRHead(nn.Module):
         )
         self.register_buffer("coords_d", self._build_depth_bins(), persistent=False)
         self._init_pseudo_reference_points()
-        self.stream_continuity = StreamContinuity(max_time_gap=max_stream_gap)
+        self.stream_continuity = StreamContinuity(max_stream_gap=max_stream_gap)
         self.reset_memory()
         self.init_weights()
 
@@ -421,7 +431,9 @@ class StreamPETRHead(nn.Module):
         its entries age by the frame's time; lanes without a predecessor are cleared. The
         bank stores global-frame reference points and ego poses whose translations reach
         kilometer scale, far beyond half-precision resolution, so the whole geometry path runs
-        in float32 regardless of autocast (mirroring :meth:`position_embedding`).
+        in float32 regardless of autocast (mirroring :meth:`position_embedding`), and the pose
+        product goes through :func:`compose_poses`, which the float32 matmul precision setting
+        cannot reduce to TF32.
 
         Args:
             timestamp: Sample time of every lane in seconds, float64.
@@ -442,7 +454,7 @@ class StreamPETRHead(nn.Module):
                 self.memory_velo = prev_exists.new_zeros(batch_size, self.memory_len, 2)
             else:
                 self.memory_timestamp += timestamp.view(batch_size, 1, 1)
-                self.memory_egopose = ego_pose_inv.unsqueeze(1) @ self.memory_egopose
+                self.memory_egopose = compose_poses(ego_pose_inv.unsqueeze(1), self.memory_egopose)
                 self.memory_reference_point = transform_reference_points(
                     self.memory_reference_point, ego_pose_inv
                 )
@@ -474,7 +486,8 @@ class StreamPETRHead(nn.Module):
         ``memory_len``, exactly like :meth:`post_update_memory`. The new entries carry age
         zero and the identity pose; the ego-pose alignment brings every entry back into the
         global frame. The bank is stored in float32 and the alignment runs in a float32
-        island: kilometer-scale translations lose meter-level motion in half precision.
+        island: kilometer-scale translations lose meter-level motion in half precision, and
+        in TF32 too, which the elementwise :func:`compose_poses` keeps out of the pose product.
 
         Args:
             ego_pose: Lidar-to-global pose of every lane ``(batch, 4, 4)``.
@@ -491,21 +504,20 @@ class StreamPETRHead(nn.Module):
             rec_score = (
                 all_cls_scores[-1, :, pad_size:].float().sigmoid().amax(dim=-1, keepdim=True)
             )
-            batch_size, num_queries = rec_score.shape[:2]
+            batch_size = rec_score.shape[0]
 
-            topk_proposals = min(self.topk_proposals, num_queries)
-            _, topk_indexes = torch.topk(rec_score, topk_proposals, dim=1)
+            _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=1)
             rec_reference_points = topk_gather(rec_reference_points, topk_indexes).detach()
             rec_memory = topk_gather(rec_memory, topk_indexes).detach()
             rec_velo = topk_gather(rec_velo, topk_indexes).detach()
             rec_timestamp = torch.zeros(
                 batch_size,
-                topk_proposals,
+                self.topk_proposals,
                 1,
                 device=ego_pose.device,
                 dtype=self.memory_timestamp.dtype,
             )
-            rec_ego_pose = identity_poses(batch_size, topk_proposals, ego_pose.device)
+            rec_ego_pose = identity_poses(batch_size, self.topk_proposals, ego_pose.device)
 
             embedding = torch.cat([rec_memory, self.memory_embedding], dim=1)
             timestamp = torch.cat([rec_timestamp, self.memory_timestamp], dim=1)
@@ -513,7 +525,7 @@ class StreamPETRHead(nn.Module):
             reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
             velo = torch.cat([rec_velo, self.memory_velo], dim=1)
             reference_point = transform_reference_points(reference_point, ego_pose)
-            egopose = ego_pose.unsqueeze(1) @ egopose
+            egopose = compose_poses(ego_pose.unsqueeze(1), egopose)
         return embedding, reference_point, timestamp, egopose, velo
 
     def post_update_memory(
@@ -814,8 +826,12 @@ class StreamPETRHead(nn.Module):
 
         Boxes are ``[cx, cy, cz, log_l, log_w, log_h, sin, cos, vx, vy]`` with
         metric centers: the regression space used by the losses and the
-        deployment interface alike. Sizes stay in log space so no exp/log
-        round trip can produce non-finite values.
+        deployment interface alike. The losses compare the sizes in log space,
+        but the matching goes through an exp / log round trip
+        (:func:`denormalize_boxes3d`, then the full-box cost encodes the boxes
+        again): a log size beyond the float32 range of exp gives an infinite
+        cost, which :meth:`HungarianAssigner3D.assign` bounds with
+        ``nan_to_num``, so the assignment stays valid.
         """
         reference = inverse_sigmoid(reference_points.clone())
         normalized_centers = (raw_box_params[..., :3] + reference[..., :3]).sigmoid()
@@ -1114,9 +1130,9 @@ class StreamPETRHead(nn.Module):
         """Predict StreamPETR query outputs from multiview image features.
 
         Every frame carries its stream metadata: the sample time (float64 seconds),
-        ``prev_exists`` of :meth:`stream_continuity`, and the lidar-to-global pose with its
-        inverse. ``gt_boxes`` are metric ``[cx, cy, cz, l, w, h, yaw, vx, vy]`` boxes that
-        seed the denoising queries in training.
+        ``prev_exists`` from :attr:`stream_continuity` (a callable :class:`StreamContinuity`),
+        and the lidar-to-global pose with its inverse. ``gt_boxes`` are metric
+        ``[cx, cy, cz, l, w, h, yaw, vx, vy]`` boxes that seed the denoising queries in training.
         """
         self.pre_update_memory(timestamp, prev_exists, ego_pose_inv)
 

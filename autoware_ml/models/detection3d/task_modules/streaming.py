@@ -34,7 +34,7 @@ class StreamContinuity:
     """Tell which batch lanes continue the stream of their previous frame.
 
     A lane continues when its frame belongs to the scene of the lane's previous frame and
-    comes later in time, within ``max_time_gap`` seconds when one is set. A lane without a
+    comes later in time, within ``max_stream_gap`` seconds when one is set. A lane without a
     previous frame, one that moved to another scene, one that went back to an earlier frame
     of its scene (the streaming sampler pads a lane by restarting its first frames) and one
     that jumped over too long a gap start a new stream, so a temporal model resets its
@@ -42,13 +42,13 @@ class StreamContinuity:
     check; the frames are remembered for the next call.
 
     Args:
-        max_time_gap: Longest gap in seconds a stream survives, ``None`` for any gap.
+        max_stream_gap: Longest gap in seconds a stream survives, ``None`` for any gap.
     """
 
-    def __init__(self, max_time_gap: float | None = None) -> None:
-        if max_time_gap is not None and max_time_gap <= 0:
-            raise ValueError(f"max_time_gap must be positive, got {max_time_gap}.")
-        self.max_time_gap = max_time_gap
+    def __init__(self, max_stream_gap: float | None = None) -> None:
+        if max_stream_gap is not None and max_stream_gap <= 0:
+            raise ValueError(f"max_stream_gap must be positive, got {max_stream_gap}.")
+        self.max_stream_gap = max_stream_gap
         self.reset()
 
     def reset(self) -> None:
@@ -77,8 +77,8 @@ class StreamContinuity:
             )
             gap = timestamp - self.timestamps
             continues = same_scene & (gap > 0)
-            if self.max_time_gap is not None:
-                continues &= gap <= self.max_time_gap
+            if self.max_stream_gap is not None:
+                continues &= gap <= self.max_stream_gap
             prev_exists = continues.float()
         self.scene_tokens = list(scene_tokens)
         self.timestamps = timestamp.detach().clone()
@@ -117,9 +117,34 @@ def transform_reference_points(
     reference_points: torch.Tensor,
     ego_pose: torch.Tensor,
 ) -> torch.Tensor:
-    """Transform 3D reference points between ego frames."""
+    """Transform 3D reference points between ego frames.
+
+    The bank keeps its reference points in the map frame, so like :func:`compose_poses` this is a
+    sum of elementwise products rather than a matmul, which would follow the global float32 matmul
+    precision.
+    """
     homogeneous = torch.cat([reference_points, torch.ones_like(reference_points[..., :1])], dim=-1)
-    return (ego_pose.unsqueeze(1) @ homogeneous.unsqueeze(-1)).squeeze(-1)[..., :3]
+    return (ego_pose.unsqueeze(1) * homogeneous.unsqueeze(-2)).sum(-1)[..., :3]
+
+
+def compose_poses(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """Compose batches of 4x4 poses, ``lhs @ rhs``, as a sum of elementwise products.
+
+    A float32 ``@`` follows the global matmul precision. The CLI runtime sets
+    ``torch.set_float32_matmul_precision("medium")``, which is TF32 on CUDA: a GEMM then rounds
+    its operands to a 10-bit mantissa, and a translation 65 km from the map origin loses tens of
+    meters (at batch size 1 a bank-sized pose product runs as one GEMM). Elementwise products
+    and their sum are not matmuls, so they stay in IEEE float32 under every precision setting;
+    they export as Mul and ReduceSum.
+
+    Args:
+        lhs: Left poses ``(..., 4, 4)``.
+        rhs: Right poses ``(..., 4, 4)``, broadcast against ``lhs``.
+
+    Returns:
+        The composed poses ``(..., 4, 4)``.
+    """
+    return (lhs.unsqueeze(-1) * rhs.unsqueeze(-3)).sum(-2)
 
 
 def _sincos_posemb(component: torch.Tensor, num_pos_feats: int, temperature: int) -> torch.Tensor:
