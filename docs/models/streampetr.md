@@ -224,6 +224,23 @@ the ImageNet statistics: the node normalizes the camera images itself, so the
 graph. The current verification scope covers ONNX export. TensorRT engine
 generation has not been validated yet.
 
+`pts_head_memory` emits the predictions of the last decoder layer only, the
+layer the offline metrics decode: `all_cls_scores` is `(1, 7, 900)` and
+`all_bbox_preds` is `(1, 10, 900)`, one column per query (644 learned and 256
+propagated). Earlier exports, the AWML one included, stacked all six decoder
+layers into 5400 columns, and the node decoded every column, so it published
+boxes of the intermediate layers as well. The model package that ships a
+graph of this export to the universe node must therefore set
+`num_proposals: 900`, which the node stack validates against the engine, and
+retune its per-class score thresholds, which were tuned on the decoded output
+of all six layers.
+
+A stream starts from an all-zero memory bank: the graph recognizes a lane
+whose bank poses are all zero and seeds it as the head does at the start of a
+stream. Device allocations are not zeroed, so the node must clear the five
+memory tensors when it allocates them, before the first frame, and on every
+reset (autoware.universe #13267 clears them at initialization).
+
 ## Results
 
 Final accepted stage-3 run (batch 64 / lr 4e-4, trained on the 2.8 info
@@ -231,9 +248,22 @@ generation; an earlier batch-32 / lr 2e-4 run matched within ±0.5 pp on
 every headline number). The three stage `best.ckpt` files are archived on
 the training host under `~/ckpt_backup/`. These numbers predate the
 record-table data pipeline, the removal of the head's `use_bottom_center`
-shift, the anti-aliased image resize of the typed transforms and the partial
-annotations of the T4 stages, so the stages have to be retrained and
-re-measured on the current code.
+shift, the anti-aliased image resize of the typed transforms, the partial
+annotations of the T4 stages, the VoVNet `norm_eval` applied from
+construction and the elementwise pose products of the memory bank, so the
+stages have to be retrained and re-measured on the current code.
+
+The one-epoch fine-tunes of the converted AWML j6gen2 checkpoint run while
+the stack was ported (j6gen2 val mAP 0.4458 at mid-epoch in the first run,
+0.4784 and 0.4180 at the end of the epoch in the next two) are not comparable
+with later runs either and have to be re-measured. They trained with the
+BatchNorm statistics of the backbone updating: VoVNet applied `norm_eval`
+only in an explicit `train()` call, which Lightning never makes during fit,
+so all 99 BatchNorm layers of VoVNet-99 updated their statistics. Their
+validation also aligned the memory bank with matrix products in TF32, the
+float32 matrix precision the CLI sets, in which the pose products at batch
+size 1 lose tens of meters 65 km from the map origin; the bank now composes
+its poses elementwise, in IEEE float32 under any precision setting.
 
 | Split | mAP (0-121m) | 0-50m  | 50-90m |
 | ----- | ------------ | ------ | ------ |
@@ -320,6 +350,7 @@ annotations of the T4 stages.
 | `autoware_ml/models/detection3d/heads/focal2d.py`                    | Auxiliary 2D head (FocalHead2D)                   |
 | `autoware_ml/models/detection3d/task_modules/partial_annotations.py` | Annotated class masks of the partial annotations  |
 | `autoware_ml/models/common/backbones/vovnet.py`                      | Multiview image backbone                          |
+| `autoware_ml/models/common/multiview_image_encoder.py`               | Per-camera image encoder shared with BEVFusion    |
 | `autoware_ml/models/common/necks/cp_fpn.py`                          | CPFPN neck (reference StreamPETR neck)            |
 | `autoware_ml/models/detection3d/task_modules/`                       | Shared assigners, costs, coders, streaming memory |
 | `autoware_ml/datamodule/data_module.py`                              | `streaming` dataloaders (`GroupStreamingSampler`) |
@@ -341,6 +372,16 @@ importing again. Its output predates the image feature extractor, so prefix
 its `img_backbone.*` and `img_neck.*` keys with `image_feature_extractor.`:
 under the old names only the heads match, and `--weights` leaves the backbone
 and the neck randomly initialized without an error.
+
+Test a change with the whole suite and no `-k` filter:
+`pixi run --environment dev test` runs `pytest autoware_ml/`, and its
+BEVFusion and TransFusion tests need the `bev_pool` and `diff_iou_rotated`
+extensions that `setup-project` builds into the tree. The StreamPETR tests
+are spread over the model and head, the task modules, the datamodule and its
+sampler, the camera and camera-lidar transforms, the image preprocessing and
+the configs, and a filter drops whole directories of them without a trace:
+`-k "not camera_lidar"` skips all of `transforms/camera_lidar/`, where the
+camera-only augmentation is tested.
 
 ## Acknowledgment
 
