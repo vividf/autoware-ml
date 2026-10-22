@@ -31,6 +31,12 @@ class PFNLayer(nn.Module):
     points that belong to each pillar.
     """
 
+    #: ``norm`` normalizes ``linear``'s output channels (the reshape in ``forward`` only
+    #: flattens the point axis), so the pair folds into the linear layer where a fold is
+    #: needed (quantization calibrates on the folded weight; a plain export keeps the
+    #: BatchNorm node).
+    bn_fusion_pairs = (("linear", "norm"),)
+
     def __init__(self, in_channels: int, out_channels: int, last_layer: bool) -> None:
         """Initialize one PFN layer.
 
