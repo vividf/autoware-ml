@@ -1381,3 +1381,121 @@ def test_partial_annotations_mask_the_cone_barrier_terms_of_unannotated_frames()
         torch.testing.assert_close(ignored[key], annotated[key])
     with pytest.raises(ValueError, match="gt_traffic_cone_barrier_bbox_status"):
         model.compute_metrics(batch_inputs, outputs)
+
+
+ROI_LOSS_KEYS = ("loss_cls2d", "loss_bbox2d", "loss_iou2d", "loss_centers2d", "loss_centerness2d")
+
+
+def _losses_with_and_without_a_padding_sample(
+    model: StreamPETRDetection3DModel, status: Sequence[bool] | None = None
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
+    """Train on two real samples, alone and followed by a padding sample repeating the first.
+
+    Every sample carries one 3D box and the 2D rows of ``_with_2d_boxes``; ``status`` is the
+    traffic-cone and barrier status of every sample of the padded batch, the real ones first.
+    Returns the losses of both batches, after backward on the padded one, and its images.
+    """
+    images, boxes, labels = _two_samples_with_boxes()
+    padded_images = torch.cat([images, images[:1]]).requires_grad_()
+    real_batch = _with_2d_boxes(_build_batch_inputs(images, gt_boxes=boxes, gt_labels=labels))
+    padded_batch = _with_padding(
+        _with_2d_boxes(
+            _build_batch_inputs(
+                padded_images, gt_boxes=[*boxes, boxes[0]], gt_labels=[*labels, labels[0]]
+            )
+        ),
+        [False, False, True],
+    )
+    if status is not None:
+        real_batch = _with_cone_barrier_status(real_batch, list(status[:2]))
+        padded_batch = _with_cone_barrier_status(padded_batch, list(status))
+
+    torch.manual_seed(1)
+    real_losses = model.compute_metrics(real_batch, _run(model, real_batch))
+    model.bbox_head.reset_memory()
+    torch.manual_seed(1)
+    padded_losses = model.compute_metrics(padded_batch, _run(model, padded_batch))
+    padded_losses["loss"].backward()
+    return real_losses, padded_losses, padded_images
+
+
+def test_a_padding_sample_takes_no_part_in_the_auxiliary_2d_loss() -> None:
+    """
+    Input: two real training samples with 3D boxes and 2D rows, through a model with the
+    auxiliary FocalHead2D, once alone and once followed by a padding sample that carries the
+    same boxes and rows, with the images of every sample requiring a gradient.
+    Expected: the 2D head leaves the padding sample out like the 3D head does: its 2D boxes
+    give no positive and no box, IoU or center term, and its image tokens no classification
+    or centerness term, so every loss of the padded batch is the loss of the real samples
+    alone and nothing flows back into the padding sample's images.
+    Check: every loss term of the two batches, the five 2D terms among them, and the image
+    gradients of the padding sample (zero) and of the real ones (not zero).
+    """
+    torch.manual_seed(0)
+    model = _independent_samples(_build_model(img_roi_head=_build_focal_head()).train())
+
+    real_losses, padded_losses, padded_images = _losses_with_and_without_a_padding_sample(model)
+
+    assert set(ROI_LOSS_KEYS) <= real_losses.keys() == padded_losses.keys()
+    for key, value in real_losses.items():
+        torch.testing.assert_close(padded_losses[key], value, msg=key)
+    assert padded_images.grad is not None
+    assert torch.count_nonzero(padded_images.grad[2]) == 0
+    assert torch.count_nonzero(padded_images.grad[0]) > 0
+    assert torch.count_nonzero(padded_images.grad[1]) > 0
+
+
+def test_partial_annotations_leave_out_a_padding_sample_flagged_as_annotated() -> None:
+    """
+    Input: the batches of the previous test through a model with partial annotations, the
+    real samples annotated with and without traffic cones and barriers, and the padding
+    sample flagged as annotated with them.
+    Expected: a padding sample counts as annotated with no class whatever its flag says, so
+    the flag of the frame it repeats supervises nothing in either head, while the real
+    samples keep their own masks; the losses are those of the real samples alone.
+    Check: every loss term of the two batches, and the image gradients of the padding sample
+    (zero) and of the real ones (not zero).
+    """
+    torch.manual_seed(0)
+    model = _independent_samples(
+        _build_model(img_roi_head=_build_focal_head(), partial_ignore=True).train()
+    )
+
+    real_losses, padded_losses, padded_images = _losses_with_and_without_a_padding_sample(
+        model, status=[True, False, True]
+    )
+
+    assert real_losses.keys() == padded_losses.keys()
+    for key, value in real_losses.items():
+        torch.testing.assert_close(padded_losses[key], value, msg=key)
+    assert padded_images.grad is not None
+    assert torch.count_nonzero(padded_images.grad[2]) == 0
+    assert torch.count_nonzero(padded_images.grad[0]) > 0
+    assert torch.count_nonzero(padded_images.grad[1]) > 0
+
+
+def test_a_batch_of_padding_alone_gives_a_zero_auxiliary_2d_loss() -> None:
+    """
+    Input: a training batch whose two samples are both padding slots carrying 3D boxes and 2D
+    rows, through a model with the auxiliary FocalHead2D.
+    Expected: the batch runs through both heads so every rank takes the same steps, but it
+    supervises nothing: every 2D term and the total are a finite zero that keeps the graph,
+    so backward reaches every parameter of the 2D head like on any other rank.
+    Check: the five 2D terms and the total are zero, the total requires a gradient, and
+    after backward every parameter of the 2D head has a gradient.
+    """
+    model = _build_model(img_roi_head=_build_focal_head()).train()
+    images, boxes, labels = _two_samples_with_boxes()
+    batch_inputs = _with_padding(
+        _with_2d_boxes(_build_batch_inputs(images, gt_boxes=boxes, gt_labels=labels)),
+        [True, True],
+    )
+
+    outputs = _run(model, batch_inputs)
+    losses = model.compute_metrics(batch_inputs, outputs)
+    losses["loss"].backward()
+
+    assert all(float(losses[key].detach()) == 0.0 for key in ROI_LOSS_KEYS)
+    assert float(losses["loss"].detach()) == 0.0
+    assert losses["loss"].requires_grad
+    assert all(parameter.grad is not None for parameter in model.img_roi_head.parameters())

@@ -309,6 +309,7 @@ class FocalHead2D(nn.Module):
         gt_labels_2d: list[list[torch.Tensor]],
         centers_2d: list[list[torch.Tensor]],
         gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
+        padding_mask: Bool[torch.Tensor, " batch_size"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute the five auxiliary 2D losses.
 
@@ -324,9 +325,20 @@ class FocalHead2D(nn.Module):
                 image of a sample weights its classification by the row of its sample, so
                 the background terms of the unannotated classes are dropped. None
                 supervises every class of every image.
+            padding_mask: Flags the padding samples of a streaming batch (see
+                ``ModelGTBatch.padding_mask``), which take no part in the loss. Their 2D
+                boxes are left out, so they give no positive and no box, IoU or center
+                term, and a padding sample counts as annotated with no class, so every
+                token of its images gets a zero classification and centerness weight. None
+                means every sample is real. The weights only scale the loss terms, so a
+                batch of padding alone yields a zero loss over the whole graph.
 
         Returns:
             Loss dictionary with ``loss_*2d`` keys.
+
+        Raises:
+            ValueError: If the predictions and the ground truth cover different images, or
+                the masks do not hold one entry per sample.
         """
         cls_scores = outputs.cls_scores
         bbox_preds = outputs.bbox_preds
@@ -356,6 +368,25 @@ class FocalHead2D(nn.Module):
                 "gt_annotated_class_masks must have shape (batch_size, num_classes) = "
                 f"{(batch_size, self.num_classes)}, got {tuple(gt_annotated_class_masks.shape)}."
             )
+        is_padding = [False] * batch_size
+        image_weights = None
+        if padding_mask is not None:
+            if padding_mask.shape != (batch_size,):
+                raise ValueError(
+                    f"padding_mask must have shape (batch_size,) = ({batch_size},), got "
+                    f"{tuple(padding_mask.shape)}."
+                )
+            is_padding = padding_mask.tolist()
+            real_samples = ~padding_mask.view(-1, 1)
+            gt_annotated_class_masks = (
+                real_samples.expand(-1, self.num_classes)
+                if gt_annotated_class_masks is None
+                else gt_annotated_class_masks & real_samples
+            )
+            # (batch, 1) -> (batch * num_cams, 1, 1): the images of a sample follow each other.
+            image_weights = (
+                real_samples.to(cls_scores.dtype).repeat_interleave(num_cams, dim=0).view(-1, 1, 1)
+            )
 
         targets: list[_Targets2D] = []
         heatmaps = []
@@ -367,6 +398,9 @@ class FocalHead2D(nn.Module):
                     gt_labels_2d[sample_index][camera_index], dtype=torch.long, device=device
                 ).reshape(-1)
                 gt_centers = to_tensor(centers_2d[sample_index][camera_index], 2)
+                if is_padding[sample_index]:
+                    # A padding sample only keeps the ranks in step; it has no ground truth.
+                    gt_bboxes, gt_labels, gt_centers = gt_bboxes[:0], gt_labels[:0], gt_centers[:0]
                 targets.append(
                     self._get_targets_single(
                         cls_scores[image_index],
@@ -418,8 +452,9 @@ class FocalHead2D(nn.Module):
 
         heatmap_targets = torch.stack(heatmaps, dim=0).view(num_images, -1, 1)
         centerness_prob = centerness.sigmoid().clamp(min=1e-4, max=1 - 1e-4)
+        # A padding image's empty heatmap would teach its tokens that no object is there.
         loss_centerness = self.loss_centerness(
-            centerness_prob, heatmap_targets, avg_factor=num_total_pos
+            centerness_prob, heatmap_targets, weights=image_weights, avg_factor=num_total_pos
         )
 
         loss_bbox = self.loss_bbox2d(

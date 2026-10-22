@@ -406,8 +406,10 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         With ``partial_annotations`` the annotation flag of every frame becomes the mask of
         the classes both heads supervise in that frame.
 
-        The padding samples of a streaming batch take no part in them: they carry no box,
-        and the head gives their queries no classification weight.
+        The padding samples of a streaming batch take no part in them: they carry no 3D box,
+        both heads count them as annotated with no class, so their queries and tokens get no
+        classification weight, and the 2D head also leaves out their 2D boxes and the
+        centerness of their images.
 
         Args:
             multi_task_batch_inputs: Model inputs holding the 3D ground truth, the padding
@@ -455,6 +457,7 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
                 gt_labels_2d=gt_labels_2d,
                 centers_2d=gt_centers_2d,
                 gt_annotated_class_masks=gt_annotated_class_masks,
+                padding_mask=gt_batch.padding_mask,
             )
             losses.update(roi_losses)
             losses["loss"] = losses["loss"] + sum(

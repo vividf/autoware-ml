@@ -199,6 +199,7 @@ class HeatmapGaussianFocalLoss(nn.Module):
         self,
         probabilities: torch.Tensor,
         target: torch.Tensor,
+        weights: torch.Tensor | None = None,
         avg_factor: float | None = None,
     ) -> torch.Tensor:
         """Compute the Gaussian focal loss on probability heatmaps.
@@ -206,6 +207,8 @@ class HeatmapGaussianFocalLoss(nn.Module):
         Args:
             probabilities: Sigmoid probabilities clipped away from 0 and 1.
             target: Gaussian heatmap targets in ``[0, 1]``.
+            weights: Optional weights broadcastable to the heatmaps, for example one per
+                image to leave whole images out; None weights every element by one.
             avg_factor: Optional normalization factor.
 
         Returns:
@@ -216,6 +219,9 @@ class HeatmapGaussianFocalLoss(nn.Module):
         neg_weights = (1.0 - target).pow(self.gamma)
         pos_loss = -probabilities.log() * (1.0 - probabilities).pow(self.alpha) * pos_weights
         neg_loss = -(1.0 - probabilities).log() * probabilities.pow(self.alpha) * neg_weights
+        if weights is not None:
+            pos_loss = pos_loss * weights
+            neg_loss = neg_loss * weights
         loss = pos_loss.sum() + neg_loss.sum()
         if avg_factor is not None:
             loss = loss / max(avg_factor, 1.0)
