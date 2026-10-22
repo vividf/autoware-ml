@@ -358,6 +358,14 @@ class TestIterWarmupEpochCosineLR:
         )
 
     def test_schedule_shape(self) -> None:
+        """
+        Input: 100 steps in ten stages of 10 steps, with a 5-step warmup from a third of the
+        learning rate.
+        Expected: the learning rate starts at a third of the base one, reaches it once the
+        warmup is over within the first stage, and then follows the cosine over the stages.
+        Check: the learning rate before the first step, after the warmup, in the second stage
+        and in the last one.
+        """
         optimizer, scheduler = self._build(total_steps=100)
         assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0 / 3.0)
         lrs = []
@@ -372,13 +380,22 @@ class TestIterWarmupEpochCosineLR:
         assert lrs[95] == pytest.approx(self._cosine_factor(9, 10))
 
     def test_rejects_fewer_steps_than_epochs(self) -> None:
+        """
+        Input: 5 steps for ten cosine stages.
+        Expected: a stage needs at least one step, so the schedule cannot be built.
+        Check: a ValueError asking for at least one step per epoch is raised.
+        """
         with pytest.raises(ValueError, match="at least one step per epoch"):
             self._build(total_steps=5, max_epochs=10)
 
     def test_trailing_steps_stay_at_the_last_epoch_factor(self) -> None:
-        # total_steps = 105, as a trainer.max_steps cap can make it: ten stages of 10 steps
-        # and 5 trailing steps, which must keep the last stage's LR instead of dropping to
-        # the eta_min floor.
+        """
+        Input: 105 steps for ten stages, as a trainer.max_steps cap can make it: ten stages of
+        10 steps and 5 trailing steps.
+        Expected: the trailing steps keep the learning rate of the last stage instead of
+        dropping to the eta_min floor.
+        Check: the learning rate after all 105 steps is the one of the last stage.
+        """
         optimizer, scheduler = self._build(total_steps=105)
         for _ in range(105):
             optimizer.step()
@@ -405,11 +422,14 @@ class TestIterWarmupEpochCosineLR:
         assert lrs[270] == pytest.approx(self._cosine_factor(9, 10))
 
     def test_resume_reproduces_the_original_trajectory(self) -> None:
-        """A resumed scheduler must replay the original schedule.
-
-        The framework re-derives ``total_steps`` on resume (a ``trainer.max_steps``
-        cap or a changed batch size can make it differ), so the restored state must
-        fully override the constructor arguments.
+        """
+        Input: a schedule stepped 15 times and saved, then restored into one built with
+        another ``total_steps``, as the framework re-derives it on resume (a
+        ``trainer.max_steps`` cap or a changed batch size can make it differ).
+        Expected: the restored state overrides the constructor arguments, so the resumed
+        schedule replays the original one.
+        Check: the 25 learning rates after the resume against the same steps of an
+        uninterrupted run.
         """
         reference_optimizer, reference = self._build(total_steps=100)
         reference_lrs = []
@@ -461,3 +481,39 @@ class TestIterWarmupEpochCosineLR:
 
         scheduler = optimizers["lr_scheduler"]["scheduler"]
         assert (scheduler.max_epochs, scheduler.steps_per_epoch) == (4, 10)
+
+    def test_every_group_multiplies_the_warmup_into_the_cosine_stage(self) -> None:
+        """
+        Input: param groups at learning rates 1.0 and 0.1, four cosine stages of 10 steps, and
+        a 15-step warmup from half the learning rate that reaches into the second stage.
+        Expected: every group runs at its own learning rate times the warmup factor of the
+        step and the cosine factor of the step's stage. The cosine starts at step 0 instead of
+        after the warmup, the two factors multiply where they overlap, and the cosine holds
+        for a whole stage while the warmup advances every step.
+        Check: the learning rates of all 40 steps against that product, and the one at step
+        12, inside the warmup and the second stage, against its value.
+        """
+        weight, bias = torch.nn.Linear(2, 2).parameters()
+        optimizer = torch.optim.SGD(
+            [{"params": [weight], "lr": 1.0}, {"params": [bias], "lr": 0.1}], lr=1.0
+        )
+        scheduler = IterWarmupEpochCosineLR(
+            optimizer,
+            total_steps=40,
+            max_epochs=4,
+            warmup_iters=15,
+            warmup_start_factor=0.5,
+            eta_min_factor=0.0,
+        )
+        lrs = []
+        for _ in range(40):
+            lrs.append([group["lr"] for group in optimizer.param_groups])
+            optimizer.step()
+            scheduler.step()
+
+        def factor(step: int) -> float:
+            warmup = 0.5 + 0.5 * step / 15 if step < 15 else 1.0
+            return warmup * self._cosine_factor(step // 10, 4, eta_min_factor=0.0)
+
+        assert lrs == [pytest.approx([factor(step), 0.1 * factor(step)]) for step in range(40)]
+        assert lrs[12][0] == pytest.approx(0.9 * 0.5 * (1.0 + math.cos(math.pi / 4)))
