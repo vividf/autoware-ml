@@ -164,11 +164,30 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         )
 
     def test_a_lane_streams_every_scene_in_time_order(self) -> None:
+        """
+        Input: the four records of two scenes, stored out of scene and time order, served
+        through one lane without shuffling.
+        Expected: the lane serves one scene after the other, in the order the scenes first
+        appear in the records, and every scene in the order of its sample times.
+        Check: the indices the sampler serves.
+        """
         sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
 
         self.assertEqual(list(sampler), [2, 0, 3, 1])
 
     def test_streamed_frames_train_the_detector_and_carry_its_memory(self) -> None:
+        """
+        Input: the four frames served through one lane, each loaded, augmented and collated by
+        the T4 training pipeline, its camera shuffle and 2D projection included, and one
+        training step per frame of a small StreamPETR with the auxiliary 2D head and the partial
+        annotations.
+        Expected: every step trains on a finite loss, with the augmentation folded into the
+        frame pose and the 2D ground truth in the batch; the memory continues within a scenario
+        and restarts at the next one; the annotation status of every record reaches the batch,
+        where the partial annotations read it; the 2D head is trained.
+        Check: the folded pose, the finite loss of every step, the stream continuity recorded
+        for every frame, the annotation statuses and the gradients of the 2D head.
+        """
         model = build_model().train()
         model.log_dict = lambda *args, **kwargs: None
         sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
@@ -212,8 +231,6 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
                 ([SCENE], [10.5], [1.0]),
             ],
         )
-        # The annotation flag of the record reaches the batch, where the partial annotations
-        # read it.
         self.assertEqual(
             [status.tolist() for status in statuses], [[True], [True], [False], [False]]
         )
@@ -222,6 +239,13 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         )
 
     def test_evaluation_decodes_the_streamed_frames(self) -> None:
+        """
+        Input: the four frames served through one lane into the small StreamPETR in evaluation
+        mode.
+        Expected: evaluation runs without the auxiliary 2D head and decodes the detections of
+        every frame.
+        Check: no auxiliary outputs, and one prediction per frame.
+        """
         model = build_model().eval()
         sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
         for index in sampler:

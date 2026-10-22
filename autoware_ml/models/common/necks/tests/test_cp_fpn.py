@@ -8,6 +8,12 @@ from autoware_ml.models.common.necks.cp_fpn import CPFPN
 
 
 def test_cpfpn_outputs_match_input_levels_and_channels() -> None:
+    """
+    Input: two feature levels of 24 and 40 channels, 12 x 20 and 6 x 10, for a batch of two.
+    Expected: the CPFPN neck returns one map per input level, each with ``out_channels`` (16)
+    channels at the resolution of its level.
+    Check: the number of outputs and their shapes.
+    """
     neck = CPFPN(in_channels=[24, 40], out_channels=16)
     high = torch.randn(2, 24, 12, 20)
     low = torch.randn(2, 40, 6, 10)

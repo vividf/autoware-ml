@@ -225,20 +225,47 @@ def _dn_mixed_gt_worker(rank: int, world_size: int, init_file: str) -> None:
 
 
 def test_reduce_mean_count_is_identity_without_process_group() -> None:
+    """
+    Input: a float and an integer count, without a process group.
+    Expected: on one device the local count is the global count, so the float count comes back
+    unchanged and the integer one is cast to float, as the distributed path casts it.
+    Check: the float count is the same tensor, and the integer one comes back as float32.
+    """
     value = torch.tensor(3.0)
     assert reduce_mean_count(value) is value
-    # Integer counts are cast to float either way, so the single-GPU dtype
-    # matches the distributed path.
     assert reduce_mean_count(torch.tensor(3)).dtype == torch.float32
 
 
 def test_reduce_mean_count_averages_counts_across_ranks() -> None:
+    """
+    Input: two CPU gloo ranks holding the counts 2 and 8.
+    Expected: every rank gets the mean count, 5, and its own count is not modified in place.
+    Check: the reduced count and the local count on every rank.
+    """
     _spawn(_reduce_mean_count_worker)
 
 
 def test_sharded_loss_matches_single_batch_equivalent() -> None:
+    """
+    Input: two CPU gloo ranks, rank 0 holding a frame with 2 boxes and rank 1 a frame with 8,
+    and the same two frames as one batch on every rank.
+    Expected: the losses are normalized by the object count averaged across the ranks, so the
+    DDP average of the sharded losses is the loss of the whole batch on one device; rank-local
+    counts would give every rank an equal vote whatever its object count.
+    Check: the classification and regression losses averaged over the ranks against those of the
+    combined batch, within a relative tolerance of 1e-5.
+    """
     _spawn(_sharding_invariance_worker)
 
 
 def test_dn_collective_survives_rank_without_ground_truth() -> None:
+    """
+    Input: two CPU gloo ranks, rank 0 with four ground-truth boxes and their denoising queries,
+    rank 1 without ground truth and without denoising queries.
+    Expected: a rank without ground truth still reaches the collective that counts the denoising
+    queries, so a step mixing both does not deadlock, and it returns zero denoising losses under
+    the same keys.
+    Check: both ranks finish within the timeout with both denoising losses, which are zero on
+    rank 1.
+    """
     _spawn(_dn_mixed_gt_worker)

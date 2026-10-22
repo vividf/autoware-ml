@@ -53,6 +53,18 @@ def _class_logits(model, batch_inputs) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def test_permuted_rows_move_the_class_logits_with_their_class() -> None:
+    """
+    Input: a StreamPETR model with the auxiliary 2D head on the nuScenes classes, with random
+    classification biases, and a model of the same shapes on the T4 classes, the same seven
+    classes with the last two swapped.
+    Expected: the raw checkpoint loads without an error and scores the traffic cones in the
+    barrier column. Permuted by ``permute_class_rows``, the snippet of
+    docs/models/streampetr.md, the logits of every class move with their class, and only the
+    final classification layers of the decoder and of the 2D head change.
+    Check: the logits of the raw load against the source ones, the decoder and 2D logits of the
+    permuted load against the source ones reordered, the two swapped columns, and the set of
+    checkpoint keys that changed.
+    """
     torch.manual_seed(0)
     source = _build_model(
         img_roi_head=_build_focal_head(NUSCENES_CLASSES), class_names=NUSCENES_CLASSES

@@ -69,10 +69,15 @@ _ANNOTATIONS_2D = "camera.annotations2d.LoadAnnotations2DFromBoxes3D"
 def test_2d_annotations_are_projected_after_every_geometric_augmentation(
     config: str, split: str, steps: list[str]
 ) -> None:
-    # The projection reads the augmented boxes and calibration, so every geometric
-    # augmentation (image and global 3D) must run first; a later one would leave the 2D
-    # targets silently wrong. Where the range filter goes is a recipe choice (the T4
-    # reference projects before it, the nuScenes one filters before augmenting).
+    """
+    Input: every pipeline an experiment config writes.
+    Expected: the 2D projection reads the augmented boxes and calibration, so every geometric
+    augmentation, of the images and of the global 3D frame, runs before it; a later one would
+    leave the 2D targets silently wrong. Where the range filter goes is a recipe choice: the T4
+    reference projects before it, the nuScenes one filters before augmenting.
+    Check: in a pipeline that projects 2D boxes, every geometric augmentation comes before
+    LoadAnnotations2DFromBoxes3D.
+    """
     annotations = [i for i, t in enumerate(steps) if t.endswith(_ANNOTATIONS_2D)]
     geometric = [i for i, t in enumerate(steps) if t.endswith(_GEOMETRIC_AUGMENTATIONS)]
     if annotations:

@@ -1048,6 +1048,15 @@ def _one_box_batch(batch_size: int = 1) -> ModelBatchInputs:
 
 
 def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
+    """
+    Input: a training batch of two samples with one 3D box each and one 2D box on every camera
+    but the last, through a StreamPETR model with the auxiliary FocalHead2D.
+    Expected: the 2D head predicts on every camera image of the batch and adds its five losses,
+    all finite, to the detection loss, and its classification layer is trained.
+    Check: the number of 2D predictions, the five 2D losses finite, the total against the
+    detection loss plus the five 2D terms, and the gradients of the 2D classification layer
+    after backward.
+    """
     model = _build_model(img_roi_head=_build_focal_head()).train()
     batch_inputs = _with_2d_boxes(_one_box_batch(batch_size=2))
 
@@ -1063,7 +1072,6 @@ def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
     without_roi = model.bbox_head.loss(
         outputs.detection3d().streampetr_head(), *_ground_truth(gt_detections)
     )
-    # The total adds the five auxiliary terms to the detection loss.
     torch.testing.assert_close(
         losses["loss"], without_roi["loss"] + sum(losses[key] for key in roi_keys)
     )
@@ -1104,6 +1112,13 @@ def test_auxiliary_2d_head_takes_the_box_edges_and_the_object_centers_apart() ->
 
 
 def test_auxiliary_2d_head_needs_the_2d_boxes_in_training() -> None:
+    """
+    Input: a training batch without 2D ground truth, through a model with the auxiliary 2D head.
+    Expected: the 2D head cannot train without 2D boxes, and skipping it would silently train
+    the model without its auxiliary supervision, so the loss is refused and names the transform
+    that adds the boxes.
+    Check: a ValueError naming LoadAnnotations2DFromBoxes3D is raised.
+    """
     model = _build_model(img_roi_head=_build_focal_head()).train()
     batch_inputs = _one_box_batch()
 
@@ -1114,6 +1129,13 @@ def test_auxiliary_2d_head_needs_the_2d_boxes_in_training() -> None:
 
 
 def test_evaluation_skips_the_auxiliary_2d_head() -> None:
+    """
+    Input: a batch without 2D ground truth, through a model with the auxiliary 2D head in
+    evaluation mode.
+    Expected: the 2D head only supervises the image features in training, so evaluation neither
+    runs it nor needs 2D boxes.
+    Check: the outputs carry no auxiliary predictions and the losses no 2D term.
+    """
     model = _build_model(img_roi_head=_build_focal_head()).eval()
     batch_inputs = _one_box_batch()
 
@@ -1126,6 +1148,16 @@ def test_evaluation_skips_the_auxiliary_2d_head() -> None:
 
 
 def test_partial_annotations_mask_the_cone_barrier_terms_of_unannotated_frames() -> None:
+    """
+    Input: one training frame with 2D boxes through a model with partial annotations, scored
+    with its traffic-cone and barrier status True, then False, then without the status.
+    Expected: a frame annotated without traffic cones and barriers does not teach either head
+    that they are absent: dropping their background terms lowers only the classification losses
+    of both heads. The status is required as soon as partial annotations are configured.
+    Check: both classification losses are lower without the cones and barriers, every other loss
+    is unchanged, and the batch without the status raises a ValueError naming
+    gt_traffic_cone_barrier_bbox_status.
+    """
     torch.manual_seed(0)
     model = _build_model(img_roi_head=_build_focal_head(), partial_ignore=True).train()
     batch_inputs = _with_2d_boxes(_one_box_batch())
@@ -1134,12 +1166,9 @@ def test_partial_annotations_mask_the_cone_barrier_terms_of_unannotated_frames()
     annotated = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [True]), outputs)
     ignored = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [False]), outputs)
 
-    # Dropping the cone and barrier background terms lowers only the classification losses
-    # of both heads.
     assert ignored["loss_cls"] < annotated["loss_cls"]
     assert ignored["loss_cls2d"] < annotated["loss_cls2d"]
     for key in ("loss_bbox", "loss_bbox2d", "loss_iou2d", "loss_centers2d", "loss_centerness2d"):
         torch.testing.assert_close(ignored[key], annotated[key])
-    # The flag is required as soon as partial annotations are configured.
     with pytest.raises(ValueError, match="gt_traffic_cone_barrier_bbox_status"):
         model.compute_metrics(batch_inputs, outputs)

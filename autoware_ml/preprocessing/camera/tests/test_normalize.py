@@ -32,7 +32,12 @@ def _inputs(images: torch.Tensor) -> ModelBatchInputs:
 
 @pytest.mark.parametrize("is_training", [True, False])
 def test_matches_the_runtime_normalization_of_8_bit_pixels(is_training: bool) -> None:
-    # The runtime feeds the graph (pixel - mean) / std with 0-255 pixels and statistics.
+    """
+    Input: random 8-bit pixels divided by 255, in training and in evaluation.
+    Expected: the unit-range statistics standardize the images exactly as the runtime does,
+    which feeds the graph (pixel - mean) / std with 0-255 pixels and statistics.
+    Check: the normalized images against the runtime formula on the 8-bit pixels.
+    """
     pixels = torch.randint(0, 256, (2, 3, 3, 4, 5)).float()
     mean_255 = torch.tensor([123.675, 116.28, 103.53]).view(1, 1, 3, 1, 1)
     std_255 = torch.tensor([58.395, 57.12, 57.375]).view(1, 1, 3, 1, 1)
@@ -46,8 +51,13 @@ def test_matches_the_runtime_normalization_of_8_bit_pixels(is_training: bool) ->
 
 @pytest.mark.parametrize("is_training", [True, False])
 def test_refuses_images_in_0_255(is_training: bool) -> None:
-    # Images loaded with normalize_to_unit=False keep their 0-255 pixels, which the unit-range
-    # statistics would otherwise standardize without any error.
+    """
+    Input: images of 0-255 pixels, as LoadImagesFromFile(normalize_to_unit=False) serves them,
+    in training and in evaluation.
+    Expected: the unit-range statistics would standardize them without any error into values far
+    from the ones the models read, so the layer refuses them.
+    Check: a ValueError naming LoadImagesFromFile(normalize_to_unit=True) is raised.
+    """
     pixels = torch.randint(0, 256, (2, 3, 3, 4, 5), generator=torch.Generator().manual_seed(0))
 
     with pytest.raises(ValueError, match=r"LoadImagesFromFile\(normalize_to_unit=True\)"):
@@ -57,6 +67,13 @@ def test_refuses_images_in_0_255(is_training: bool) -> None:
 
 
 def test_accepts_unit_range_images_with_interpolation_overshoot() -> None:
+    """
+    Input: unit-range images with one pixel at 1.2, an overshoot an image interpolation can
+    produce.
+    Expected: the range check leaves room for the overshoot of an interpolation, so the images
+    are normalized as usual.
+    Check: the normalized images against (images - mean) / std.
+    """
     images = torch.rand(2, 3, 3, 4, 5, generator=torch.Generator().manual_seed(0))
     images[0, 0, 0, 0, 0] = 1.2
 
@@ -70,8 +87,12 @@ def test_accepts_unit_range_images_with_interpolation_overshoot() -> None:
 
 
 def test_checks_only_the_first_batch() -> None:
-    # One reduction and one host synchronization per run: once the first batch has passed,
-    # the layer no longer reads the pixel range.
+    """
+    Input: a unit-range batch, then a batch of 255 pixels, through the same layer.
+    Expected: the layer reads the pixel range of the first batch only, one reduction and one
+    host synchronization per run, so it does not check a later batch.
+    Check: the second batch is normalized without an error.
+    """
     normalize = BatchNormalizeImages(IMAGENET_MEAN, IMAGENET_STD)
     normalize(_inputs(torch.rand(1, 2, 3, 4, 5)), is_training=True)
 
@@ -79,6 +100,12 @@ def test_checks_only_the_first_batch() -> None:
 
 
 def test_keeps_the_calibration() -> None:
+    """
+    Input: a unit-range batch with its calibration.
+    Expected: the normalization replaces the images only, so the calibration reaches the model
+    as it is.
+    Check: the lidar-to-image transforms are the same tensor.
+    """
     inputs = _inputs(torch.rand(1, 2, 3, 4, 5))
 
     normalized = BatchNormalizeImages(IMAGENET_MEAN, IMAGENET_STD)(inputs, is_training=True)
@@ -87,6 +114,11 @@ def test_keeps_the_calibration() -> None:
 
 
 def test_rejects_images_of_another_channel_count() -> None:
+    """
+    Input: images of four channels with statistics of three.
+    Expected: the statistics cannot standardize channels they do not describe.
+    Check: a ValueError naming the channels is raised.
+    """
     with pytest.raises(ValueError, match="channels"):
         BatchNormalizeImages(IMAGENET_MEAN, IMAGENET_STD)(
             _inputs(torch.rand(1, 2, 4, 4, 5)), is_training=True
@@ -94,6 +126,14 @@ def test_rejects_images_of_another_channel_count() -> None:
 
 
 def test_rejects_inconsistent_statistics() -> None:
+    """
+    Input: a mean of two channels with a standard deviation of three, and a standard deviation
+    of zero.
+    Expected: statistics that disagree on the channel count, or that would divide by a
+    non-positive deviation, cannot standardize the images, so the layer refuses them when it is
+    built.
+    Check: a ValueError is raised for each.
+    """
     with pytest.raises(ValueError):
         BatchNormalizeImages([0.5, 0.5], IMAGENET_STD)
     with pytest.raises(ValueError):
@@ -101,8 +141,12 @@ def test_rejects_inconsistent_statistics() -> None:
 
 
 def test_runs_inside_the_data_preprocessor() -> None:
-    # DataPreprocessor accepts only DataPreprocessorModule instances, so the normalization
-    # has to be one to sit first in `data_preprocessor.preprocessor_modules`.
+    """
+    Input: a DataPreprocessor built with the normalization as its only module.
+    Expected: DataPreprocessor accepts only DataPreprocessorModule instances, so the
+    normalization has to be one to sit first in ``data_preprocessor.preprocessor_modules``.
+    Check: the preprocessor holds the module.
+    """
     preprocessor = DataPreprocessor(
         preprocessor_modules=[BatchNormalizeImages(mean=[0.5] * 3, std=[0.5] * 3)]
     )

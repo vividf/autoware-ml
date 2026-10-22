@@ -34,6 +34,13 @@ T4_CLASSES = ["car", "truck", "bus", "bicycle", "pedestrian", "barrier", "traffi
 
 
 def test_the_three_stages_are_bundled() -> None:
+    """
+    Input: the experiment configs bundled under tasks/detection3d/streampetr.
+    Expected: the three stages of the flow are bundled, each as one leaf config and no other:
+    the nuScenes pretrain, the j6gen2 fine-tune and the T4 gen1 and gen2 base.
+    Check: the leaf names of the StreamPETR experiments, in the order the experiment configs are
+    listed.
+    """
     assert [stage.rsplit("/", 1)[1] for stage in STAGES] == [
         "vov99_cpfpn_320x800_b8_30e_nuscenes_54m_pretrain",
         "vov99_cpfpn_480x640_b16_35e_t4dataset_51m_j6gen2_base",
@@ -43,11 +50,21 @@ def test_the_three_stages_are_bundled() -> None:
 
 @pytest.mark.parametrize("config_name", STAGES)
 def test_every_stage_streams_the_seven_classes_of_its_taxonomy(config_name: str) -> None:
+    """
+    Input: the composed config of every stage.
+    Expected: every stage trains the seven classes in the order of its database taxonomy in both
+    heads: the nuScenes order in stage 1, the dynamic T4 order, the one the other T4 detectors
+    train and the deployed node decodes, in stages 2 and 3, on both databases of stage 2. The
+    head carries a temporal memory across batches, so the streaming overlay makes the datamodule
+    a StreamingDataModule seeded by the experiment, whose loaders do not shuffle and whose
+    evaluation runs one lane per rank. The schedule is bound to the trainer, and only the
+    initial weights are left for the command line.
+    Check: the class names of the taxonomies and of both heads, the datamodule class, its seed
+    and its keys against the arguments of StreamingDataModule, the dataloader settings, the
+    max_epochs of the scheduler and the keys left missing.
+    """
     cfg = compose_experiment(config_name)
 
-    # Every stage trains the seven classes in the order of its database taxonomy: the nuScenes
-    # order in stage 1, the dynamic T4 order (the one the other T4 detectors train and the
-    # deployed node decodes) in stages 2 and 3, on both databases of stage 2.
     expected = T4_CLASSES if "/t4dataset/" in config_name else NUSCENES_CLASSES
     for database in (cfg.database, cfg.get("gen2_database")):
         if database is not None:
@@ -55,9 +72,6 @@ def test_every_stage_streams_the_seven_classes_of_its_taxonomy(config_name: str)
             assert list(taxonomy.detection3d.class_names) == expected
     assert list(OmegaConf.to_container(cfg.model.bbox_head.class_names)) == expected
     assert list(OmegaConf.to_container(cfg.model.img_roi_head.class_names)) == expected
-    # The head carries a temporal memory across batches, so every dataloader streams scenes: the
-    # streaming overlay makes the datamodule a StreamingDataModule seeded by the experiment, and
-    # the composed keys are exactly the arguments the class takes.
     datamodule = cfg.datamodule
     assert hydra.utils.get_class(datamodule._target_) is StreamingDataModule
     assert datamodule.seed == cfg.seed
@@ -66,15 +80,19 @@ def test_every_stage_streams_the_seven_classes_of_its_taxonomy(config_name: str)
     assert not cfg.datamodule.train_dataloader.shuffle
     assert cfg.datamodule.validation_dataloader.batch_size == 1
     assert cfg.datamodule.test_dataloader.batch_size == 1
-    # The schedule is bound to the trainer rather than auto-filled.
     assert cfg.model.scheduler.max_epochs == cfg.trainer.max_epochs
-    # Only the initial weights are left for the command line.
     missing = [key for key in ("weights",) if OmegaConf.is_missing(cfg, key)]
     assert missing == ["weights"]
 
 
 @pytest.mark.parametrize("config_name", STAGES)
 def test_every_pipeline_filters_the_physical_boxes_before_anything_else(config_name: str) -> None:
+    """
+    Input: the training and test pipelines of every stage.
+    Expected: a non-finite velocity or a zero extent would turn the losses NaN or infinite, so
+    BBoxesPhysicalFilter drops such boxes before any other transform reads them.
+    Check: the first step of every pipeline is BBoxesPhysicalFilter.
+    """
     cfg = compose_experiment(config_name)
     for split in ("train", "test"):
         steps = [step["_target_"] for step in cfg.datasets[split].transforms.pipeline]
@@ -131,9 +149,15 @@ def test_only_the_t4_training_pipelines_shuffle_the_loaded_cameras(config_name: 
 def test_t4_stages_ignore_the_cones_and_barriers_of_the_scenes_without_them(
     config_name: str,
 ) -> None:
+    """
+    Input: the partial annotations of the T4 stages, instantiated from their configs.
+    Expected: the T4 scenarios flag whether their traffic cones and barriers are annotated, and
+    where they are not, those two classes are not supervised; the pair resolves by name,
+    whichever order the taxonomy lists it in.
+    Check: the class ids the partial annotations ignore, and the class names at those ids.
+    """
     cfg = compose_experiment(config_name)
     partial_annotations = hydra.utils.instantiate(cfg.model.partial_annotations)
-    # The pair resolves by name, whichever order the taxonomy lists it in.
     assert list(partial_annotations.partial_ignore_class_ids) == [5, 6]
     assert {T4_CLASSES[index] for index in partial_annotations.partial_ignore_class_ids} == {
         "traffic_cone",
@@ -142,16 +166,28 @@ def test_t4_stages_ignore_the_cones_and_barriers_of_the_scenes_without_them(
 
 
 def test_the_nuscenes_stage_supervises_every_class() -> None:
+    """
+    Input: the composed config of the nuScenes stage.
+    Expected: nuScenes annotates every class in every frame, so the stage has no partial
+    annotations.
+    Check: model.partial_annotations is None.
+    """
     cfg = compose_experiment([stage for stage in STAGES if "/nuscenes/" in stage][0])
     assert cfg.model.partial_annotations is None
 
 
 def test_the_gen_base_stage_joins_the_gen1_and_gen2_corpora() -> None:
+    """
+    Input: the composed config of stage 2, the T4 gen1 and gen2 base.
+    Expected: the main source reads the gen1 base corpus and a second source the gen2 base
+    corpus, both through the same split datasets, each one only from its own database.
+    Check: the database versions, the source names, and the transforms, cameras and root path of
+    the gen2 datasets.
+    """
     cfg = compose_experiment([stage for stage in STAGES if "gen1_gen2" in stage][0])
     assert "gen1_base" in cfg.database.version
     assert "gen2_base" in cfg.gen2_database.version
     assert set(cfg.datamodule.sources) == {"main", "gen2"}
-    # Both sources read the same split datasets, only from their own database.
     for split in ("train", "test"):
         gen2 = cfg.datasets[f"gen2_{split}"]
         assert gen2.transforms == cfg.datasets[split].transforms

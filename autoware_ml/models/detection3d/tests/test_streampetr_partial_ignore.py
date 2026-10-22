@@ -67,6 +67,14 @@ def _build_head() -> StreamPETRHead:
 
 
 def test_partial_annotations_mask_only_the_cone_and_barrier_columns() -> None:
+    """
+    Input: the traffic-cone and barrier status of two frames over the seven classes, True for
+    the first frame and False for the second.
+    Expected: the first frame supervises every class, the second one every class but
+    traffic_cone and barrier.
+    Check: the mask shape, every column of the first row, and columns 5 and 6 against the first
+    five of the second row.
+    """
     masks = _masks([True, False])
     assert masks.shape == (2, 7)
     assert masks[0].all()
@@ -75,6 +83,14 @@ def test_partial_annotations_mask_only_the_cone_and_barrier_columns() -> None:
 
 
 def test_sigmoid_focal_loss_classwise_weights_zero_masked_columns() -> None:
+    """
+    Input: random logits of four queries over seven classes, all background, scored without
+    weights, with weights of one, and with weights of zero on columns 5 and 6.
+    Expected: weights of one change nothing, and zero-weighted columns drop out of the loss as
+    if their classes did not exist.
+    Check: the unweighted loss against the one with weights of one, and the masked loss against
+    the loss of the first five columns alone.
+    """
     loss_fn = SigmoidFocalLoss()
     logits = torch.randn(4, 7)
     targets = torch.zeros(4, 7)
@@ -91,6 +107,16 @@ def test_sigmoid_focal_loss_classwise_weights_zero_masked_columns() -> None:
 
 
 def test_get_targets_weights_every_query_by_the_mask_of_its_frame() -> None:
+    """
+    Input: the classification targets of a frame with one box, built with the mask of a frame
+    annotated without traffic cones and barriers, without a mask, and for a batch of two frames,
+    the first annotated with them and the second without.
+    Expected: every query of a frame annotated without them loses only the cone and barrier
+    columns of its classification weights, no mask keeps the weights uniform, and in a batch
+    every frame weights its queries by its own mask.
+    Check: the label weights of the masked frame by column, None without a mask, and the weights
+    of both frames of the batch.
+    """
     head = _build_head()
     num_queries = 16
     cls_logits = torch.randn(1, num_queries, 7)
@@ -124,6 +150,13 @@ def test_get_targets_weights_every_query_by_the_mask_of_its_frame() -> None:
 
 
 def test_dn_label_weights_mask_every_denoising_query_of_unannotated_samples() -> None:
+    """
+    Input: six denoising queries of two samples, sample 1 annotated without traffic cones and
+    barriers.
+    Expected: every denoising query of sample 1 loses the cone and barrier columns, the queries
+    of sample 0 stay fully weighted, and no mask gives no weights.
+    Check: the weights of the queries of each sample by column, and None without a mask.
+    """
     head = _build_head()
     cls_scores = torch.randn(6, 7)
     known_bids = torch.tensor([0, 0, 1, 1, 1, 0])
@@ -139,6 +172,16 @@ def test_dn_label_weights_mask_every_denoising_query_of_unannotated_samples() ->
 
 
 def test_head_loss_applies_the_annotated_class_masks() -> None:
+    """
+    Input: the StreamPETR head loss of one frame with one box, without a mask, with the mask of
+    a frame annotated with traffic cones and barriers, with the mask of a frame annotated
+    without them, and with the masks of two frames.
+    Expected: the mask of an annotated frame gives the plain loss, and the other mask removes
+    non-negative background terms from the classification loss only; masks of another batch size
+    are refused.
+    Check: the total losses, the classification and regression losses, and a ValueError naming
+    the expected shape.
+    """
     torch.manual_seed(0)
     head = _build_head().eval()
     outputs = StreamPETRHeadOutputs(
@@ -152,8 +195,6 @@ def test_head_loss_applies_the_annotated_class_masks() -> None:
     plain = head.loss(outputs, gt_boxes, gt_labels)
     annotated = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([True]))
     ignored = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([False]))
-    # An all-True mask is the plain loss; masking removes non-negative background terms from
-    # the classification loss only.
     torch.testing.assert_close(annotated["loss"], plain["loss"])
     assert ignored["loss_cls"] < annotated["loss_cls"]
     assert torch.allclose(ignored["loss_bbox"], annotated["loss_bbox"])
@@ -163,6 +204,17 @@ def test_head_loss_applies_the_annotated_class_masks() -> None:
 
 
 def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None:
+    """
+    Input: image features of two samples of two cameras through FocalHead2D, one 2D box of
+    traffic_cone on the first camera of sample 0, and the masks of sample 0 annotated with
+    traffic cones and barriers and sample 1 annotated without them.
+    Expected: the head predicts the class, box, center and centerness of every token. The mask
+    removes strictly positive background terms of the images of sample 1 from the classification
+    loss and touches nothing else, the masks of two annotated samples give the plain loss, and
+    masks of another batch size are refused.
+    Check: the output shapes, the five losses finite, the classification loss with and without
+    the mask, the other losses unchanged, and a ValueError naming the expected shape.
+    """
     torch.manual_seed(0)
     head = FocalHead2D(class_names=CLASS_NAMES, in_channels=32, embed_dims=32, stride=16)
     assert head.num_classes == 7
@@ -197,8 +249,6 @@ def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None
     ):
         assert torch.isfinite(losses[key]), key
 
-    # Masking removes strictly positive background terms of sample 1's images
-    # and touches nothing else.
     unmasked = head.loss(outputs, gt_annotated_class_masks=_masks([True, True]), **annotations)
     plain = head.loss(outputs, **annotations)
     torch.testing.assert_close(unmasked["loss_cls2d"], plain["loss_cls2d"])
@@ -211,6 +261,14 @@ def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None
 
 
 def test_focal_head_2d_class_weights_follow_the_images_of_every_sample() -> None:
+    """
+    Input: the masks of two samples, the second annotated without traffic cones and barriers,
+    for two cameras of three tokens each.
+    Expected: every token of every image of a sample takes the mask row of its sample, so only
+    the six tokens of the two images of sample 1 lose the cone and barrier columns; no mask
+    gives no weights.
+    Check: the token weights against the expected matrix, and None without a mask.
+    """
     head = FocalHead2D(class_names=CLASS_NAMES, in_channels=32, embed_dims=32)
     tokens_per_image = 3
     num_cams = 2
