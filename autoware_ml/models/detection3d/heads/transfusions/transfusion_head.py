@@ -247,6 +247,7 @@ class TransFusionHead(nn.Module):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         use_bf16_cross_attention: bool = False,
+        fuse_export_attention: bool = False,
     ) -> None:
         """Initialize the TransFusion detection head.
 
@@ -315,6 +316,16 @@ class TransFusionHead(nn.Module):
                 (shared block, dense heatmap head, prediction branches).
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
+            fuse_export_attention: Whether export emits fusion-ready attention (no
+                max-subtraction before softmax) in the trace dtype. The max-sub pattern
+                blocks TensorRT's Myelin MHA fusion (measured on the j6gen2 dense graph:
+                fused 0.25 ms vs unfused 0.68 ms); the fused kernel handles the softmax
+                numerics internally. Training is untouched (export copy only). Off by
+                default: the max-subtraction is the numerical safety net for the case
+                where Myelin does *not* match the pattern (a TensorRT upgrade, a changed
+                graph shape), where unfused fp16 attention could overflow. A config that
+                turns it on relies on the deploy verification / evaluation to catch that.
+                Implied by ``use_bf16_cross_attention``.
 
         Raises:
             ValueError: If ``common_heads`` misses a regression branch or holds an unknown one,
@@ -361,12 +372,22 @@ class TransFusionHead(nn.Module):
         self.norm_momentum = norm_momentum
         self.use_bf16_cross_attention = use_bf16_cross_attention
         self.required_onnx_precision = "fp16" if use_bf16_cross_attention else None
+        self.fuse_export_attention = fuse_export_attention
         if nms_type not in {None, "circle"}:
             raise ValueError(f"Unsupported TransFusion NMS type: {nms_type!r}")
         self.nms_type = nms_type
         self.dense_heatmap_pooling_class_ids = self._resolve_class_ids(
             dense_heatmap_pooling_class_names
         )
+        # Scatter-free channel bookkeeping for _suppress_dense_heatmaps: the suppressed
+        # map is rebuilt as concat([pooled classes, excluded classes]) gathered back into
+        # class order — constant indices instead of a ScatterND (whose ONNX form drags a
+        # whole index-construction subgraph into every export).
+        pooling_ids = list(self.dense_heatmap_pooling_class_ids)
+        excluded_ids = [c for c in range(self.num_classes) if c not in pooling_ids]
+        concat_order = pooling_ids + excluded_ids
+        self._dense_heatmap_excluded_class_ids = excluded_ids
+        self._local_max_class_remap = [concat_order.index(c) for c in range(self.num_classes)]
         # nms_type decides whether NMS runs at all, the groups only decide how. Groups without a
         # type would be silently ignored, which is the kind of config mistake worth refusing.
         if nms_type is None and nms_group_configs is not None:
@@ -545,7 +566,13 @@ class TransFusionHead(nn.Module):
         if not self.dense_heatmap_pooling_class_ids:
             return heatmaps
 
-        local_max = heatmaps.clone()
+        # Semantics (unchanged): pooling classes take the 3x3 max over fully-interior
+        # windows, their border ring keeps the raw value (border peaks survive), and
+        # excluded classes stay unsuppressed. Built scatter-free — pad + mask + maximum
+        # for the border ring, concat + constant-index gather for the channel merge —
+        # because the slice-assignment form exports as ScatterND plus a Shape/Expand/
+        # Concat index-construction subgraph (~40 nodes) that TensorRT tolerates but
+        # ONNX Runtime and any later graph surgery pay for.
         padding = self.nms_kernel_size // 2
         selected_heatmap = heatmaps[:, self.dense_heatmap_pooling_class_ids, :, :]
         pooled = F.max_pool2d(
@@ -554,16 +581,29 @@ class TransFusionHead(nn.Module):
             stride=1,
             padding=0,
         )
-
-        if padding == 0:
-            local_max[:, self.dense_heatmap_pooling_class_ids, :, :] = pooled
-        else:
-            local_max[
-                :,
-                self.dense_heatmap_pooling_class_ids,
-                padding:-padding,
-                padding:-padding,
-            ] = pooled
+        if padding > 0:
+            height, width = selected_heatmap.shape[2], selected_heatmap.shape[3]
+            interior = F.pad(
+                torch.ones(
+                    1,
+                    1,
+                    height - 2 * padding,
+                    width - 2 * padding,
+                    device=heatmaps.device,
+                    dtype=heatmaps.dtype,
+                ),
+                [padding] * 4,
+                value=0.0,
+            )
+            # Interior: max(pooled, 0) = pooled (sigmoid scores are positive).
+            # Border:   max(0, raw)    = raw — identical to the old slice assignment.
+            pooled = torch.maximum(
+                F.pad(pooled, [padding] * 4, value=0.0),
+                selected_heatmap * (1.0 - interior),
+            )
+        local_max = torch.cat(
+            [pooled, heatmaps[:, self._dense_heatmap_excluded_class_ids, :, :]], dim=1
+        )[:, self._local_max_class_remap, :, :]
         return heatmaps * (local_max == heatmaps)
 
     def _create_2d_grid(
@@ -1603,6 +1643,7 @@ class TransFusionHead(nn.Module):
             ExportableMultiheadAttention in all decoder layers.
         """
         head = deepcopy(self).eval()
+        fuse = head.fuse_export_attention or head.use_bf16_cross_attention
         bev_pos = None
         if bev_shape is not None:
             height, width = bev_shape
@@ -1617,12 +1658,12 @@ class TransFusionHead(nn.Module):
             if isinstance(decoder_layer.self_attn, nn.MultiheadAttention):
                 decoder_layer.self_attn = ExportableMultiheadAttention(
                     decoder_layer.self_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                 )
             if isinstance(decoder_layer.cross_attn, nn.MultiheadAttention):
                 decoder_layer.cross_attn = ExportableMultiheadAttention(
                     decoder_layer.cross_attn,
-                    fuse_attention=head.use_bf16_cross_attention,
+                    fuse_attention=fuse,
                     use_bf16=head.use_bf16_cross_attention,
                 )
         # The replacement modules are constructed in training mode.
