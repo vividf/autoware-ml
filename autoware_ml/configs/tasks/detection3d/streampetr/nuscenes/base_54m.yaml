@@ -108,10 +108,12 @@ datasets:
 
           point_cloud_range: ${point_cloud_range}
 
-# StreamPETR carries a temporal memory across batches, so every dataloader streams whole
-# scenes per batch lane. Streaming evaluation runs one lane per rank: on one GPU every frame
-# is scored, with several GPUs every rank is trimmed to the shortest one (a few percent of the
-# frames), and wider eval batches trim every lane as well.
+# StreamPETR carries a temporal memory across batches, so every dataloader streams the frames
+# of its scenes in time order: the sampler joins the scenes and cuts their frames into one lane
+# per batch position of every rank, and a cut can fall inside a scene. Streaming evaluation runs
+# one lane per rank: on one GPU every frame is scored; with several GPUs, or wider evaluation
+# batches, the longer lanes lose their last frame, fewer frames than there are lanes. A
+# prediction has to serve every frame, so it runs on one device with batch size 1.
 datamodule:
   streaming: true
   train_dataloader:

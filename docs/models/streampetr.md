@@ -102,10 +102,12 @@ stage supervises every class (`partial_annotations: null`).
 
 The data is read from the record table of the database (built on first use
 under `cache_root_path`) and split by the scenario lists under
-`t4dataset_scenario_root_path`. Every dataloader streams whole scenes per
-batch lane (`datamodule.streaming`), ordered by the sample time of the
-records; the training split reshuffles the scenes every epoch from the
-experiment `seed`.
+`t4dataset_scenario_root_path`. Every dataloader streams the frames of its
+scenes in the order of the sample time of the records
+(`datamodule.streaming`): the sampler joins the scenes and cuts their frames
+into one lane per batch position of every rank, and a lane cut inside a scene
+starts a new stream there. The training split reshuffles the order of the
+scenes every epoch from the experiment `seed`.
 
 The `img_backbone` LR is always `lr * 0.1`, set via
 `model.optimizer_group_overrides.img_backbone.lr`. The LR schedule is bound
@@ -275,11 +277,12 @@ Two evaluation-side conditions make mAP comparable with AWML T4MetricV2:
    T4 distance buckets mirror T4MetricV2's (0-50 / 50-90 / 90-121 / 0-121 m).
 
 Validation during training streams one lane per rank. The sampler cuts the
-joined frames of the split into one lane per rank and drops the tail that
-does not fill a round, fewer frames than there are lanes, so `val/det3d/mAP`
-(the checkpoint monitor) on several GPUs scores all but a handful of frames;
-a lane that starts inside a scene starts a new stream there. `autoware-ml
-test` on one device scores every frame.
+joined frames of the split into one lane per rank and trims the lanes to the
+same length: the longer lanes lose their last frame, fewer frames than there
+are lanes, spread over the split, so `val/det3d/mAP` (the checkpoint monitor)
+on several GPUs scores all but a handful of frames; a lane that starts inside
+a scene starts a new stream there. `autoware-ml test` on one device scores
+every frame.
 
 ### Ground truth against the accepted run
 
