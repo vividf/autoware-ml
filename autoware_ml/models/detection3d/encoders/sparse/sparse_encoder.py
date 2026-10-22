@@ -26,7 +26,7 @@ The sparse grid order is ``(Y, X, Z)`` (= the``SparseEncoder`` "(H, W, D)") so t
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from itertools import pairwise
 
@@ -35,10 +35,12 @@ import torch
 import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential, SubMConv3d, SparseConv3d
 from spconv.pytorch.conv import SparseConvolution
+from spconv.pytorch.core import ImplicitGemmIndiceData
 from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
 from spconv.pytorch.modules import SparseModule
 
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
+from autoware_ml.ops.spconv.rulebook import DownsampleStage, downsample_stages
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 
 logger = logging.getLogger(__name__)
@@ -232,6 +234,11 @@ class SparseEncoder(BEVMiddleEncoder):
             targets — the reference deployment does exactly that — so measure before
             changing it. Applies only to the export copy
             (:meth:`prepare_for_export`); training always uses spconv's own default.
+        export_precompute_rulebooks: Whether the deployed stage graph precomputes the
+            rulebooks of the down-sampling layers outside the graph and feeds them as
+            extra graph inputs (``rulebook/<indice_key>/<slot>``), removing the
+            data-dependent shapes TensorRT synchronizes on. Changes the exported graph's
+            input list, so the runtime has to supply them; off by default.
     """
 
     def __init__(
@@ -251,10 +258,12 @@ class SparseEncoder(BEVMiddleEncoder):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         export_do_sort: bool = True,
+        export_precompute_rulebooks: bool = False,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
         self.export_do_sort = export_do_sort
+        self.export_precompute_rulebooks = export_precompute_rulebooks
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
@@ -327,18 +336,40 @@ class SparseEncoder(BEVMiddleEncoder):
 
     #: Column order the convolutions run on: ``[batch, y, x, z]``, matching ``sparse_shape``
     #: ``(Y, X, Z)``. Voxel coordinates arrive as ``[batch, z, y, x]``; :meth:`conv_coords`
-    #: applies this, so the convention is stated exactly once.
+    #: applies this, and :attr:`coors_permutation` derives the runtime's contract from it, so
+    #: the convention is stated exactly once.
     CONV_COORDS_PERMUTATION: tuple[int, ...] = (0, 2, 3, 1)
 
     def conv_coords(self, coords: torch.Tensor) -> torch.Tensor:
         """Reorder ``[batch, z, y, x]`` voxel coordinates into the convolutions' column order."""
         return coords[:, list(self.CONV_COORDS_PERMUTATION)].contiguous().int()
 
+    @property
+    def coors_permutation(self) -> tuple[int, ...]:
+        """For each convolution spatial column, the graph ``coors`` (``[z, y, x]``) column it is.
+
+        The deployed runtime rebuilds the convolution coordinates from the graph's batch-less
+        ``coors`` input with this, so it is derived from :attr:`CONV_COORDS_PERMUTATION`
+        rather than declared a second time.
+        """
+        return tuple(column - 1 for column in self.CONV_COORDS_PERMUTATION[1:])
+
+    def downsample_stages(self) -> tuple[DownsampleStage, ...]:
+        """Describe the down-sampling layers whose rulebooks deployment precomputes.
+
+        ``modules()`` yields the convolutions in registration order, which is this encoder's
+        forward order (``conv_input`` -> ``encoder_layers`` stage by stage -> ``conv_out``):
+        the cascade of spatial shapes depends on it.
+        """
+        layers = [module for module in self.modules() if isinstance(module, SparseConvolution)]
+        return downsample_stages(layers, self.sparse_shape)
+
     def forward(
         self,
         voxel_features: Float32[torch.Tensor, "num_voxels num_voxel_channels"],
         coords: Float32[torch.Tensor, "num_voxels 4"],
         batch_size: int,
+        precomputed_rulebooks: Mapping[str, ImplicitGemmIndiceData] | None = None,
     ) -> torch.Tensor:
         """Encode voxel features into a dense BEV map.
 
@@ -348,6 +379,11 @@ class SparseEncoder(BEVMiddleEncoder):
             coords: Voxel coordinates of shape in `[batch_idx, z, y, x]`. coords must be in this
                 order to align with autoware.
             batch_size: Number of samples in the batch.
+            precomputed_rulebooks: Indice key -> rulebook of a down-sampling layer, generated
+                outside the graph (:mod:`autoware_ml.ops.spconv.rulebook`). Seeded into the
+                input tensor's indice cache so those layers reuse it instead of generating
+                their own: deployment's way of keeping data-dependent shapes out of the
+                exported graph. ``None`` (training, plain inference) generates everything.
 
         Returns:
             Dense BEV feature map of shape
@@ -355,6 +391,8 @@ class SparseEncoder(BEVMiddleEncoder):
         """
         coords = self.conv_coords(coords)
         sp_tensor = SparseConvTensor(voxel_features, coords, self.sparse_shape, batch_size)
+        if precomputed_rulebooks:
+            sp_tensor.indice_dict.update(precomputed_rulebooks)
         x = self.conv_input(sp_tensor)
         x = self.encoder_layers(x)
         out = self.conv_out(x)
