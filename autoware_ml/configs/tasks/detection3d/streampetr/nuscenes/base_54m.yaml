@@ -7,6 +7,8 @@ defaults:
   - /metrics/nuscenes/detection3d@metrics: default_detection3d_metric_suites
   - /metrics/nuscenes/detection3d@metric_ranges: default_detection3d_50m_metric_ranges
   - /datamodule@datamodule: nuscenes/default_detection3d_datamodule
+  # The temporal memory needs the scenes streamed, so the datamodule is a StreamingDataModule.
+  - /datamodule/streaming@datamodule: default_streaming_datamodule
   - _self_
 
 point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
@@ -115,7 +117,6 @@ datasets:
 # batches, the longer lanes lose their last frame, fewer frames than there are lanes. A
 # prediction has to serve every frame, so it runs on one device with batch size 1.
 datamodule:
-  streaming: true
   train_dataloader:
     shuffle: false
   validation_dataloader:

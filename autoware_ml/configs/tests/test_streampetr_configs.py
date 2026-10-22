@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+import inspect
+
 import hydra
 import pytest
 from omegaconf import OmegaConf
 
 from autoware_ml.configs.tests.test_task_configs import EXPERIMENT_CONFIGS, compose_experiment
+from autoware_ml.datamodule.streaming_data_module import StreamingDataModule
 
 STAGES = [config for config in EXPERIMENT_CONFIGS if "/streampetr/" in config]
 # The nuScenes taxonomy and the dynamic T4 taxonomy are the same seven classes with the last
@@ -52,8 +55,14 @@ def test_every_stage_streams_the_seven_classes_of_its_taxonomy(config_name: str)
             assert list(taxonomy.detection3d.class_names) == expected
     assert list(OmegaConf.to_container(cfg.model.bbox_head.class_names)) == expected
     assert list(OmegaConf.to_container(cfg.model.img_roi_head.class_names)) == expected
-    # The head carries a temporal memory across batches, so every dataloader streams scenes.
-    assert cfg.datamodule.streaming
+    # The head carries a temporal memory across batches, so every dataloader streams scenes: the
+    # streaming overlay makes the datamodule a StreamingDataModule seeded by the experiment, and
+    # the composed keys are exactly the arguments the class takes.
+    datamodule = cfg.datamodule
+    assert hydra.utils.get_class(datamodule._target_) is StreamingDataModule
+    assert datamodule.seed == cfg.seed
+    parameters = set(inspect.signature(StreamingDataModule.__init__).parameters) - {"self"}
+    assert set(datamodule) - {"_target_", "_convert_"} == parameters
     assert not cfg.datamodule.train_dataloader.shuffle
     assert cfg.datamodule.validation_dataloader.batch_size == 1
     assert cfg.datamodule.test_dataloader.batch_size == 1

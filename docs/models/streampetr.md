@@ -103,11 +103,13 @@ stage supervises every class (`partial_annotations: null`).
 The data is read from the record table of the database (built on first use
 under `cache_root_path`) and split by the scenario lists under
 `t4dataset_scenario_root_path`. Every dataloader streams the frames of its
-scenes in the order of the sample time of the records
-(`datamodule.streaming`): the sampler joins the scenes and cuts their frames
-into one lane per batch position of every rank, and a lane cut inside a scene
-starts a new stream there. The training split reshuffles the order of the
-scenes every epoch from the experiment `seed`.
+scenes in the order of the sample time of the records: the range base composes
+`/datamodule/streaming@datamodule: default_streaming_datamodule` after the
+database datamodule, which makes it a `StreamingDataModule`. Its sampler joins
+the scenes and cuts their frames into one lane per batch position of every
+rank, and a lane cut inside a scene starts a new stream there. The training
+split reshuffles the order of the scenes every epoch from the experiment
+`seed`.
 
 The `img_backbone` LR is always `lr * 0.1`, set via
 `model.optimizer_group_overrides.img_backbone.lr`. The LR schedule is bound
@@ -355,7 +357,8 @@ annotations of the T4 stages.
 | `autoware_ml/models/common/multiview_image_encoder.py`               | Per-camera image encoder shared with BEVFusion    |
 | `autoware_ml/models/common/necks/cp_fpn.py`                          | CPFPN neck (reference StreamPETR neck)            |
 | `autoware_ml/models/detection3d/task_modules/`                       | Shared assigners, costs, coders, streaming memory |
-| `autoware_ml/datamodule/data_module.py`                              | `streaming` dataloaders (`GroupStreamingSampler`) |
+| `autoware_ml/datamodule/streaming_data_module.py`                    | `StreamingDataModule`, the streaming datamodule   |
+| `autoware_ml/datamodule/samplers.py`                                 | `GroupStreamingSampler`, the scene lanes          |
 | `autoware_ml/datamodule/base_dataset.py`                             | Scene grouping of the record table                |
 | `autoware_ml/dataclasses/batch/frame_meta.py`                        | Per-frame pose, scene and sample time             |
 | `autoware_ml/transforms/camera/annotations2d.py`                     | 2D targets projected from the 3D boxes            |
