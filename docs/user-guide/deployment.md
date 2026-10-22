@@ -143,7 +143,9 @@ deploy:
 ```
 
 **input_names / output_names**: exported input names default to the export
-spec's forward parameter names. Output names are declared per module.
+spec's forward parameter names. Output names are declared per module; for a module
+of a [stage graph](#stage-graph-verification-and-evaluation) the `GraphStage`
+declares them and `output_names` is not read.
 
 **precision**: `fp32` exports the model unchanged. `fp16` halves the weights and
 internal tensors but keeps graph inputs and outputs fp32, so consumers keep their
@@ -193,6 +195,30 @@ Engines are always built strongly typed: the builder uses exactly the precisions
 the ONNX carries and never picks its own. Choose the engine's numerics with
 `deploy.onnx.precision`.
 
+## Plugin graphs (sparse convolutions)
+
+Graphs with sparse convolutions — BEVFusion's lidar encoder, PTv3's cpe convs — export
+them as ONNX nodes in the `autoware` domain (`autoware::GetIndicePairsImplicitGemm`,
+`autoware::ImplicitGemm`), the operators `autoware_universe`'s `autoware_tensorrt_plugins`
+implements. TensorRT loads the library before parsing the ONNX:
+
+```yaml
+deploy:
+  tensorrt:
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
+```
+
+The Docker image builds the plugin (`docker/tensorrt_plugins/`, see its README for a
+rebuild against another `autoware_universe` branch). ONNX Runtime cannot run plugin
+nodes, so such stages declare `torch_fallback_backends=(Backend.ONNX,)`: the `onnx`
+backend runs them in PyTorch (starred in the evaluation table) while `tensorrt` runs the
+engine. The exported graph is ready for the runtime as it is.
+
+The FP16 cast of a plugin or Q/DQ graph is island-aware
+(`autoware_ml/deployment/onnx/precision.py`): plugin nodes, integer index paths and
+`Range` stay fp32, Linear Q/DQ regions keep fp32 mini-islands, and the graph I/O stays fp32.
+Plain graphs go through the upstream `onnxconverter_common` cast unchanged.
+
 ## Model-Owned Export Wrappers
 
 The preferred deployment path is to keep export logic inside the model. Models
@@ -226,30 +252,42 @@ shipped file reflects them.
 Export alone produces artifacts; it does not prove they compute what the PyTorch
 model computes. A model can opt into that proof by declaring its deployment as a
 *stage graph* — an ordered list of exportable graphs (`GraphStage`) and the PyTorch
-glue between them (`TorchStage`) — through `BaseModel.build_stages()`:
+glue between them (`TorchStage`) — through `ModuleBaseModel.build_stages()`:
 
 ```python
 def build_stages(self):
     return (
-        TorchStage("decorate", run=lambda ctx: {"input_features": self.encoder.decorate(...)}),
+        TorchStage("decorate", run=lambda state: {"input_features": self.encoder.decorate(...)},
+                   inputs=(), outputs=("input_features",)),   # glue reads only the batch
         GraphStage("pts_voxel_encoder_centerpoint", module=..., inputs=("input_features",),
                    outputs=("pillar_features",)),
-        TorchStage("scatter", run=...),
+        TorchStage("scatter", run=..., inputs=("pillar_features",), outputs=("spatial_features",)),
         GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
-                   outputs=("heatmap", "reg", ...), output_fields=(("heatmap", "heatmap"), ...)),
+                   outputs=("heatmap", "reg", ...)),  # nothing consumes these: the model outputs
     )
 ```
 
 Every `GraphStage` is one `deploy.onnx.modules.<name>` entry and one `<name>.onnx` /
 `<name>.engine`; the export specs are derived from the declaration (the graph runs once
 in PyTorch on the example batch and each stage is traced with the tensors the glue
-produced), so `build_export_specs()` needs no hand-written counterpart. Models without
-a stage graph keep their existing `build_export_specs()`; nothing below applies to them.
+produced), so `build_export_specs()` needs no hand-written counterpart. Glue declares what
+it reads and writes like a graph does, so `validate_stages` checks the whole dataflow from
+the declaration (every input written earlier, every name written once) before anything
+runs. The model outputs are the graph outputs no later stage consumes: the last graph's
+outputs in a chain like the one above, and every head's outputs when several heads share
+one encoder (PTv3 seg + det). They are what a backend hands to the model's
+`build_deployed_eval_output(batch_inputs, outputs)`, which turns them into the flat dict
+`build_eval_output` produces from `forward()`'s typed outputs — rebuilding the typed head
+outputs when the graph emits them (CenterPoint, the PTv3 det head), or scoring what the
+graph decoded itself (BEVFusion's packed boxes, the PTv3 seg head's labels and scores).
+Models without a stage graph keep their existing `build_export_specs()`; nothing below
+applies to them.
 
 The same declaration runs on three backends — `pytorch` (the modules), `onnx` (ONNX
 Runtime sessions) and `tensorrt` (the engines) — with identical glue, so two backends
 differ only by what executed the exported graphs. Two post-export steps use this, both
-disabled by default:
+disabled by default (quantized checkpoints go through the same path, see
+[Quantization](quantization.md)):
 
 ### Verification
 
@@ -264,12 +302,17 @@ deploy:
 ```
 
 Each scenario runs the reference and test pipelines on the first predict batches and
-compares the final raw graph outputs element wise; a failing scenario fails the deploy.
+compares the raw model outputs element wise; a failing scenario fails the deploy.
 Tolerances are calibrated, not guessed: lossy backends (fp16 engines, int8) set an
 explicit per-scenario `tolerance`, and a failing tensor's message suggests the gate that
 would have passed so the observed value can be recorded in the config comment. Raw-logit
 differences under fp16 are expected while the metrics below stay equal — the metrics are
 the real gate; verification catches wiring and dtype mistakes.
+
+Integer-typed outputs (class labels, indices) are decisions over the float outputs, so
+they are gated on their mismatch *ratio* (5 %) rather than element-wise: a label flips
+wherever two logits sit within backend noise of each other while the probabilities agree,
+but a swapped or mis-wired integer output still fails.
 
 Verification only makes sense for outputs whose positions mean the same thing on every
 backend (a BEV cell, a point). A graph that selects proposals with a top-k inside the
@@ -306,7 +349,7 @@ preceding numpy or CPU-torch op leaves busy-waiting double its measured time (BE
 Set it to 0 to keep the process default when only the metrics matter. Metric keys carry
 the backend, `{split}/{backend}/{suite}/{metric}` (`test/tensorrt/det3d/mAP_0m_121m`),
 latencies land under `latency/{backend}/{stage}_mean_ms`, and everything is logged to the
-deploy run and written to `<output_dir>/evaluation.json` (every metric and latency of every
+deploy run and written to `evaluation.json` next to the exports (every metric and latency of every
 backend, with or without a tracker). The log ends with a cross-backend table of the suites'
 headline metrics (det3d: `mAP` and NDS, reported as `map_based_nds`; seg3d: `mIoU` and
 `fwIoU`); a backend column whose stages ran in PyTorch (a declared fallback, e.g. a plugin

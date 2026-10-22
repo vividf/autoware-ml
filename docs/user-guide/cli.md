@@ -17,6 +17,7 @@ Bash completion is installed automatically by the Docker image build and by
 | `train`            | Train models using PyTorch Lightning               |
 | `test`             | Evaluate models from a checkpoint                  |
 | `deploy`           | Export models to ONNX and TensorRT                 |
+| `quantize`         | PTQ / QAT into a self-describing checkpoint        |
 | `mlflow ui`        | Launch the MLflow tracking UI                      |
 | `mlflow export`    | Export one experiment into its own MLflow store    |
 | `session start`    | Start a managed background task                    |
@@ -112,6 +113,29 @@ autoware-ml deploy \
     --weights mlruns/ptv3_seg/T4Dataset-j6gen2_semaseg-v1.0.0/j6gen2_semaseg/voxel012_tiny_b16_50e_t4dataset_122m/<run_id>/artifacts/checkpoints/best.ckpt \
     --weights mlruns/ptv3/T4Dataset-j6gen2_base-v1.0.0/j6gen2_base/voxel012_tiny_b8_30e_t4dataset_122m/<run_id>/artifacts/checkpoints/best.ckpt
 ```
+
+## quantize
+
+Produce a quantized checkpoint (post-training quantization or quantization-aware
+training) from a floating-point one. The result is self-describing: `deploy` and
+`test` rebuild the quantized module tree from it and read no `quantization` config.
+
+```bash
+autoware-ml quantize --config-name <config_path> --weights <path> [--weights <path> ...] [options...]
+```
+
+**Arguments:**
+
+- `--config-name`: An `_int8` / `_fp8` variant (or any config with `quantization.enabled=true`)
+- `--weights`: One or more FP `.ckpt` paths, merged like `deploy`
+
+**Options:**
+
+- `quantization.dry_run=true`: Print the precision placement table and stop (no weights, no GPU)
+- `quantization.mode=qat`: Quantization-aware training instead of PTQ (needs `quantization.qat.*`)
+
+The checkpoint lands under the run's `checkpoints/` directory (`ptq.ckpt`, or the QAT
+run's `best.ckpt`). See [Quantization](quantization.md).
 
 ## test
 

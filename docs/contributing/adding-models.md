@@ -33,8 +33,17 @@ class MyModel(ModuleBaseModel):
     ) -> ModelPredictions:
         ...
 
-    # Deployment
+    # Deployment: one exported graph ...
     def build_export_spec(self, multi_task_batch_inputs: ModelBatchInputs) -> ExportSpec:
+        ...
+
+    # ... or several graphs with PyTorch glue between them, declared once as a stage graph
+    def build_stages(self) -> Sequence[Stage] | None:
+        ...
+
+    def build_deployed_eval_output(
+        self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
         ...
 ```
 
@@ -471,6 +480,18 @@ autoware-ml deploy \
     --config-name my_task/my_model/my_config \
     --weights mlruns/<experiment_group_name>/<experiment_name>/<run_id>/artifacts/checkpoints/last.ckpt
 ```
+
+### Declaring the deployment as a stage graph
+
+A model with a single exportable graph implements `build_export_spec()` and `deploy`
+exports it as `end_to_end`. A model whose deployment is several graphs with PyTorch glue
+between them (pillar decoration, BEV scatter, point serialization ...) declares that split
+once in `build_stages()` — an ordered list of `TorchStage` (glue) and `GraphStage` (one
+ONNX / TensorRT artifact each) over named tensors. The export specs are derived from it,
+`build_deployed_eval_output()` scores what the graphs emit with the model's own metrics,
+and the same declaration is what cross-backend verification, per-backend evaluation and
+quantization run on. See [Deployment › Stage graph](../user-guide/deployment.md#stage-graph-verification-and-evaluation);
+`autoware_ml/models/detection3d/main_modules/centerpoint.py` is the smallest real example.
 
 ## Common Patterns
 
