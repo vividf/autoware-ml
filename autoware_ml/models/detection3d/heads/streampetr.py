@@ -1179,6 +1179,7 @@ class StreamPETRHead(nn.Module):
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
         gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
+        padding_mask: Bool[torch.Tensor, " batch_size"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute multi-layer StreamPETR losses.
 
@@ -1187,6 +1188,12 @@ class StreamPETRHead(nn.Module):
         ``gt_annotated_class_masks`` is True where a class is annotated in a sample (see
         :class:`~autoware_ml.models.detection3d.task_modules.partial_annotations.PartialAnnotations`);
         None supervises every class of every sample.
+        ``padding_mask`` flags the padding samples of a streaming batch (see
+        ``ModelGTBatch.padding_mask``), which take no part in the loss: a padding sample counts
+        as annotated with no class, so every query of it gets a zero classification weight.
+        They come without boxes, so they give no regression target, no positive and no
+        denoising query either. None means every sample is real. The weights only scale the
+        loss terms, so a batch of padding alone still yields a zero loss over the whole graph.
         """
         all_cls_scores = outputs.all_cls_scores
         all_bbox_preds = outputs.all_bbox_preds
@@ -1198,6 +1205,18 @@ class StreamPETRHead(nn.Module):
                 "gt_annotated_class_masks must have shape (batch_size, num_classes) = "
                 f"{(len(gt_boxes), self.num_classes)}, got "
                 f"{tuple(gt_annotated_class_masks.shape)}."
+            )
+        if padding_mask is not None:
+            if padding_mask.shape != (len(gt_boxes),):
+                raise ValueError(
+                    f"padding_mask must have shape (batch_size,) = ({len(gt_boxes)},), got "
+                    f"{tuple(padding_mask.shape)}."
+                )
+            real_samples = ~padding_mask.view(-1, 1)
+            gt_annotated_class_masks = (
+                real_samples.expand(-1, self.num_classes)
+                if gt_annotated_class_masks is None
+                else gt_annotated_class_masks & real_samples
             )
 
         losses_cls = []
