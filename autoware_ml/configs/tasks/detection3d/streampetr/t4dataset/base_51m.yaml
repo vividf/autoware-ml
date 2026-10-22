@@ -163,10 +163,10 @@ datasets:
 
 # StreamPETR carries a temporal memory across batches, so every dataloader streams the frames
 # of its scenes in time order: the sampler joins the scenes and cuts their frames into one lane
-# per batch position of every rank, and a cut can fall inside a scene. Streaming evaluation runs
-# one lane per rank: on one GPU every frame is scored; with several GPUs, or wider evaluation
-# batches, the longer lanes lose their last frame, fewer frames than there are lanes. A
-# prediction has to serve every frame, so it runs on one device with batch size 1.
+# per batch position of every rank, and a cut can fall inside a scene. A shorter lane ends with
+# a padding slot that the model leaves out of the loss and the metrics, so every split serves
+# every frame exactly once on any number of GPUs. Every lane starts its stream with an empty
+# memory, so evaluation and prediction run one lane per rank to keep the cuts few.
 datamodule:
   train_dataloader:
     shuffle: false

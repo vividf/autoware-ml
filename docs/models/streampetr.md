@@ -107,9 +107,13 @@ scenes in the order of the sample time of the records: the range base composes
 `/datamodule/streaming@datamodule: default_streaming_datamodule` after the
 database datamodule, which makes it a `StreamingDataModule`. Its sampler joins
 the scenes and cuts their frames into one lane per batch position of every
-rank, and a lane cut inside a scene starts a new stream there. The training
-split reshuffles the order of the scenes every epoch from the experiment
-`seed`.
+rank, and a lane cut inside a scene starts a new stream there. The lanes
+differ by at most one frame, and a shorter lane ends with a padding slot that
+repeats its last frame, so every rank runs the same number of batches; the
+batch flags those samples (`padding_mask`) and the model gives them no loss,
+no metric and no weight in the logged batch size, so every split serves every
+frame exactly once. The training split reshuffles the order of the scenes
+every epoch from the experiment `seed`.
 
 The `img_backbone` LR is always `lr * 0.1`, set via
 `model.optimizer_group_overrides.img_backbone.lr`. The LR schedule is bound
@@ -311,12 +315,11 @@ Two evaluation-side conditions make mAP comparable with AWML T4MetricV2:
    T4 distance buckets mirror T4MetricV2's (0-50 / 50-90 / 90-121 / 0-121 m).
 
 Validation during training streams one lane per rank. The sampler cuts the
-joined frames of the split into one lane per rank and trims the lanes to the
-same length: the longer lanes lose their last frame, fewer frames than there
-are lanes, spread over the split, so `val/det3d/mAP` (the checkpoint monitor)
-on several GPUs scores all but a handful of frames; a lane that starts inside
-a scene starts a new stream there. `autoware-ml test` on one device scores
-every frame.
+joined frames of the split into one lane per rank and ends the shorter lanes
+with a padding slot, which the metrics leave out, so `val/det3d/mAP` (the
+checkpoint monitor) scores every frame exactly once on any number of GPUs,
+like `autoware-ml test`; a lane that starts inside a scene starts a new stream
+there.
 
 ### Ground truth against the accepted run
 
