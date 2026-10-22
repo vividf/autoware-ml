@@ -327,9 +327,16 @@ class GroupStreamingSampler(DistributedSampler):
       frame is dropped and fewer than ``num_lanes`` repeat. The epoch length never
       changes: Lightning derives the validation interval and the total step count once,
       from the first epoch, and a shorter later epoch would silently skip its validation.
+      Rarely, with a repeated source, a padded lane starts inside one copy of a scene and
+      ends at an earlier frame of another copy; its restart then moves forward within that
+      scene, so a model that resets only on a change of scene or a step back in time
+      (``StreamContinuity``) keeps its memory across the jump.
     - ``shuffle=False`` (evaluation): every lane is trimmed to
-      ``floor(total_frames / num_lanes)`` rounds. No frame is scored twice and fewer than
-      ``num_lanes`` tail frames go unscored, none with one rank and one lane.
+      ``floor(total_frames / num_lanes)`` rounds. No frame is scored twice; the
+      ``total_frames % num_lanes`` lanes one frame longer than the others lose their last
+      frame, so up to ``num_lanes - 1`` frames spread over the split go unscored, none with
+      one rank and one lane. A prediction has to serve every frame, so the datamodule
+      refuses one that would trim a frame.
 
     As a ``DistributedSampler`` it is never wrapped by Lightning, whose wrapper would keep
     only every ``num_replicas``-th index of each rank and make its lanes skip frames.
@@ -339,8 +346,9 @@ class GroupStreamingSampler(DistributedSampler):
         self,
         dataset: Dataset,
         batch_size: int,
-        shuffle: bool = True,
-        seed: int = 0,
+        *,
+        shuffle: bool,
+        seed: int,
     ) -> None:
         """Initialize the streaming sampler.
 
@@ -351,7 +359,7 @@ class GroupStreamingSampler(DistributedSampler):
                 the dataloader batch size.
             shuffle: Whether to shuffle the scene order every epoch. Also
                 selects the fixed-length (padded) epoch described above.
-            seed: Base seed for the per-epoch scene shuffle.
+            seed: Base seed for the per-epoch scene shuffle, the experiment seed.
         """
         num_replicas = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
@@ -434,14 +442,14 @@ class GroupStreamingSampler(DistributedSampler):
             # indices at every validation; the frames trimmed never change, so say it once.
             self._trimming_warned = True
             logger.warning(
-                "GroupStreamingSampler serves %d/%d frames; %d tail frames are trimmed to keep "
-                "%d rank(s) x %d lane(s) aligned. Only one rank with one lane scores every "
-                "frame.",
+                "GroupStreamingSampler serves %d/%d frames: to keep %d rank(s) x %d lane(s) "
+                "aligned, %d lane(s) spread over the split are trimmed of their last frame. "
+                "Only one rank with one lane scores every frame.",
                 served,
                 self.total_frames,
-                self.total_frames - served,
                 self.num_replicas,
                 self.batch_size,
+                self.total_frames - served,
             )
         return self._cached_indices
 

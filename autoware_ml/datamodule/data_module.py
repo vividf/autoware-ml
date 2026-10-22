@@ -100,11 +100,12 @@ class DataModule(L.LightningDataModule):
           predict_dataloader: Dataloader settings of the predict split.
           train_frame_sampling: Repeat factor sampling of the training split, None when its
             samples are drawn uniformly.
-          streaming: Whether every dataloader feeds each batch lane whole scenes, frame by
-            frame, for temporal models that carry a memory across batches. The training
-            split reshuffles the order of the scenes every epoch. The sampler shards the
-            scenes over the ranks itself and Lightning leaves it alone, being a
-            ``DistributedSampler``.
+          streaming: Whether every dataloader streams the frames of its scenes in time
+            order, for temporal models that carry a memory across batches. The sampler joins
+            the scenes, the training split reshuffling their order every epoch, and cuts
+            their frames into one lane per batch position of every rank; a cut can fall
+            inside a scene. The sampler splits the lanes over the ranks itself and Lightning
+            leaves it alone, being a ``DistributedSampler``.
           seed: Seed of the per-epoch scene shuffle of the streaming training split; pass
             the experiment seed so every run draws its own order.
 
@@ -270,8 +271,12 @@ class DataModule(L.LightningDataModule):
           DataLoader: Dataloader over the concatenated sources of the split.
 
         Raises:
-          ValueError: If the split has no dataset or no dataloader settings, or if the
-            dataloader shuffles while scene streaming or frame sampling owns the order.
+          ValueError: If the split has no dataset or no dataloader settings, if the
+            dataloader shuffles while scene streaming or frame sampling owns the order, if
+            a streaming training or validation loader serves a trainer with
+            ``overfit_batches``, for which Lightning swaps the scene sampler for a
+            sequential one, or if a streaming prediction would skip frames to keep its lanes
+            aligned.
         """
         dataset = self.datasets.get(split)
         if dataset is None:
@@ -288,12 +293,34 @@ class DataModule(L.LightningDataModule):
                     "Scene streaming owns the sample order, so the dataloader cannot shuffle. "
                     "Set shuffle to false."
                 )
-            kwargs["sampler"] = GroupStreamingSampler(
+            if (
+                split in (SplitType.TRAIN, SplitType.VAL)
+                and self.trainer is not None
+                and self.trainer.overfit_batches > 0
+            ):
+                raise ValueError(
+                    "trainer.overfit_batches makes Lightning swap the scene sampler of the "
+                    "training and validation loaders for a sequential one, which feeds every "
+                    "lane each batch_size-th sample as if it were one stream. Shorten a "
+                    "streaming run with limit_train_batches / limit_val_batches instead."
+                )
+            sampler = GroupStreamingSampler(
                 dataset,
                 batch_size=config.batch_size,
                 shuffle=split == SplitType.TRAIN,
                 seed=self.seed,
             )
+            if split == SplitType.PREDICT:
+                # Like evaluation, prediction trims every lane to the shortest one. A frame it
+                # leaves out can pass for a frame without objects, in pseudo labels for example.
+                skipped = sampler.total_frames % sampler.num_lanes
+                if skipped:
+                    raise ValueError(
+                        f"Streaming prediction over {sampler.num_lanes} lane(s) would skip "
+                        f"{skipped} of {sampler.total_frames} frames to keep the lanes aligned. "
+                        "Predict on one device with batch_size 1 to serve every frame."
+                    )
+            kwargs["sampler"] = sampler
         elif split == SplitType.TRAIN and self.train_frame_sampling is not None:
             if config.shuffle:
                 raise ValueError(

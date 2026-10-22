@@ -161,14 +161,14 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
         )
 
     def test_a_lane_streams_every_scene_in_time_order(self) -> None:
-        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False)
+        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
 
         self.assertEqual(list(sampler), [2, 0, 3, 1])
 
     def test_streamed_frames_train_the_detector_and_carry_its_memory(self) -> None:
         model = build_model().train()
         model.log_dict = lambda *args, **kwargs: None
-        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False)
+        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
         continuity = []
         statuses = []
         stream_continuity = model.bbox_head.stream_continuity
@@ -220,7 +220,7 @@ class TestStreamPETRPipelineSmoke(unittest.TestCase):
 
     def test_evaluation_decodes_the_streamed_frames(self) -> None:
         model = build_model().eval()
-        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False)
+        sampler = GroupStreamingSampler(self.dataset, batch_size=1, shuffle=False, seed=0)
         for index in sampler:
             batch = self.dataset.collate_fn([self.dataset[index]])
             with torch.no_grad():
