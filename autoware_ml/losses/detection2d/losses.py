@@ -176,7 +176,7 @@ class WeightedL1Loss(nn.Module):
 
 
 class HeatmapGaussianFocalLoss(nn.Module):
-    """Gaussian focal loss on already-sigmoided probability heatmaps.
+    """Gaussian focal loss on probability heatmaps, taken after the sigmoid.
 
     The normalization factor is supplied by the caller (the auxiliary 2D head
     shares one positive count across its five losses).
