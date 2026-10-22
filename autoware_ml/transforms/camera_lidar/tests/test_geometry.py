@@ -938,9 +938,10 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
         )
 
     def test_frames_augmented_on_their_own_stay_aligned_through_the_folded_poses(self) -> None:
-        # One parked car seen from two ego poses. Every frame draws its own augmentation,
-        # and the frame metadata folds it into the pose, so a temporal model maps the box of
-        # the previous frame onto the box of the current one through the folded poses alone.
+        # One parked car seen from two ego poses, 0.1 s apart. Every frame draws its own
+        # augmentation, and the frame metadata folds it into the pose, so a temporal model maps
+        # the box of the previous frame onto the box of the current one through the folded
+        # poses alone.
         global_box = torch.tensor([3012.0, -1180.0, 0.5, 1.0])
         poses = []
         for translation, yaw in (([3000.0, -1200.0, 0.0], 0.3), ([3002.0, -1198.5, 0.0], 0.35)):
@@ -951,13 +952,15 @@ class TestGlobalRotScaleTransCameraOnly(unittest.TestCase):
             pose[:3, 3] = torch.tensor(translation)
             poses.append(pose)
         augmented = []
-        for seed, pose in enumerate(poses):
+        for seed, (pose, timestamp_seconds) in enumerate(zip(poses, (10.0, 10.1), strict=True)):
             local_box = (torch.linalg.inv(pose) @ global_box)[:3]
             sample = build_sample(build_pinhole_images([LIDAR2CAM_FORWARD], 160, 96))._replace(
                 detection3d_gt_bboxes_3d=build_boxes(
                     [[*local_box.tolist(), 4.0, 2.0, 1.5, 0.0]], [0]
                 ),
-                frame_meta=FrameMetaSample(ego2global=pose, scene_token="scene"),
+                frame_meta=FrameMetaSample(
+                    ego2global=pose, scene_token="scene", timestamp_seconds=timestamp_seconds
+                ),
             )
             augmented.append(self.augment(sample, seed=seed))
         folded = FrameMetaBatch.collate_gt_samples(
