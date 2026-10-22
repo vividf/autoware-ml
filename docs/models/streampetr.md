@@ -231,9 +231,11 @@ propagated). Earlier exports, the AWML one included, stacked all six decoder
 layers into 5400 columns, and the node decoded every column, so it published
 boxes of the intermediate layers as well. The model package that ships a
 graph of this export to the universe node must therefore set
-`num_proposals: 900`, which the node stack validates against the engine, and
-retune its per-class score thresholds, which were tuned on the decoded output
-of all six layers.
+`num_proposals: 900` and retune its per-class score thresholds, which were
+tuned on the decoded output of all six layers. The node reads `num_proposals`
+from that parameter file; the binding validation of the node stack that follows
+autoware.universe #13267 checks it against the engine at start-up, and without
+it a mismatch goes unnoticed.
 
 A stream starts from an all-zero memory bank: the graph recognizes a lane
 whose bank poses are all zero and seeds it as the head does at the start of a
