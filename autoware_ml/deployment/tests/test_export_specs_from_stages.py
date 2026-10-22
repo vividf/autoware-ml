@@ -187,6 +187,27 @@ def test_multi_input_spec_args_follow_the_declared_input_order() -> None:
     assert torch.equal(spec.module(*spec.args), torch.tensor([9.0]))
 
 
+def test_stage_onnx_transforms_land_in_the_spec_in_order() -> None:
+    def fuse(path):
+        return path
+
+    def stamp(path):
+        return path
+
+    stages = (
+        TorchStage("seed", run=lambda state: {"x": state.batch["x"]}, inputs=(), outputs=("x",)),
+        GraphStage(
+            "sparse",
+            module=nn.Identity(),
+            inputs=("x",),
+            outputs=("y",),
+            onnx_transforms=(fuse, stamp),
+        ),
+    )
+    specs = build_export_specs_from_stages(stages, {"x": torch.ones(3, 2)}, torch.device("cpu"))
+    assert specs["sparse"].onnx_transforms == (fuse, stamp)
+
+
 def test_models_without_a_stage_graph_keep_the_end_to_end_default() -> None:
     model = _PlainModel()
     assert model.build_stages() is None

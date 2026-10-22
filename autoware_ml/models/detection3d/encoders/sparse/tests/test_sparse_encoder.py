@@ -20,13 +20,19 @@ forward pass runs through spconv CUDA kernels and is tested on the GPU only.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 
 from spconv.pytorch import SparseConv3d as NativeSparseConv3d
+from spconv.pytorch import SparseSequential
 from spconv.pytorch import SubMConv3d as NativeSubMConv3d
 import torch
+from torch import nn
 
-from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import SparseEncoder
+from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import (
+    SparseEncoder,
+    fold_sparse_encoder_bn,
+)
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 
@@ -84,6 +90,81 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
         self.assertFalse(
             torch.equal(export_encoder.conv_input[0].weight, self.encoder.conv_input[0].weight)
         )
+
+    def test_prepare_for_export_passes_the_export_sort_flag_to_the_wrappers(self) -> None:
+        """Test that every exportable wrapper carries the encoder's ``export_do_sort``."""
+        encoder = SparseEncoder(
+            in_channels=32,
+            sparse_shape=[16, 16, 5],
+            output_channels=16,
+            dense_output_shapes=[2, 2, 1],
+            export_do_sort=False,
+        )
+
+        export_encoder = encoder.prepare_for_export()
+
+        wrappers = [
+            module
+            for module in export_encoder.modules()
+            if isinstance(module, (ExportableSparseConv3d, ExportableSubMConv3d))
+        ]
+        self.assertTrue(wrappers)
+        self.assertTrue(all(module.export_do_sort is False for module in wrappers))
+        self.assertTrue(
+            all(
+                module.export_do_sort is True
+                for module in self.encoder.prepare_for_export().modules()
+                if isinstance(module, (ExportableSparseConv3d, ExportableSubMConv3d))
+            )
+        )
+
+    def test_fold_sparse_encoder_bn_folds_every_pair_into_the_export_copy(self) -> None:
+        """
+        Test that the fold leaves the export copy BatchNorm-free with the folded weight and
+        the bias the fold introduces, while the training encoder keeps its BN layers.
+        """
+        self.encoder.eval()
+        export_encoder = deepcopy(self.encoder)
+        batch_norm = self.encoder.conv_input[1]
+
+        fused = fold_sparse_encoder_bn(export_encoder)
+        export_encoder = export_encoder.prepare_for_export()
+
+        self.assertGreater(fused, 0)
+        self.assertIsInstance(export_encoder.conv_input[0], ExportableSubMConv3d)
+        self.assertFalse(
+            any(isinstance(module, nn.BatchNorm1d) for module in export_encoder.modules())
+        )
+        self.assertTrue(
+            any(isinstance(module, nn.BatchNorm1d) for module in self.encoder.modules())
+        )
+        fold_scale = batch_norm.weight / torch.sqrt(batch_norm.running_var + batch_norm.eps)
+        # spconv kernels are (out_channels, *kernel, in_channels), so the per-output-channel
+        # fold scale applies along dim 0.
+        expected_weight = self.encoder.conv_input[0].weight * fold_scale.view(-1, 1, 1, 1, 1)
+        torch.testing.assert_close(export_encoder.conv_input[0].weight, expected_weight)
+        # The bias the fold introduces is beta - mu * fold_scale; a wrapper built without it
+        # would leave the fold half-applied and silently shift every output.
+        expected_bias = batch_norm.bias - batch_norm.running_mean * fold_scale
+        self.assertIsNotNone(export_encoder.conv_input[0].bias)
+        torch.testing.assert_close(
+            export_encoder.conv_input[0].bias, expected_bias, atol=1e-6, rtol=0
+        )
+
+    def test_fold_sparse_encoder_bn_refuses_to_leave_a_batchnorm(self) -> None:
+        """
+        Test that "the deployed sparse graph has no BatchNormalization node" is enforced: a
+        norm that is not adjacent to its convolution is not paired, and the fold says so
+        instead of leaving the node for a plugin that cannot absorb it.
+        """
+        encoder = SparseEncoder(
+            in_channels=4, sparse_shape=[16, 16, 9], dense_output_shapes=[2, 2, 2]
+        )
+        conv, norm = encoder.conv_input[0], encoder.conv_input[1]
+        encoder.conv_input = SparseSequential(conv, nn.Identity(), norm, encoder.conv_input[2])
+
+        with self.assertRaisesRegex(RuntimeError, "survived the export fold"):
+            fold_sparse_encoder_bn(encoder.eval())
 
     def test_prepare_for_export_keeps_the_grid_configuration(self) -> None:
         """Test that the export copy keeps the sparse and dense grid shapes of the original."""
