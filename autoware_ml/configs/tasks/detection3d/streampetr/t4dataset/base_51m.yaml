@@ -89,7 +89,7 @@ datasets:
 
         # The reference recipe shuffles the camera order every training frame
         # (StreamPETRDataset shuffle_cameras=True); train-time only.
-        - _target_: autoware_ml.transforms.camera.order.ShuffleCameraOrder
+        - _target_: autoware_ml.transforms.camera.permutation.ShuffleCameraOrder
           _convert_: all
 
         # +-0.02 around the factor at which every camera covers 480x640, so the cameras of

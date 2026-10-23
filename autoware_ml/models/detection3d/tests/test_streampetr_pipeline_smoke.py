@@ -40,7 +40,7 @@ from autoware_ml.transforms.boxes3d.filters import (
 )
 from autoware_ml.transforms.camera.annotations2d import LoadAnnotations2DFromBoxes3D
 from autoware_ml.transforms.camera.loading import LoadImagesFromFile
-from autoware_ml.transforms.camera.order import ShuffleCameraOrder
+from autoware_ml.transforms.camera.permutation import ShuffleCameraOrder
 from autoware_ml.transforms.camera.resize import ResizeCropFlipRotImage
 from autoware_ml.transforms.camera_lidar.geometry import GlobalRotScaleTrans
 
