@@ -191,16 +191,27 @@ def test_head_loss_applies_the_annotated_class_masks() -> None:
     )
     gt_boxes = [torch.tensor([[0.0, 0.0, 0.0, 4.0, 2.0, 1.5, 0.1, 0.0, 0.0]], dtype=torch.float32)]
     gt_labels = [torch.tensor([0], dtype=torch.long)]
+    real = torch.zeros(1, dtype=torch.bool)
 
-    plain = head.loss(outputs, gt_boxes, gt_labels)
-    annotated = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([True]))
-    ignored = head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([False]))
+    plain = head.loss(outputs, gt_boxes, gt_labels, padding_mask=real)
+    annotated = head.loss(
+        outputs, gt_boxes, gt_labels, padding_mask=real, gt_annotated_class_masks=_masks([True])
+    )
+    ignored = head.loss(
+        outputs, gt_boxes, gt_labels, padding_mask=real, gt_annotated_class_masks=_masks([False])
+    )
     torch.testing.assert_close(annotated["loss"], plain["loss"])
     assert ignored["loss_cls"] < annotated["loss_cls"]
     assert torch.allclose(ignored["loss_bbox"], annotated["loss_bbox"])
 
     with pytest.raises(ValueError, match="batch_size, num_classes"):
-        head.loss(outputs, gt_boxes, gt_labels, gt_annotated_class_masks=_masks([True, False]))
+        head.loss(
+            outputs,
+            gt_boxes,
+            gt_labels,
+            padding_mask=real,
+            gt_annotated_class_masks=_masks([True, False]),
+        )
 
 
 def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None:
@@ -237,6 +248,7 @@ def test_focal_head_2d_forward_and_loss_with_the_annotated_class_masks() -> None
         "gt_bboxes_2d": [[gt_boxes, empty_boxes], [empty_boxes, empty_boxes]],
         "gt_labels_2d": [[gt_labels, empty_labels], [empty_labels, empty_labels]],
         "centers_2d": [[gt_centers, empty_centers], [empty_centers, empty_centers]],
+        "padding_mask": torch.zeros(batch_size, dtype=torch.bool),
     }
 
     losses = head.loss(outputs, gt_annotated_class_masks=_masks([True, False]), **annotations)

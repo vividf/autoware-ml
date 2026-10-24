@@ -213,7 +213,9 @@ def _dn_mixed_gt_worker(rank: int, world_size: int, init_file: str) -> None:
             all_cls_scores=all_cls_scores, all_bbox_preds=all_bbox_preds, denoising=denoising
         )
 
-        losses = head.loss(outputs, [gt_boxes], [gt_labels])
+        losses = head.loss(
+            outputs, [gt_boxes], [gt_labels], padding_mask=torch.zeros(1, dtype=torch.bool)
+        )
 
         # Both ranks completed (no deadlock) with a uniform key set.
         assert "dn_loss_cls" in losses and "dn_loss_bbox" in losses

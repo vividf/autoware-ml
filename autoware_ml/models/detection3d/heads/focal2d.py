@@ -308,8 +308,8 @@ class FocalHead2D(nn.Module):
         gt_bboxes_2d: list[list[torch.Tensor]],
         gt_labels_2d: list[list[torch.Tensor]],
         centers_2d: list[list[torch.Tensor]],
+        padding_mask: Bool[torch.Tensor, " batch_size"],
         gt_annotated_class_masks: Bool[torch.Tensor, "batch_size num_classes"] | None = None,
-        padding_mask: Bool[torch.Tensor, " batch_size"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute the five auxiliary 2D losses.
 
@@ -321,17 +321,17 @@ class FocalHead2D(nn.Module):
             gt_labels_2d: Per-sample, per-camera class labels.
             centers_2d: Per-sample, per-camera object centers, one ``(center_x, center_y)``
                 row per box in pixels: the center columns of the Box2DFieldIndex rows.
-            gt_annotated_class_masks: True where a class is annotated in a sample; every
-                image of a sample weights its classification by the row of its sample, so
-                the background terms of the unannotated classes are dropped. None
-                supervises every class of every image.
             padding_mask: Flags the padding samples of a streaming batch (see
                 ``ModelGTBatch.padding_mask``), which take no part in the loss. Their 2D
                 boxes are left out, so they give no positive and no box, IoU or center
                 term, and a padding sample counts as annotated with no class, so every
-                token of its images gets a zero classification and centerness weight. None
-                means every sample is real. The weights only scale the loss terms, so a
-                batch of padding alone yields a zero loss over the whole graph.
+                token of its images gets a zero classification and centerness weight. The
+                weights only scale the loss terms, so a batch of padding alone yields a zero
+                loss over the whole graph.
+            gt_annotated_class_masks: True where a class is annotated in a sample; every
+                image of a sample weights its classification by the row of its sample, so
+                the background terms of the unannotated classes are dropped. None
+                supervises every class of every image.
 
         Returns:
             Loss dictionary with ``loss_*2d`` keys.
@@ -368,25 +368,22 @@ class FocalHead2D(nn.Module):
                 "gt_annotated_class_masks must have shape (batch_size, num_classes) = "
                 f"{(batch_size, self.num_classes)}, got {tuple(gt_annotated_class_masks.shape)}."
             )
-        is_padding = [False] * batch_size
-        image_weights = None
-        if padding_mask is not None:
-            if padding_mask.shape != (batch_size,):
-                raise ValueError(
-                    f"padding_mask must have shape (batch_size,) = ({batch_size},), got "
-                    f"{tuple(padding_mask.shape)}."
-                )
-            is_padding = padding_mask.tolist()
-            real_samples = ~padding_mask.view(-1, 1)
-            gt_annotated_class_masks = (
-                real_samples.expand(-1, self.num_classes)
-                if gt_annotated_class_masks is None
-                else gt_annotated_class_masks & real_samples
+        if padding_mask.shape != (batch_size,):
+            raise ValueError(
+                f"padding_mask must have shape (batch_size,) = ({batch_size},), got "
+                f"{tuple(padding_mask.shape)}."
             )
-            # (batch, 1) -> (batch * num_cams, 1, 1): the images of a sample follow each other.
-            image_weights = (
-                real_samples.to(cls_scores.dtype).repeat_interleave(num_cams, dim=0).view(-1, 1, 1)
-            )
+        is_padding = padding_mask.tolist()
+        real_samples = ~padding_mask.view(-1, 1)
+        gt_annotated_class_masks = (
+            real_samples.expand(-1, self.num_classes)
+            if gt_annotated_class_masks is None
+            else gt_annotated_class_masks & real_samples
+        )
+        # (batch, 1) -> (batch * num_cams, 1, 1): the images of a sample follow each other.
+        image_weights = (
+            real_samples.to(cls_scores.dtype).repeat_interleave(num_cams, dim=0).view(-1, 1, 1)
+        )
 
         targets: list[_Targets2D] = []
         heatmaps = []

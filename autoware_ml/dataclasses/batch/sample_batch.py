@@ -107,6 +107,13 @@ class ModelGTBatch(NamedTuple):
     # Images
     image_gt_batch: ImageGTBatch | None
 
+    # Samples that only pad a streaming lane (see GroupStreamingSampler), all False when no
+    # sample pads. A model leaves them out of its loss but still returns one on a batch of
+    # padding only, as DDP needs a loss from every rank. The logged batch size (num_real_samples)
+    # and the detection eval output (an empty frame each) leave them out; a prediction writer
+    # gets this mask with the batch.
+    padding_mask: Bool[Tensor, " batch_size"]
+
     # Summed io_processing_time of every sample collated into this batch.
     io_processing_time: float = 0.0
 
@@ -116,13 +123,6 @@ class ModelGTBatch(NamedTuple):
     # 2D detection ground truth of every camera of every sample, None when the samples carry
     # none.
     detection2d_gt_batch: Detection2DGTBatch | None = None
-
-    # Samples that only pad a streaming lane (see GroupStreamingSampler). A model gives them no
-    # loss and no metric and leaves them out of the logged batch size (num_real_samples); on a
-    # batch of padding only it still returns a loss, which DDP needs from every rank. Whoever
-    # consumes predictions drops them by this mask. All False when no sample pads, None only on
-    # a batch assembled by hand.
-    padding_mask: Bool[Tensor, " batch_size"] | None = None
 
     def to_device(self, device: torch.device) -> ModelGTBatch:
         """
@@ -154,7 +154,7 @@ class ModelGTBatch(NamedTuple):
             detection2d_gt_batch=self.detection2d_gt_batch.to_device(device)
             if self.detection2d_gt_batch is not None
             else None,
-            padding_mask=self.padding_mask.to(device) if self.padding_mask is not None else None,
+            padding_mask=self.padding_mask.to(device),
         )
 
     def infer_batch_size(self) -> int:
@@ -180,9 +180,7 @@ class ModelGTBatch(NamedTuple):
         Returns:
           int: The batch size less the padding slots, zero for a batch of padding slots only.
         """
-        if self.padding_mask is None:
-            return self.infer_batch_size()
-        return int(self.padding_mask.numel() - self.padding_mask.sum().item())
+        return int((~self.padding_mask).sum().item())
 
     @staticmethod
     def collate_pointcloud_gt_samples(

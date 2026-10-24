@@ -51,7 +51,7 @@ def _homogeneous_intrinsics(camera_intrinsics: torch.Tensor) -> torch.Tensor:
 
 def _ground_truth(
     gt_detections: Detection3DGTBatch,
-    padding_mask: Bool[torch.Tensor, " batch_size"] | None = None,
+    padding_mask: Bool[torch.Tensor, " batch_size"],
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Unpad the boxes and labels of every sample into the head's box layout.
 
@@ -62,33 +62,11 @@ def _ground_truth(
     """
     gt_boxes = [boxes[:, : Box3DFieldIndex.VELOCITY_Z] for boxes in gt_detections.valid_bboxes_3d()]
     gt_labels = gt_detections.valid_labels_3d()
-    if padding_mask is None:
-        return gt_boxes, gt_labels
     padded = padding_mask.tolist()
     return (
         [boxes[:0] if is_padding else boxes for boxes, is_padding in zip(gt_boxes, padded)],
         [labels[:0] if is_padding else labels for labels, is_padding in zip(gt_labels, padded)],
     )
-
-
-def _drop_padding_samples(
-    eval_out: dict[str, Any], padding_mask: Bool[torch.Tensor, " batch_size"] | None
-) -> dict[str, Any]:
-    """Keep the entries of the real samples in every per-sample list of an eval output."""
-    if padding_mask is None:
-        return eval_out
-    keep = [not is_padding for is_padding in padding_mask.tolist()]
-    if all(keep):
-        return eval_out
-    filtered: dict[str, Any] = {}
-    for key, values in eval_out.items():
-        if len(values) != len(keep):
-            raise ValueError(
-                f"Eval output {key!r} holds {len(values)} entries for a batch of {len(keep)} "
-                "samples, so its padding samples cannot be dropped."
-            )
-        filtered[key] = [value for value, kept in zip(values, keep) if kept]
-    return filtered
 
 
 def _ground_truth_2d(
@@ -465,25 +443,14 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
             )
         return losses
 
-    def get_log_batch_size(self, multi_task_batch_inputs: ModelBatchInputs) -> int:
-        """Count the real samples of the batch, so the epoch means leave the padding out.
-
-        Args:
-            multi_task_batch_inputs: Model inputs of the batch.
-
-        Returns:
-            The batch size less its padding samples, zero for a batch of padding only.
-        """
-        return multi_task_batch_inputs.multi_task_gt_batch.num_real_samples()
-
     def decode_outputs(
         self, multi_task_batch_inputs: ModelBatchInputs, outputs: ModelOutputs
     ) -> ModelPredictions:
         """Decode the last decoder layer into per-sample detections.
 
         Every sample keeps its prediction, padding samples included, so the predictions stay
-        aligned with Lightning's batch indices. A padding sample repeats a real frame, so
-        whoever consumes the predictions drops the samples ``padding_mask`` flags.
+        aligned with Lightning's batch indices; a prediction writer drops the padding samples by
+        the mask it gets with the batch.
 
         Args:
             multi_task_batch_inputs: Model inputs of the batch.
@@ -498,14 +465,10 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         )
 
     def build_eval_output(self, batch: ModelBatchInputs, outputs: ModelOutputs) -> dict[str, Any]:
-        """Decode detections and pair them with ground truth for metrics.
-
-        The padding samples are left out, so the metrics score every frame of the split once.
-        """
-        eval_out = detection3d_eval_output(
+        """Decode detections and pair them with ground truth for metrics."""
+        return detection3d_eval_output(
             predictions=self.decode_outputs(batch, outputs), batch_inputs=batch
         )
-        return _drop_padding_samples(eval_out, batch.multi_task_gt_batch.padding_mask)
 
     def build_optimizer_groups(self) -> dict[str, list[nn.Parameter]]:
         """Split parameters into the image backbone and the remaining modules."""
