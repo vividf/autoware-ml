@@ -887,7 +887,7 @@ class StreamPETRHead(nn.Module):
         bbox_preds: torch.Tensor,
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
-        label_weights: torch.Tensor | None = None,
+        label_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         targets = self._get_targets(cls_scores, bbox_preds, gt_boxes, gt_labels)
 
@@ -1115,7 +1115,7 @@ class StreamPETRHead(nn.Module):
         outputs: StreamPETRHeadOutputs,
         gt_boxes: list[torch.Tensor],
         gt_labels: list[torch.Tensor],
-        padding_mask: Bool[torch.Tensor, " batch_size"] | None = None,
+        padding_mask: Bool[torch.Tensor, " batch_size"],
     ) -> dict[str, torch.Tensor]:
         """Compute multi-layer StreamPETR losses.
 
@@ -1124,15 +1124,13 @@ class StreamPETRHead(nn.Module):
         ``padding_mask`` flags the padding samples of a streaming batch (see
         ``ModelGTBatch.padding_mask``), which take no part in the loss: every query of such
         a sample gets a zero classification weight. They come without boxes, so they give no
-        regression target, no positive and no denoising query either. None means every
-        sample is real. The weights only scale the loss terms, so a batch of padding alone
-        still yields a zero loss over the whole graph.
+        regression target, no positive and no denoising query either. The weights only scale
+        the loss terms, so a batch of padding alone still yields a zero loss over the whole
+        graph.
         """
         all_cls_scores = outputs.all_cls_scores
         all_bbox_preds = outputs.all_bbox_preds
-        label_weights = None
-        if padding_mask is not None:
-            label_weights = (~padding_mask).to(all_cls_scores.dtype).view(-1, 1, 1)
+        label_weights = (~padding_mask).to(all_cls_scores.dtype).view(-1, 1, 1)
 
         losses_cls = []
         losses_bbox = []

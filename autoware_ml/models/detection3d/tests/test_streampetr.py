@@ -316,7 +316,7 @@ def test_ground_truth_drops_the_vertical_velocity() -> None:
         [_collated_box(1.0, 2.0, 0.5, 4.0, 2.0, 1.5, 0.2, 0.3, 0.4, 0.9)], [torch.tensor([1])]
     )
 
-    gt_boxes, gt_labels = _ground_truth(gt_detections)
+    gt_boxes, gt_labels = _ground_truth(gt_detections, torch.zeros(1, dtype=torch.bool))
 
     # The head regresses [x, y, z, l, w, h, yaw, vx, vy]; the vertical velocity is dropped.
     torch.testing.assert_close(
@@ -1089,12 +1089,14 @@ def test_a_batch_of_padding_alone_gives_a_zero_loss_over_the_whole_graph() -> No
         assert all(parameter.grad is not None for parameter in branches.parameters())
 
 
-def test_the_eval_output_leaves_the_padding_samples_out() -> None:
+def test_the_eval_output_keeps_a_padding_slot_as_an_empty_frame() -> None:
     """
     Input: an eval batch of three frames with one box each, the middle one a padding slot.
-    Expected: a padding slot repeats a frame that is scored elsewhere, so the metrics get the
-    two real frames only, every per-frame entry in batch order.
-    Check: the number of predictions and of ground truth entries, and the scene tokens.
+    Expected: a padding slot repeats a frame that is scored elsewhere, so it reaches the
+    metrics as a frame without predictions and without ground truth, keeping the per-frame
+    lists of every GPU as long; the real frames keep their boxes.
+    Check: the number of per-frame entries, the empty entries of the padding slot, the boxes of
+    the real frames and the scene tokens.
     """
     model = _build_model().eval()
     images = torch.randn(3, NUM_CAMS, 3, *IMAGE_HW)
@@ -1114,19 +1116,20 @@ def test_the_eval_output_leaves_the_padding_samples_out() -> None:
         eval_out = model.build_eval_output(batch_inputs, outputs)
         predictions = model.decode_outputs(batch_inputs, outputs)
 
-    assert len(eval_out["predictions"]) == 2
-    assert len(eval_out["gt_boxes"]) == len(eval_out["gt_labels"]) == 2
-    assert eval_out["scene_token"] == ["db/a/0", "db/c/0"]
-    # Predictions stay aligned with the batch; their consumer drops the padding slot.
+    assert len(eval_out["predictions"]) == len(eval_out["gt_boxes"]) == 3
+    assert eval_out["predictions"][1]["bboxes_3d"].shape[0] == 0
+    assert eval_out["gt_boxes"][1].shape[0] == eval_out["gt_labels"][1].shape[0] == 0
+    assert [boxes.shape[0] for boxes in eval_out["gt_boxes"]] == [1, 0, 1]
+    assert eval_out["scene_token"] == ["db/a/0", "db/b/0", "db/c/0"]
     assert len(predictions.detection3d_predictions) == 3
 
 
 def test_the_logged_batch_size_counts_the_real_samples() -> None:
     """
     Input: a training batch of three samples with one padding slot, a batch of padding
-    alone, and a batch assembled by hand without a padding mask.
+    alone, and a batch without padding.
     Expected: the epoch means weigh every step by its real samples, so a padding slot adds
-    no weight, a batch of padding alone adds none at all, and a batch without a mask counts
+    no weight, a batch of padding alone adds none at all, and a batch without padding counts
     every sample.
     Check: the batch size the training step logs, and the sizes of the other two batches.
     """
