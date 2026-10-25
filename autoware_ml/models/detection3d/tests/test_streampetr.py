@@ -1237,7 +1237,7 @@ def test_auxiliary_2d_head_trains_on_the_2d_boxes_of_the_batch() -> None:
     model = _build_model(img_roi_head=_build_focal_head()).train()
     batch_inputs = _with_2d_boxes(_one_box_batch(batch_size=2))
 
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
     losses = model.compute_metrics(batch_inputs, outputs)
 
     auxiliary = outputs.detection3d().streampetr_head().auxiliary_2d
@@ -1274,7 +1274,7 @@ def test_auxiliary_2d_head_takes_the_box_edges_and_the_object_centers_apart() ->
         [[10.0, 10.0, 60.0, 60.0, 30.0, 40.0], [70.0, 20.0, 110.0, 80.0, 95.0, 45.0]]
     )
     batch_inputs = _with_2d_boxes(_one_box_batch(), rows)
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
 
     with mock.patch.object(model.img_roi_head, "loss", wraps=model.img_roi_head.loss) as loss:
         model.compute_metrics(batch_inputs, outputs)
@@ -1302,7 +1302,7 @@ def test_auxiliary_2d_head_needs_the_2d_boxes_in_training() -> None:
     model = _build_model(img_roi_head=_build_focal_head()).train()
     batch_inputs = _one_box_batch()
 
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
 
     with pytest.raises(ValueError, match="LoadAnnotations2DFromBoxes3D"):
         model.compute_metrics(batch_inputs, outputs)
@@ -1320,7 +1320,7 @@ def test_evaluation_skips_the_auxiliary_2d_head() -> None:
     batch_inputs = _one_box_batch()
 
     with torch.no_grad():
-        outputs = _run(model, batch_inputs)
+        outputs = model(batch_inputs)
         losses = model.compute_metrics(batch_inputs, outputs)
 
     assert outputs.detection3d().streampetr_head().auxiliary_2d is None
@@ -1341,7 +1341,7 @@ def test_partial_annotations_mask_the_cone_barrier_terms_of_unannotated_frames()
     torch.manual_seed(0)
     model = _build_model(img_roi_head=_build_focal_head(), partial_ignore=True).train()
     batch_inputs = _with_2d_boxes(_one_box_batch())
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
 
     annotated = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [True]), outputs)
     ignored = model.compute_metrics(_with_cone_barrier_status(batch_inputs, [False]), outputs)
@@ -1382,10 +1382,10 @@ def _losses_with_and_without_a_padding_sample(
         padded_batch = _with_cone_barrier_status(padded_batch, list(status))
 
     torch.manual_seed(1)
-    real_losses = model.compute_metrics(real_batch, _run(model, real_batch))
+    real_losses = model.compute_metrics(real_batch, model(real_batch))
     model.bbox_head.reset_memory()
     torch.manual_seed(1)
-    padded_losses = model.compute_metrics(padded_batch, _run(model, padded_batch))
+    padded_losses = model.compute_metrics(padded_batch, model(padded_batch))
     padded_losses["loss"].backward()
     return real_losses, padded_losses, padded_images
 
@@ -1462,7 +1462,7 @@ def test_a_batch_of_padding_alone_gives_a_zero_auxiliary_2d_loss() -> None:
         [True, True],
     )
 
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
     losses = model.compute_metrics(batch_inputs, outputs)
     losses["loss"].backward()
 
