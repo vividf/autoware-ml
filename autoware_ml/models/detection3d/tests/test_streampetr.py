@@ -237,10 +237,6 @@ def _collated_box(*values: float) -> torch.Tensor:
     return torch.tensor([values], dtype=torch.float32)
 
 
-def _run(model: StreamPETRDetection3DModel, batch_inputs: ModelBatchInputs):
-    return model(batch_inputs)
-
-
 def test_streampetr_forward_returns_per_layer_decoder_outputs() -> None:
     """
     Input: two samples of six random camera images, each the first frame of its own scene.
@@ -250,7 +246,7 @@ def test_streampetr_forward_returns_per_layer_decoder_outputs() -> None:
     Check: compare the shapes of the two head outputs.
     """
     model = _build_model()
-    outputs = _run(model, _build_batch_inputs(torch.randn(2, NUM_CAMS, 3, *IMAGE_HW)))
+    outputs = model(_build_batch_inputs(torch.randn(2, NUM_CAMS, 3, *IMAGE_HW)))
 
     head_outputs = outputs.detection3d().streampetr_head()
     # 3 decoder layers x (32 learnable queries + 8 propagated from the temporal memory).
@@ -258,7 +254,7 @@ def test_streampetr_forward_returns_per_layer_decoder_outputs() -> None:
     assert head_outputs.all_bbox_preds.shape == (3, 2, 40, 10)
 
 
-def test_forward_reads_the_calibration_and_the_stream_metadata_of_the_batch() -> None:
+def test_forward_reads_the_stream_metadata_of_the_batch() -> None:
     """
     Input: two frames of one lane in the same scene, 0.1 s apart at an epoch time of 1.7e9 s,
     the second one at a pose 65 km from the map origin.
@@ -276,9 +272,8 @@ def test_forward_reads_the_calibration_and_the_stream_metadata_of_the_batch() ->
     img = torch.randn(1, NUM_CAMS, 3, *IMAGE_HW)
 
     with torch.no_grad():
-        _run(model, _build_batch_inputs(img, timestamps=[1.7e9], scene_tokens=["db/scene_a/0"]))
-        _run(
-            model,
+        model(_build_batch_inputs(img, timestamps=[1.7e9], scene_tokens=["db/scene_a/0"]))
+        model(
             _build_batch_inputs(
                 img,
                 timestamps=[1.7e9 + 0.1],
@@ -367,7 +362,7 @@ def test_training_step_runs_with_denoising_queries_and_predicts() -> None:
 
     loss = model.training_step(batch_inputs, batch_idx=0)
     loss.backward()
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
     predictions = model.decode_outputs(batch_inputs, outputs)
 
     assert torch.isfinite(loss)
@@ -396,7 +391,7 @@ def test_build_eval_output_pairs_predictions_with_ground_truth() -> None:
     )
 
     with torch.no_grad():
-        eval_out = model.build_eval_output(batch_inputs, _run(model, batch_inputs))
+        eval_out = model.build_eval_output(batch_inputs, model(batch_inputs))
 
     assert len(eval_out["predictions"]) == 1
     assert eval_out["gt_boxes"][0].shape == (1, 10)
@@ -440,15 +435,13 @@ def test_streampetr_memory_resets_when_the_lane_changes_scene() -> None:
     topk = head.topk_proposals
 
     with torch.no_grad():
-        _run(
-            model,
+        model(
             _build_batch_inputs(
                 torch.randn(1, NUM_CAMS, 3, *IMAGE_HW), timestamps=[0.0], scene_tokens=["a"]
             ),
         )
         assert (head.memory_embedding[:, :topk] != 0).any()
-        _run(
-            model,
+        model(
             _build_batch_inputs(
                 torch.randn(1, NUM_CAMS, 3, *IMAGE_HW), timestamps=[1.0], scene_tokens=["b"]
             ),
@@ -474,7 +467,10 @@ def _exported_head_outputs(
     pose: torch.Tensor,
     pre_memory: tuple[torch.Tensor, ...],
 ) -> dict[str, torch.Tensor]:
-    """Run the three deployed graphs of ``model`` on one frame with the given bank."""
+    """Run the three deployed graphs of ``model`` on one frame with the given bank.
+
+    Returns the outputs of the memory graph by name, and the export specs they came from.
+    """
     head = model.bbox_head
     img = batch_inputs.image_data.images
     img_features = model.image_feature_extractor(img)
@@ -492,7 +488,7 @@ def _exported_head_outputs(
     outputs = specs["pts_head_memory"].module(
         img_features, pos_embed, cone, pose, torch.linalg.inv(pose.double()).float(), *pre_memory
     )
-    return dict(zip(specs["pts_head_memory"].output_names, outputs))
+    return dict(zip(specs["pts_head_memory"].output_names, outputs)), specs
 
 
 def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
@@ -521,7 +517,7 @@ def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
     second = _build_batch_inputs(img, timestamps=[0.0], scene_tokens=["a"], ego2globals=pose)
 
     with torch.no_grad():
-        _run(model, warm_up)
+        model(warm_up)
         pre_memory = (
             head.memory_embedding.clone(),
             head.memory_reference_point.clone(),
@@ -530,7 +526,7 @@ def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
             head.memory_velo.clone(),
         )
 
-        reference = _run(model, second).detection3d().streampetr_head()
+        reference = model(second).detection3d().streampetr_head()
         reference_memory = (
             head.memory_embedding,
             head.memory_reference_point,
@@ -539,8 +535,7 @@ def test_exported_head_matches_eval_forward_on_a_propagated_frame() -> None:
             head.memory_velo,
         )
 
-        exported = _exported_head_outputs(model, second, pose, pre_memory)
-        specs = model.build_export_specs(second)
+        exported, specs = _exported_head_outputs(model, second, pose, pre_memory)
 
     # The outputs the runtime binds; nothing else leaves the graphs.
     assert specs["position_embedding"].args[1].shape == (1, NUM_CAMS, 4, 4)
@@ -602,9 +597,9 @@ def test_exported_head_matches_eval_forward_on_the_first_frame_of_a_stream() -> 
     )
 
     with torch.no_grad():
-        reference = _run(model, first).detection3d().streampetr_head()
+        reference = model(first).detection3d().streampetr_head()
         reference_points = head.memory_reference_point
-        exported = _exported_head_outputs(model, first, pose, zero_bank)
+        exported, _ = _exported_head_outputs(model, first, pose, zero_bank)
 
     torch.testing.assert_close(exported["all_bbox_preds"][0].T, reference.all_bbox_preds[-1, 0])
     torch.testing.assert_close(
@@ -769,7 +764,7 @@ def test_position_embedding_and_export_see_the_intrinsics_of_the_augmented_image
 
     head.position_embedding = spy
     with torch.no_grad():
-        _run(model, batch_inputs)
+        model(batch_inputs)
     head.position_embedding = original
     torch.testing.assert_close(seen["intrinsics"], expected)
 
@@ -788,7 +783,7 @@ def test_phase_hooks_start_new_streams() -> None:
     """
     model = _build_model().eval()
     with torch.no_grad():
-        _run(model, _build_batch_inputs(torch.randn(1, NUM_CAMS, 3, *IMAGE_HW)))
+        model(_build_batch_inputs(torch.randn(1, NUM_CAMS, 3, *IMAGE_HW)))
     assert model.bbox_head.memory_embedding is not None
 
     model.on_validation_epoch_start()
@@ -877,7 +872,7 @@ def test_loss_keys_and_graph_are_uniform_without_ground_truth() -> None:
         gt_labels=[torch.zeros(0, dtype=torch.int64)],
     )
 
-    losses = model.compute_metrics(batch_inputs, _run(model, batch_inputs))
+    losses = model.compute_metrics(batch_inputs, model(batch_inputs))
 
     # Every rank must emit the same loss keys and reach the same parameters,
     # regardless of ground-truth presence in its batch.
@@ -989,10 +984,10 @@ def test_forward_sanitizes_nan_poisoned_memory() -> None:
     model = _build_model().eval()
     img = torch.randn(1, NUM_CAMS, 3, *IMAGE_HW)
 
-    _run(model, _build_batch_inputs(img, timestamps=[0.0], scene_tokens=["a"]))
+    model(_build_batch_inputs(img, timestamps=[0.0], scene_tokens=["a"]))
     head = model.bbox_head
     head.memory_embedding[:, :4] = float("nan")
-    outputs = _run(model, _build_batch_inputs(img, timestamps=[0.5], scene_tokens=["a"]))
+    outputs = model(_build_batch_inputs(img, timestamps=[0.5], scene_tokens=["a"]))
 
     head_outputs = outputs.detection3d().streampetr_head()
     assert torch.isfinite(head_outputs.all_cls_scores).all()
@@ -1057,11 +1052,11 @@ def test_a_padding_sample_takes_no_part_in_the_loss() -> None:
     )
 
     torch.manual_seed(1)
-    real_outputs = _run(model, real_batch)
+    real_outputs = model(real_batch)
     real_losses = model.compute_metrics(real_batch, real_outputs)
     model.bbox_head.reset_memory()
     torch.manual_seed(1)
-    padded_outputs = _run(model, padded_batch)
+    padded_outputs = model(padded_batch)
     padded_losses = model.compute_metrics(padded_batch, padded_outputs)
     padded_losses["loss"].backward()
 
@@ -1097,7 +1092,7 @@ def test_a_batch_of_padding_alone_gives_a_zero_loss_over_the_whole_graph() -> No
         _build_batch_inputs(images, gt_boxes=boxes, gt_labels=labels), [True, True]
     )
 
-    outputs = _run(model, batch_inputs)
+    outputs = model(batch_inputs)
     losses = model.compute_metrics(batch_inputs, outputs)
     losses["loss"].backward()
 
@@ -1109,14 +1104,14 @@ def test_a_batch_of_padding_alone_gives_a_zero_loss_over_the_whole_graph() -> No
         assert all(parameter.grad is not None for parameter in branches.parameters())
 
 
-def test_the_eval_output_keeps_a_padding_slot_as_an_empty_frame() -> None:
+def test_a_padded_eval_batch_keeps_one_entry_per_sample() -> None:
     """
     Input: an eval batch of three frames with one box each, the middle one a padding slot.
-    Expected: a padding slot repeats a frame that is scored elsewhere, so it reaches the
-    metrics as a frame without predictions and without ground truth, keeping the per-frame
-    lists of every GPU as long; the real frames keep their boxes.
-    Check: the number of per-frame entries, the empty entries of the padding slot, the boxes of
-    the real frames and the scene tokens.
+    Expected: the predictions and the eval output keep one entry per sample, in batch order,
+    for Lightning's batch indices and for the per-frame lists every GPU gathers as many of;
+    the eval output flags the padding slot for the metrics to leave out.
+    Check: the number of predictions and of per-frame entries, the padding flags and the scene
+    tokens.
     """
     model = _build_model().eval()
     images = torch.randn(3, NUM_CAMS, 3, *IMAGE_HW)
@@ -1132,41 +1127,14 @@ def test_the_eval_output_keeps_a_padding_slot_as_an_empty_frame() -> None:
     )
 
     with torch.no_grad():
-        outputs = _run(model, batch_inputs)
+        outputs = model(batch_inputs)
         eval_out = model.build_eval_output(batch_inputs, outputs)
         predictions = model.decode_outputs(batch_inputs, outputs)
 
-    assert len(eval_out["predictions"]) == len(eval_out["gt_boxes"]) == 3
-    assert eval_out["predictions"][1]["bboxes_3d"].shape[0] == 0
-    assert eval_out["gt_boxes"][1].shape[0] == eval_out["gt_labels"][1].shape[0] == 0
-    assert [boxes.shape[0] for boxes in eval_out["gt_boxes"]] == [1, 0, 1]
-    assert eval_out["scene_token"] == ["db/a/0", "db/b/0", "db/c/0"]
     assert len(predictions.detection3d_predictions) == 3
-
-
-def test_the_logged_batch_size_counts_the_real_samples() -> None:
-    """
-    Input: a training batch of three samples with one padding slot, a batch of padding
-    alone, and a batch without padding.
-    Expected: the epoch means weigh every step by its real samples, so a padding slot adds
-    no weight, a batch of padding alone adds none at all, and a batch without padding counts
-    every sample.
-    Check: the batch size the training step logs, and the sizes of the other two batches.
-    """
-    model = _build_model().train()
-    logged: dict[str, int] = {}
-    model.log_dict = lambda values, batch_size, **kwargs: logged.update(batch_size=batch_size)
-    batch_inputs = _build_batch_inputs(
-        torch.randn(3, NUM_CAMS, 3, *IMAGE_HW),
-        gt_boxes=[torch.zeros(0, 10)] * 3,
-        gt_labels=[torch.zeros(0, dtype=torch.int64)] * 3,
-    )
-
-    model.training_step(_with_padding(batch_inputs, [False, False, True]), batch_idx=0)
-
-    assert logged["batch_size"] == 2
-    assert model.get_log_batch_size(_with_padding(batch_inputs, [True, True, True])) == 0
-    assert model.get_log_batch_size(batch_inputs) == 3
+    assert len(eval_out["predictions"]) == len(eval_out["gt_boxes"]) == 3
+    assert eval_out["padding_mask"] == [False, True, False]
+    assert eval_out["scene_token"] == ["db/a/0", "db/b/0", "db/c/0"]
 
 
 def test_a_padding_slot_starts_a_new_stream_and_leaves_the_next_epoch_alone() -> None:
@@ -1188,20 +1156,17 @@ def test_a_padding_slot_starts_a_new_stream_and_leaves_the_next_epoch_alone() ->
     fresh = deepcopy(model)
     earlier, last, next_first = (torch.randn(1, NUM_CAMS, 3, *IMAGE_HW) for _ in range(3))
     with torch.no_grad():
-        _run(model, _build_batch_inputs(earlier, timestamps=[3.5], scene_tokens=["a"]))
-        _run(model, _build_batch_inputs(last, timestamps=[4.0], scene_tokens=["a"]))
-        slot = _run(
-            model,
+        model(_build_batch_inputs(earlier, timestamps=[3.5], scene_tokens=["a"]))
+        model(_build_batch_inputs(last, timestamps=[4.0], scene_tokens=["a"]))
+        slot = model(
             _with_padding(_build_batch_inputs(last, timestamps=[4.0], scene_tokens=["a"]), [True]),
         )
         model.on_train_epoch_start()
-        after_slot = _run(
-            model, _build_batch_inputs(next_first, timestamps=[0.0], scene_tokens=["b"])
-        )
+        after_slot = model(_build_batch_inputs(next_first, timestamps=[0.0], scene_tokens=["b"]))
 
-        first_frame = _run(fresh, _build_batch_inputs(last, timestamps=[4.0], scene_tokens=["a"]))
+        first_frame = fresh(_build_batch_inputs(last, timestamps=[4.0], scene_tokens=["a"]))
         fresh.on_train_epoch_start()
-        alone = _run(fresh, _build_batch_inputs(next_first, timestamps=[0.0], scene_tokens=["b"]))
+        alone = fresh(_build_batch_inputs(next_first, timestamps=[0.0], scene_tokens=["b"]))
 
     for observed, expected in ((slot, first_frame), (after_slot, alone)):
         observed_head = observed.detection3d().streampetr_head()

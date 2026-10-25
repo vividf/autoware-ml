@@ -223,6 +223,9 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
     the shared Autoware-ML training and deployment interface.
     """
 
+    # The memory bank needs lane-contiguous batches.
+    requires_streaming: ClassVar[bool] = True
+
     def __init__(
         self,
         data_preprocessor: DataPreprocessor,
@@ -276,15 +279,14 @@ class StreamPETRDetection3DModel(ModuleBaseModel):
         self.img_roi_head = img_roi_head
         self.partial_annotations = partial_annotations
 
-    # The memory bank needs lane-contiguous batches.
-    requires_streaming: ClassVar[bool] = True
-
     def _start_streams(self) -> None:
         """Reset the temporal memory: the lanes of a new phase or epoch start new streams.
 
         Lightning restores the training mode after validation by setting ``training``
         on every module rather than calling ``train()``, so the phase hooks are the
-        place to reset, not a ``train()`` override.
+        place to reset, not a ``train()`` override. After a validation inside a training
+        epoch, the training lanes find another scene in the memory and so start new
+        streams as well.
         """
         self.bbox_head.reset_memory()
 
