@@ -821,11 +821,7 @@ class TestTransFusionHead(unittest.TestCase):
         self.assertTrue(torch.equal(untouched, heatmaps))
 
     def test_suppress_dense_heatmaps_matches_the_slice_assignment_reference(self) -> None:
-        """
-        Test that the scatter-free suppression equals the slice-assignment form it replaces:
-        pooled classes take the 3x3 max over the fully interior windows, their border ring
-        keeps the raw value, and the other classes pass through untouched.
-        """
+        """Test that the scatter-free suppression matches the slice-assignment reference."""
         transfusion_head = self._build_transfusion_head(
             dense_heatmap_pooling_class_names=["pedestrian"]
         )
@@ -870,10 +866,7 @@ class TestTransFusionHead(unittest.TestCase):
         self.assertFalse(any(node.op_type == "ScatterND" for node in model.graph.node))
 
     def test_fused_export_attention_drops_the_max_subtraction_without_bf16(self) -> None:
-        """
-        Test that ``fuse_export_attention`` emits the fusion-ready attention pattern in the trace
-        dtype: no max-subtraction before the softmax and no bf16 casts, on both attentions.
-        """
+        """Test that ``fuse_export_attention`` drops the max-subtraction and adds no bf16 casts."""
         transfusion_head = self._build_transfusion_head(
             fuse_export_attention=True
         ).prepare_for_export()
