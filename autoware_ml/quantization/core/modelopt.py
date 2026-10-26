@@ -14,29 +14,19 @@
 
 """nvidia-modelopt bug workarounds, applied once when this package is imported.
 
-modelopt (``modelopt.torch.quantization``) is the fake-quant library the framework builds
-on: ``TensorQuantizer`` is the Q/DQ leaf, ``QuantModuleRegistry`` converts ``nn.Conv2d`` /
-``nn.ConvTranspose2d`` / ``nn.Linear`` in place, and its ONNX symbolics emit
-QuantizeLinear/DequantizeLinear (INT8) or the ``trt::TRT_FP8*`` ops (FP8). The framework
-imports those names from modelopt directly; this module only carries the patches every
-other core module must see before it touches a quantizer, so importing
-:mod:`autoware_ml.quantization.core` applies them.
+Each patch probes for the bug first, so a fixed modelopt is left untouched (both still apply
+as of 0.46.0).
 
-Both patches are behavior-probed so a fixed upstream is left untouched (as of 0.46.0 both
-still apply):
-
-1. **Histogram-MSE calibration**: ``modelopt...calib.histogram._compute_amax_mse`` calls
+1. Histogram MSE calibration: ``calib.histogram._compute_amax_mse`` calls
    ``fake_tensor_quant(centers, amax, num_bits, unsigned)`` with pytorch-quantization's
-   positional signature, but modelopt's ``FakeTensorQuantFunction.forward`` takes ``bias``
-   as the third argument. ``num_bits=8`` therefore lands in ``bias`` and ``unsigned=False``
-   in ``num_bits``, and the MSE search degenerates to near-histogram-max amax
-   (entropy/percentile are unaffected). Replaced with a corrected copy.
-
-2. **Checkpoint load into an uncalibrated tree**: ``TensorQuantizer`` registers its
-   ``_amax`` (and SmoothQuant's ``_pre_quant_scale``) buffers lazily, at calibration time,
-   and has no ``_load_from_state_dict`` override — so loading a calibrated checkpoint into a
-   freshly built tree silently drops every scale as an "unexpected key". The override below
-   creates the buffers from the incoming state_dict first.
+   positional signature, but modelopt's version takes ``bias`` third: ``num_bits=8`` lands in
+   ``bias`` and ``unsigned=False`` in ``num_bits``, and the MSE search degenerates to near
+   the histogram max (entropy and percentile are unaffected). Replaced with a corrected copy.
+2. Loading into an uncalibrated tree: ``TensorQuantizer`` registers its ``_amax`` (and
+   SmoothQuant's ``_pre_quant_scale``) buffers only at calibration and does not override
+   ``_load_from_state_dict``, so loading a calibrated checkpoint into a fresh tree drops
+   every scale as an unexpected key. The override creates the buffers from the incoming
+   state_dict first.
 """
 
 from __future__ import annotations
@@ -75,11 +65,8 @@ def _fixed_compute_amax_mse(
     arguments = []
     for i in range(start_bin, len(centers), stride):
         amax = centers[i]
-        # modelopt 0.46's FakeTensorQuantFunction.forward is positional-only through
-        # autograd.Function.apply: (inputs, amax, bias, num_bits, unsigned, narrow_range,
-        # ...). The histogram calibrator's own call predates that order (it passes
-        # num_bits where bias goes). narrow_range=False matches the [-128, 127] range the
-        # exported Q/DQ use.
+        # Positional (autograd.Function.apply): inputs, amax, bias, num_bits, unsigned,
+        # narrow_range. narrow_range=False matches the [-128, 127] range of the exported Q/DQ.
         quant_centers = _mo_ftq(centers, amax, None, num_bits, unsigned, False)
         mses.append(((quant_centers - centers) ** 2 * counts).mean().cpu())
         arguments.append(i)
@@ -96,7 +83,7 @@ def _patch_histogram_mse() -> None:
     try:
         out = _mo_histogram.fake_tensor_quant(probe, torch.tensor(1.0), 8, False)
         if torch.allclose(out, probe, atol=0.05):
-            return  # upstream fixed — nothing to do
+            return  # fixed upstream
     except Exception as error:  # noqa: BLE001 — broken in a louder way; patch below
         logger.debug("modelopt fake_tensor_quant probe raised %r; patching", error)
     _mo_histogram._compute_amax_mse = _fixed_compute_amax_mse

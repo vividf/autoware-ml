@@ -12,17 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-agnostic quantization engine, on top of nvidia-modelopt.
+"""Model-agnostic quantization engine on nvidia-modelopt.
 
-The generic building blocks that know only about ``nn.Conv2d`` / ``nn.Linear`` and modelopt —
-not about any particular model: the per-precision descriptor tables (:mod:`.descriptors`),
-the in-place module conversion walker on modelopt's ``QuantModuleRegistry`` (:mod:`.replace`),
-calibration (:mod:`.calibration`), and quantizer state operations
-(:mod:`.quantizer_state`). :mod:`.modelopt` holds the modelopt bug workarounds and is imported
-here first so every quantizer built by this package sees them.
-
-The deployment interface (rules / plan / placement record) lives in
-:mod:`autoware_ml.quantization.rules` and :mod:`autoware_ml.quantization.plan`.
+Importing it applies the modelopt workarounds of :mod:`.modelopt` before any quantizer is built.
 """
 
 from . import modelopt as _modelopt_patches  # noqa: F401  (import applies the patches)

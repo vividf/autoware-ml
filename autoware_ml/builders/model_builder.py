@@ -63,11 +63,9 @@ def build_model(
         enforce_full_coverage: Whether to enforce that all model parameters are covered by the weights.
         skip_mismatched_weights: Whether to skip, with a warning, weight tensors whose key matches a
             model tensor of a different shape instead of raising.
-        allow_quantized_weights: Whether a checkpoint carrying an embedded quantization
-            description (written by ``autoware-ml quantize``) may be loaded: its quantized
-            module tree is rebuilt from the description before the weights load, so the model
-            comes back quantized. ``False`` refuses such a checkpoint, for stages that need
-            the floating-point model (training, the quantize stage itself).
+        allow_quantized_weights: Whether a quantized checkpoint (from ``autoware-ml quantize``)
+            may be loaded; the model then comes back quantized. Stages that need the FP model
+            (training, quantize) pass ``False``.
 
     Returns:
         Pytorch-Lightning ModuleBaseModel for multi-task learning/inference.
@@ -82,10 +80,7 @@ def build_model(
     model = instantiate(cfg.model, data_preprocessor=data_preprocessor).to(device)
 
     if weights_path is not None:
-        # A quantized checkpoint describes itself: the identical quantized module tree is
-        # rebuilt from its embedded description before the weights load. Nothing here reads
-        # a `quantization` config section; an FP checkpoint takes the plain matching-weights
-        # path. The import is local: the quantization engine is only needed with weights.
+        # Imported here: the quantization engine is only needed to load weights.
         from autoware_ml.quantization.loader import load_model_weights
 
         load_model_weights(

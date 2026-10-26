@@ -12,24 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Typed view of the Hydra ``quantization`` config section.
-
-The single parse of the ``quantization`` dict: entrypoints build this once and pass
-it to ``QuantizationPlan.for_model`` — nothing downstream re-parses the raw
-dict. Defaults are chosen so an absent section yields a fully-disabled config
-(``enabled=False``), leaving non-quantized configs unaffected.
-
-Precision placement is declarative (modelopt-style): everything the plan reaches is
-``default_precision`` (INT8), and ``skip_quantize`` lists glob patterns (subtree match)
-excluded from quantization — an excluded module's runtime precision follows the deploy
-``onnx.precision`` (fp16 through the deploy precision cast). ``calibration`` picks the amax
-algorithm.
-
-The FP input checkpoint, the training config, and
-the work directory are NOT config keys here: the checkpoint arrives via ``--weights``,
-the training setup via the Hydra experiment config, and artifact placement via the
-MLflow run context.
-"""
+"""Typed view of the Hydra ``quantization`` config section."""
 
 from __future__ import annotations
 
@@ -50,10 +33,9 @@ VALID_MODULE_KINDS = ("conv", "linear", "spconv")
 class Precision(str, Enum):
     """Quantization target precision.
 
-    INT8 is the production path for convolutions (CenterPoint release recipe). FP8 (E4M3,
-    per-tensor, max calibration) is validated for Linear layers on PTv3 and BEVFusion
-    (2026-09-02/03: within the FP16 band where INT8 Linear lost 6 mIoU) and is the
-    precision every Linear should take; conv FP8 is blocked at ONNX export today.
+    INT8 is the production path for convolutions. FP8 (E4M3) is meant for Linear layers: on
+    PTv3 and BEVFusion it stays within the FP16 accuracy band, while INT8 Linear cost PTv3
+    6 mIoU. Conv FP8 is blocked at ONNX export for now.
     """
 
     INT8 = "int8"
@@ -64,23 +46,16 @@ class Precision(str, Enum):
 class CalibrationConfig:
     """How activation ``amax`` is computed (``quantization.calibration``).
 
-    The calibration algorithm is part of the recipe — often a bigger accuracy lever than
-    the number of samples — so it lives in config and travels inside the checkpoint.
+    - ``mse`` (default) / ``entropy`` / ``percentile``: histogram calibration; ``amax``
+      minimizes the MSE or the KL divergence, or clips at ``percentile``.
+    - ``max``: running maximum of the activations.
+    - ``smoothquant``: modelopt's SmoothQuant. Max calibration, then every INT8 ``Linear``
+      moves activation outliers into its weight through a per-input-channel
+      ``pre_quant_scale``, balanced by ``smoothquant_alpha``. Exports as a ``Mul`` before
+      the Q/DQ.
 
-    - ``mse`` (default) / ``entropy`` / ``percentile`` — histogram calibrator on every
-      activation quantizer; ``amax`` minimizes MSE / KL divergence, or clips at
-      ``percentile``.
-    - ``max`` — running max of the observed activations (no histogram); the FP8
-      convention and the fastest.
-    - ``smoothquant`` — modelopt's SmoothQuant (Xiao et al. 2022): max calibration, then
-      every INT8 quantized ``Linear`` migrates activation outliers into its weight through a
-      per-input-channel ``pre_quant_scale`` (``alpha`` balances the two sides; 0.5 is the
-      paper default). Convolutions are unaffected. Exports as a ``Mul`` before Q/DQ.
-
-    Weight quantizers always use max (their per-channel ``amax`` is exact); FP8 activation
-    quantizers always use max — ``percentile``/``mse``/``entropy`` therefore apply to INT8
-    activations only, and a config asking for a histogram method on an FP8-only tree
-    silently degenerates to max (there is nothing to histogram).
+    Weights and FP8 activations always use max calibration, so the histogram methods apply
+    to INT8 activations only; on an FP8-only tree they amount to ``max``.
     """
 
     method: str = "mse"
@@ -105,13 +80,7 @@ class CalibrationConfig:
 
     @classmethod
     def from_raw(cls, raw: Any) -> CalibrationConfig:
-        """Build from ``None`` (default), a method string, or a ``{method, ...}`` mapping.
-
-        Raises:
-            TypeError: If ``raw`` is neither a string nor a mapping.
-            ValueError: On an unknown method, a knob that does not belong to the chosen
-                method, or an out-of-range value.
-        """
+        """Build from ``None`` (default), a method string, or a ``{method, ...}`` mapping."""
         if raw is None:
             return cls()
         if isinstance(raw, str):
@@ -158,7 +127,7 @@ class CalibrationConfig:
         return out
 
     def describe(self) -> str:
-        """One-line human-readable summary for logs."""
+        """One-line summary for logs."""
         if self.method == "percentile":
             return f"histogram percentile {self.percentile:g}"
         if self.method == "smoothquant":
@@ -172,25 +141,18 @@ class CalibrationConfig:
 class QATScheduleConfig:
     """Learning-rate schedule of the QAT fine-tune (``quantization.qat.schedule``).
 
-    Accepts a plain string (``"cosine"`` / ``"one_cycle"`` / ``"constant"``) or a
-    mapping ``{type: ..., <type-specific knobs>}``. ``QATConfig.lr`` is always the
-    PEAK of the schedule.
+    A type string or a ``{type: ..., <knobs>}`` mapping. ``QATConfig.lr`` is the peak lr.
 
-    - ``cosine`` (default) — the NVIDIA integer-quantization recipe (Wu et al. 2020;
-      also what modelopt documents): start AT the peak (no warmup — the model is
-      already converged), cosine-anneal down to ``lr * final_lr_ratio`` (1/100 by
-      default). Recommended peak: 1% of the original training's peak lr, for ~10%
-      of the original epochs.
-    - ``one_cycle`` — the CUDA-CenterPoint QAT reference: warm up from
-      ``lr / div_factor`` to ``lr`` over ``pct_start`` of the run, then anneal to
-      ``lr / div_factor / final_div_factor``; optional Adam momentum cycling.
-    - ``constant`` — raw optimizer lr, no scheduler. Experiments only: a flat lr at
-      QAT scale can collapse a converged model within an epoch.
+    - ``cosine`` (default): the NVIDIA integer-quantization recipe (Wu et al. 2020). No
+      warmup, since the model has converged; cosine-anneals to ``lr * final_lr_ratio``.
+    - ``one_cycle``: the CUDA-CenterPoint QAT reference. Warms up from ``lr / div_factor``
+      over ``pct_start`` of the run, then anneals to ``lr / div_factor / final_div_factor``;
+      optional momentum cycling.
+    - ``constant``: the optimizer lr, no scheduler. For experiments only: a flat lr at QAT
+      scale can collapse a converged model within an epoch.
 
-    Both annealing types are realised with ``torch.optim.lr_scheduler.OneCycleLR``
-    stepped per iteration (``total_steps`` is auto-filled by the optimizer builder
-    from the trainer's estimated stepping batches, so multi-epoch runs span the
-    whole fine-tune).
+    The annealing types run as a ``OneCycleLR`` stepped every iteration over the whole
+    fine-tune.
     """
 
     type: str = "cosine"
@@ -235,13 +197,7 @@ class QATScheduleConfig:
 
     @classmethod
     def from_raw(cls, raw: Any) -> QATScheduleConfig:
-        """Build from ``None`` (default), a type string, or a ``{type, ...}`` mapping.
-
-        Raises:
-            TypeError: If ``raw`` is neither a string nor a mapping.
-            ValueError: On an unknown type, a knob that does not belong to the chosen
-                type, or an out-of-range value.
-        """
+        """Build from ``None`` (default), a type string, or a ``{type, ...}`` mapping."""
         if raw is None:
             return cls()
         if isinstance(raw, str):
@@ -291,11 +247,10 @@ class QATScheduleConfig:
         return config
 
     def build_lightning_scheduler(self, peak_lr: float) -> tuple[dict | None, dict | None]:
-        """Return ``(model.scheduler, model.scheduler_config)`` Hydra nodes for this schedule.
+        """Return the Hydra nodes for ``model.scheduler`` and ``model.scheduler_config``.
 
-        ``None, None`` for ``constant``. The annealing types return a partial
-        ``OneCycleLR`` (``total_steps`` left for the optimizer builder to fill) and
-        ``{"interval": "step"}``.
+        Both are ``None`` for ``constant``. ``OneCycleLR`` is left partial: the optimizer
+        builder fills in ``total_steps`` from the trainer's estimated stepping batches.
         """
         if self.type == "constant":
             return None, None
@@ -327,7 +282,7 @@ class QATScheduleConfig:
         return scheduler, {"interval": "step"}
 
     def describe(self) -> str:
-        """One-line human-readable summary for logs."""
+        """One-line summary for logs."""
         if self.type == "constant":
             return "constant lr"
         if self.type == "cosine":
@@ -341,16 +296,10 @@ class QATScheduleConfig:
 
 @dataclass(frozen=True)
 class QATConfig:
-    """Typed view of the optional ``quantization.qat`` sub-block.
+    """The ``quantization.qat`` block, allowed only under ``mode: qat``.
 
-    Present only when ``quantization.mode == "qat"``. ``epochs`` and ``lr`` are
-    required: there is no silent recipe default — they belong in the config,
-    visibly. Recommended (Wu et al. 2020 / modelopt): ``epochs`` ≈ 10% of the
-    original training and ``lr`` (the schedule PEAK) ≈ 1% of the original
-    training's peak lr. See :class:`QATScheduleConfig` for ``schedule``.
-    ``calibrate_samples`` counts SAMPLES (never batches — the QAT callback divides
-    by the val dataloader's batch size) and defaults to the CUDA-CenterPoint
-    reference of 400 samples.
+    ``epochs`` and ``lr`` (the schedule peak) are recipe choices and have no default.
+    ``calibrate_samples`` counts samples, not batches.
     """
 
     epochs: int
@@ -360,13 +309,11 @@ class QATConfig:
     # of the gradient and drift past the frozen downstream amax; freeze them (they
     # deploy as FP16 anyway).
     freeze_unquantized: bool = True
-    # Validate this often WITHIN an epoch (Lightning ``val_check_interval`` fraction).
-    # QAT can degrade progressively inside a single epoch, so end-of-epoch-only
-    # validation would make ``best.ckpt`` pick the worst model.
+    # Validate within the epoch (Lightning ``val_check_interval`` fraction): QAT can degrade
+    # inside a single epoch, and ``best.ckpt`` only picks among validated states.
     val_check_interval: float = 0.25
     calibrate_samples: int = 400
 
-    # Typo guard — same rationale as QuantizationConfig.KNOWN_KEYS.
     KNOWN_KEYS = frozenset(
         {
             "epochs",
@@ -380,13 +327,7 @@ class QATConfig:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> QATConfig:
-        """Build QATConfig from ``quantization["qat"]``.
-
-        Raises:
-            TypeError: If ``raw`` is not a mapping.
-            ValueError: On unknown keys, when ``epochs`` / ``lr`` are missing, or on an
-                invalid ``schedule`` / ``val_check_interval``.
-        """
+        """Build QATConfig from ``quantization["qat"]``."""
         if not isinstance(raw, Mapping):
             raise TypeError(f"quantization.qat must be a dict, got {type(raw).__name__}")
         reject_unknown_keys(raw, cls.KNOWN_KEYS, "quantization.qat")
@@ -444,12 +385,10 @@ class QATConfig:
 
 @dataclass(frozen=True)
 class PTQConfig:
-    """Typed view of the optional ``quantization.ptq`` sub-block.
+    """The ``quantization.ptq`` block, allowed only under ``mode: ptq``.
 
-    The quantize-stage half of a PTQ run, recorded in the experiment config so one file
-    reproduces the produced checkpoint. ``calibrate_samples`` is required: it is
-    *the* calibration-recipe knob and gets no silent default — same rationale as
-    ``QATConfig.epochs`` / ``lr``.
+    The calibration run's settings live in the experiment config, so one file reproduces the
+    checkpoint. ``calibrate_samples`` is a recipe choice and has no default.
     """
 
     calibrate_samples: int
@@ -457,17 +396,11 @@ class PTQConfig:
     calib_seed: int | None = None
     calib_shuffle: bool = False
 
-    # Typo guard — same rationale as QuantizationConfig.KNOWN_KEYS.
     KNOWN_KEYS = frozenset({"calibrate_samples", "batch_size", "calib_seed", "calib_shuffle"})
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> PTQConfig:
-        """Build PTQConfig from ``quantization["ptq"]``.
-
-        Raises:
-            TypeError: If ``raw`` is not a mapping.
-            ValueError: On unknown keys, or when ``calibrate_samples`` is missing.
-        """
+        """Build PTQConfig from ``quantization["ptq"]``."""
         if not isinstance(raw, Mapping):
             raise TypeError(f"quantization.ptq must be a dict, got {type(raw).__name__}")
         reject_unknown_keys(raw, cls.KNOWN_KEYS, "quantization.ptq")
@@ -499,29 +432,19 @@ class QuantizationConfig:
 
     enabled: bool = False
     mode: str = "ptq"  # "ptq" | "qat"
-    # Precision placement: INT8 by default, opt out by glob (subtree match). A pattern
-    # excludes the matched module and all its descendants from quantization; their
-    # runtime precision follows the deploy onnx.precision (fp16 through the deploy precision cast).
     default_precision: Precision = Precision.INT8
+    # Glob patterns over module names. A matched module and its whole subtree stay
+    # un-quantized and run at the deploy onnx.precision.
     skip_quantize: tuple[str, ...] = ()
-    # How activation amax is computed (mse / entropy / percentile / max / smoothquant).
-    # Shared by PTQ and the QAT epoch-0 calibration; see CalibrationConfig.
+    # Shared by PTQ and the calibration that starts QAT.
     calibration: CalibrationConfig = CalibrationConfig()
-    # Quantize-stage only: build the model, prepare the quantized tree, log the full placement
-    # record (which module gets which transform and why), and exit WITHOUT calibrating
-    # or training. The way to inspect precision placement before spending GPU time.
+    # Quantize stage only: log the placement record and exit before calibrating.
     dry_run: bool = False
-    # Stage blocks (quantize-side) — each present only under its matching mode (a block under the
-    # wrong mode is a config lie and from_dict raises; an explicit ``ptq: null`` /
-    # ``qat: null`` is fine, so a mode="qat" child config can drop an inherited block).
-    # Deploy-load behavior NEVER branches on these: the loader rebuilds the identical
-    # tree for PTQ and QAT checkpoints alike.
+    # Each is allowed only under its own mode; ``ptq: null`` lets a qat config drop an
+    # inherited block. Loading never reads them: PTQ and QAT checkpoints rebuild the same tree.
     ptq: PTQConfig | None = None
     qat: QATConfig | None = None
 
-    # The full key set of the ``quantization`` config section. ``from_dict`` rejects
-    # anything else: a misspelled key (``skip_quantizes: ...``) would otherwise silently
-    # degrade to "quantize everything INT8" and be visible only as an eval mAP drop.
     KNOWN_KEYS = frozenset(
         {
             "enabled",
@@ -540,8 +463,7 @@ class QuantizationConfig:
         if not value:
             return ()
         if isinstance(value, str):
-            # `skip_quantize: pts_voxel_encoder` would iterate characters and match nothing,
-            # silently quantizing everything.
+            # A bare string would be iterated into one-character patterns.
             raise TypeError(
                 f"Expected a list of module patterns, got the string {value!r}; write it as a "
                 f"list ([{value!r}])."
@@ -550,13 +472,7 @@ class QuantizationConfig:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | None) -> QuantizationConfig:
-        """Build QuantizationConfig from a raw ``quantization`` mapping; empty/None → disabled.
-
-        Raises:
-            ValueError: If the dict contains keys outside :attr:`KNOWN_KEYS` (typo guard),
-                a ``ptq``/``qat`` block is present under the wrong mode, or
-                ``default_precision`` / ``calibration`` hold an unknown value.
-        """
+        """Build QuantizationConfig from a raw ``quantization`` mapping; empty/None → disabled."""
         if not raw:
             return cls()
         if not isinstance(raw, Mapping):
@@ -604,12 +520,7 @@ class QuantizationConfig:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Raw mapping equivalent (round-trips through :meth:`from_dict`).
-
-        This is what a quantized checkpoint embeds, so a deploy/test run can rebuild the
-        identical quantized tree from the checkpoint alone — without the Hydra
-        ``quantization`` section that produced it.
-        """
+        """Raw mapping equivalent (round-trips through :meth:`from_dict`); checkpoints embed it."""
         return {
             "enabled": self.enabled,
             "mode": self.mode,

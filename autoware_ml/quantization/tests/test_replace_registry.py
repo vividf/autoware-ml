@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The ReplaceModule transform on modelopt's registry: in-place conversion, descriptors,
-state_dict layout, fake-quant numerics, and ONNX Q/DQ emission."""
+"""Unit tests for converting modules in place to modelopt's quantized classes."""
 
 from __future__ import annotations
 
@@ -69,7 +68,6 @@ class TestReplaceOnRegistry:
         net = _Net().eval()
         conv, up, linear = net.conv, net.up, net.linear
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
-        # Same objects, patched class; still instances of their torch base classes.
         assert net.conv is conv and net.up is up and net.linear is linear
         assert isinstance(net.conv, nn.Conv2d) and isinstance(net.linear, nn.Linear)
         assert type(net.conv).__name__ == "QuantConv2d"
@@ -79,20 +77,17 @@ class TestReplaceOnRegistry:
     def test_descriptors_follow_the_framework_tables(self):
         net = _Net().eval()
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
-        # INT8 activations: per-tensor histogram; conv weights per-channel, transposed per-tensor,
-        # linear per-row.
         assert net.conv.input_quantizer._calibrator.__class__.__name__ == "HistogramCalibrator"
         assert net.conv.input_quantizer.axis is None
         assert net.conv.weight_quantizer.axis == 0
         assert net.up.weight_quantizer.axis is None
         assert net.linear.weight_quantizer.axis == 0
-        # The activation calibrator kind is the config's choice.
         net2 = _Net().eval()
         replace_quantizable_modules(
             net2, kinds=("conv",), precision=Precision.INT8, calibrator="max"
         )
         assert net2.conv.input_quantizer._calibrator.__class__.__name__ == "MaxCalibrator"
-        # FP8: E4M3, per-tensor everywhere, max calibration regardless of the request.
+        # FP8 (E4M3) always calibrates with max, whatever the request.
         net3 = _Net().eval()
         replace_quantizable_modules(
             net3, kinds=("linear",), precision=Precision.FP8, calibrator="histogram"
@@ -141,7 +136,6 @@ class TestReplaceOnRegistry:
             h = _fq(h.mean((2, 3)), net.linear.input_quantizer)
             want = F.linear(h, _fq(ref.linear.weight, net.linear.weight_quantizer), ref.linear.bias)
         assert torch.equal(got, want)
-        # Weight quantization happens inside forward only; module.weight reads clean.
         assert torch.equal(net.conv.weight, ref.conv.weight)
 
     def test_skip_names_and_kinds_are_honored(self):

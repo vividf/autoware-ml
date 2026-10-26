@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Loading a self-describing quantized checkpoint into a freshly built model.
-
-The loader rebuilds the *identical* quantized module tree the quantize stage built
-— from the config embedded in the checkpoint, via the model's declared rules
-(``QuantizationPlan.for_model``) — verifies it against the embedded placement record, and
-only then loads the weights, so the calibrated ``state_dict`` lines up by construction.
-It never branches on ``mode``: a QAT checkpoint loads exactly like a PTQ one.
-"""
+"""Load checkpoints into a freshly built model, rebuilding the tree of a quantized one."""
 
 from __future__ import annotations
 
@@ -45,23 +38,12 @@ def _load_checkpoints_into_model(
     weight_paths: str | Path | Sequence[str | Path],
     map_location: str | torch.device,
 ) -> set[str]:
-    """Load checkpoint(s) into a model whose quantized module tree is already prepared.
+    """Load checkpoints into an already prepared quantized tree and return the keys loaded.
 
-    NOTE: the checkpoint is loaded with a raw ``load_state_dict(strict=False)``, not
-    ``apply_matching_weights``: an uncalibrated ``TensorQuantizer`` has no ``_amax``
-    buffer yet, so the matching-weights key pre-filter would silently drop every
-    calibrated ``_amax`` from the checkpoint. modelopt's (patched)
-    ``_load_from_state_dict`` creates the buffer on load instead
-    (:mod:`autoware_ml.quantization.core.modelopt`).
-
-    Args:
-        model: Model already prepared by the shared quantization plan.
-        weight_paths: One checkpoint path or a sequence of them.
-        map_location: Device to map the loaded tensors to.
-
-    Returns:
-        The set of state_dict keys actually loaded into the model (coverage policy is
-        the caller's).
+    Not ``apply_matching_weights``, whose key pre-filter would drop every calibrated
+    ``_amax``: a fresh ``TensorQuantizer`` has no ``_amax`` buffer yet. The patched
+    ``_load_from_state_dict`` (:mod:`autoware_ml.quantization.core.modelopt`) creates the
+    buffers on load.
     """
     if isinstance(weight_paths, (str, Path)):
         weight_paths = [weight_paths]
@@ -91,31 +73,10 @@ def load_quantized_model(
     *,
     enforce_full_coverage: bool = True,
 ) -> torch.nn.Module:
-    """Rebuild the quantized tree described by ``description`` and load the weights.
+    """Rebuild the quantized tree of ``description`` in a freshly built model and load the weights.
 
-    Steps (mirroring the quantize stage, so state_dict keys match exactly):
-
-    1. ``QuantizationPlan.for_model(model, description.config).prepare(model)`` — the SAME
-       plan the quantize stage built (BN fuse + Q/DQ insert), recording every placement.
-    2. Verify the rebuilt placement record against the checkpoint's embedded one — tree
-       drift is a hard failure here instead of a silent weight mis-map.
-    3. Load the checkpoint(s) with ``load_state_dict(strict=False)`` (see
-       :func:`_load_checkpoints_into_model`) and enforce full key coverage.
-    4. Move to ``device`` (the calibrated scales are buffers and move with the model) and
-       disable the quantizers inside the ``skip_quantize`` subtrees — the same shared
-       loop the quantize stage ran.
-    5. Validate the remaining (enabled) quantizer amax values (TensorRT requires
-       positive finite scales). modelopt's ``TensorQuantizer`` emits Q/DQ natively on
-       ONNX export; nothing to configure.
-
-    Args:
-        model: Freshly built model with NO weights loaded yet.
-        weight_paths: Checkpoint path(s); exactly one carries the quantization payload.
-        description: The quantized checkpoint's embedded description.
-        device: Target device.
-
-    Returns:
-        The model, quantized-tree-rebuilt, weights loaded, in eval mode on ``device``.
+    The rebuilt placement record must match the embedded one. Returns the model in eval mode
+    on ``device``.
     """
     config = description.config
     logger.info(
@@ -148,8 +109,7 @@ def load_quantized_model(
 
     model.to(device)
     model.eval()
-    # Disable BEFORE validating: a skip_quantize quantizer legitimately carries amax=None
-    # and must not fail validation (disabled quantizers are skipped).
+    # Disable first: skip_quantize quantizers carry amax=None, and validation skips disabled ones.
     disable_quantizers_in(model, skip_layers)
     validate_quantizer_amax(model)
 
@@ -169,21 +129,11 @@ def load_model_weights(
 ) -> None:
     """Load ``--weights`` into a freshly built model, quantized or not.
 
-    The one entry point ``build_model`` calls: when exactly one of the
-    checkpoints carries an embedded quantization description, the identical quantized
-    module tree is rebuilt from it before the weights load
-    (:func:`load_quantized_model`); otherwise the plain
-    :func:`~autoware_ml.utils.checkpoints.apply_matching_weights` runs as before. Callers
-    never read a ``quantization`` config section — an INT8 checkpoint deploys and scores
-    exactly like an FP one.
-
-    ``skip_mismatched_shapes`` is the plain loader's switch (a quantized checkpoint must
-    match the rebuilt tree exactly, so it is refused there); ``allow_quantized=False``
-    refuses a quantized checkpoint altogether, for a stage that needs the FP model.
-
-    Raises:
-        ValueError: If a quantized checkpoint is given with ``allow_quantized=False`` or
-            with ``skip_mismatched_shapes=True``.
+    A quantized checkpoint goes through :func:`load_quantized_model`, any other through
+    :func:`~autoware_ml.utils.checkpoints.apply_matching_weights`. ``allow_quantized=False``
+    refuses a quantized checkpoint, for a stage that needs the FP model, and
+    ``skip_mismatched_shapes`` applies to FP checkpoints only: a quantized one must match its
+    rebuilt tree exactly.
     """
     from autoware_ml.quantization.checkpoint import find_quantization
     from autoware_ml.utils.checkpoints import apply_matching_weights

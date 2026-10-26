@@ -12,15 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical tests for Conv+BN fusion — the highest-risk math in the package.
-
-Asserts ``fused(x) ≈ bn(conv(x))`` for every fusion ``utils/bn_fusion.py`` implements
-(Conv1d+BN1d, Conv2d+BN2d, ConvTranspose2d+BN2d, Linear+BN1d), with the
-ConvTranspose2d dim-1 scaling and the bias formula covered explicitly.
-
-``utils.bn_fusion`` is pure torch — these tests run WITHOUT nvidia-modelopt and must
-never skip (the module is imported directly, bypassing any backend-gated API).
-"""
+"""Unit tests for the numerics of Conv+BN folding."""
 
 from __future__ import annotations
 
@@ -36,7 +28,6 @@ _ATOL = 1e-5
 
 
 def _randomized_bn(bn: nn.Module, seed: int) -> nn.Module:
-    """Give the BN non-trivial affine parameters and running statistics."""
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         bn.weight.copy_(0.5 + torch.rand(bn.num_features, generator=generator))
@@ -47,7 +38,6 @@ def _randomized_bn(bn: nn.Module, seed: int) -> nn.Module:
 
 
 def _assert_fusion_matches(model: nn.Sequential, x: torch.Tensor) -> None:
-    """Assert the fused model reproduces the original conv→bn output on ``x``."""
     model.eval()
     with torch.no_grad():
         reference = model(x)
@@ -105,15 +95,9 @@ class TestFusionNumerics:
 
 
 def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
-    """BN folding must reach models built from custom containers.
-
-    PTv3 composes its blocks in ``PointSequential``, which registers children under
-    numeric names but implements no ``__setitem__``; folding used to crash there.
-    """
+    """PTv3's ``PointSequential`` names its children by index but has no ``__setitem__``."""
 
     class NumericContainer(nn.Module):
-        """A container with numeric child names and no ``__getitem__``/``__setitem__``."""
-
         applies_children_in_order = True  # what PointSequential declares
 
         def __init__(self, *children: nn.Module) -> None:
@@ -144,8 +128,6 @@ def test_bn_replacement_works_in_a_container_without_item_assignment() -> None:
 
 
 class _ReluBetween(nn.Module):
-    """Registers conv then bn side by side, but computes ``bn(relu(conv(x)))``."""
-
     def __init__(self) -> None:
         super().__init__()
         self.conv = nn.Conv2d(3, 4, 1)
@@ -156,8 +138,6 @@ class _ReluBetween(nn.Module):
 
 
 class _DeclaredBlock(nn.Module):
-    """A custom block that states its dataflow, like ConvModule / PFNLayer do."""
-
     bn_fusion_pairs = (("conv", "norm"),)
 
     def __init__(self, in_channels: int = 3) -> None:
@@ -178,8 +158,7 @@ def _randomize_bn(bn: nn.Module) -> None:
 
 
 def test_adjacent_registration_alone_does_not_authorize_folding(caplog) -> None:
-    """``bn(relu(conv(x)))`` registers conv and bn side by side; folding would move the BN
-    before the ReLU. An undeclared parent is left alone and named in a warning."""
+    """Folding ``bn(relu(conv(x)))`` would move the BN before the ReLU."""
 
     torch.manual_seed(0)
     model = _ReluBetween().eval()

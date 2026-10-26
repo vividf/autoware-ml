@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for skip_quantize glob expansion (subtree semantics, zero-match error)."""
+"""Unit tests for ``skip_quantize`` glob expansion."""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ class TestExpandSkipQuantize:
     def test_bare_name_expands_to_subtree(self):
         skip = expand_skip_quantize(_tiny_model(), ["pts_voxel_encoder"], log=False)
         assert "pts_voxel_encoder" in skip
-        # Descendants are materialized so tower-root entries actually skip the tower.
         assert "pts_voxel_encoder.0" in skip
 
     def test_glob_pattern_matches(self):

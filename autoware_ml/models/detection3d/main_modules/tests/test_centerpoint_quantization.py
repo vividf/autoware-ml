@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Same-plan-same-tree parity of CenterPoint quantization.
-
-The invariant every quantization stage relies on: the PTQ producer and the deploy / test
-loader build the quantized module tree by calling the model's one
-``QuantizationPlan.for_model`` — so two independently prepared models must have identical
-state_dict key sets, and a producer state_dict must load into a loader-prepared tree with
-``strict=True``. Requires nvidia-modelopt (skipped otherwise).
-"""
+"""Unit tests for CenterPoint quantization."""
 
 from __future__ import annotations
 
@@ -45,10 +38,8 @@ _CONFIG = QuantizationConfig.from_dict(
 
 
 def _build_model():
-    """The CenterPoint of the model tests (a small detector on a 16x16 canvas)."""
-    # Imported here, not at module level: pytest collects every unittest.TestCase it finds
-    # in a module, and a second run of the model tests here would pick up the ModelOpt
-    # module registry the quantization tests leave patched.
+    # Imported here: at module level pytest would collect the model tests a second time, and
+    # they would run with the ModelOpt module registry the quantization tests leave patched.
     from autoware_ml.models.detection3d.main_modules.tests.test_centerpoint import (
         TestCenterPointDetection3DModel,
     )

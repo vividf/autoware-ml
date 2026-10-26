@@ -429,11 +429,11 @@ def quantize(
 ) -> None:
     """Quantize a trained model into a self-describing INT8 / FP8 checkpoint.
 
-    Post-training quantization calibrates the model's quantizers on the validation
-    split and writes ``ptq.ckpt``, which embeds its own quantization description so
-    ``deploy`` and ``test`` take it like any other ``--weights`` — no quantization
-    config needed downstream. ``quantization.dry_run=true`` prints the precision
-    placement table without weights, data or a GPU.
+    Post-training quantization calibrates the model's quantizers on the validation split
+    and writes ``ptq.ckpt``. The checkpoint describes its own quantization, so ``deploy``
+    and ``test`` take it as ``--weights`` without a ``quantization`` config section.
+    ``quantization.dry_run=true`` prints the precision placement table without weights,
+    data or a GPU.
 
     Args:
         ctx: Typer context containing additional Hydra overrides.

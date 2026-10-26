@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-kind precision in QuantRules: mixed INT8/FP8 trees, and record compatibility
-with the single-precision checkpoints that predate the feature."""
+"""Unit tests for per-kind precision in ``QuantRules``."""
 
 from __future__ import annotations
 
@@ -54,7 +53,6 @@ def test_mapping_rules_carry_per_kind_precision() -> None:
     rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}})
     resolved = rules.resolved_kinds("body", Precision.INT8)
     assert resolved == {"conv": Precision.INT8, "linear": Precision.FP8}
-    # None follows the default.
     rules = QuantRules(quantize_submodules={"body": {"conv": None}})
     assert rules.resolved_kinds("body", Precision.FP8) == {"conv": Precision.FP8}
 
@@ -84,13 +82,7 @@ def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
 
 
 def test_attention_out_proj_is_never_replaced() -> None:
-    """``nn.MultiheadAttention.out_proj`` must not become a QuantLinear.
-
-    Its forward is bypassed by the attention fast path (``F.multi_head_attention_forward``
-    reads ``.weight`` directly), so a quantizer there never collects calibration data and
-    silently vanishes from any export that rebuilds the attention module. A plain Linear
-    sibling in the same subtree still quantizes.
-    """
+    """The attention forward reads ``out_proj.weight`` directly; a quantizer would never run."""
 
     class _AttnBody(nn.Module):
         def __init__(self) -> None:
@@ -119,8 +111,6 @@ def test_attention_out_proj_is_never_replaced() -> None:
 
 
 def test_default_precision_records_stay_identical_to_the_pre_feature_format() -> None:
-    """Single-precision trees must produce the exact detail strings existing
-    checkpoints embed, or every deployed PTQ checkpoint would fail verify_matches."""
     model = _Model().eval()
     rules = QuantRules(quantize_submodules={"body": ("conv", "linear")})
     plan = QuantizationPlan(rules=rules, config=_config())

@@ -14,8 +14,7 @@
 
 """Quantizer state operations: enable/disable, amax validation, status reporting.
 
-Everything here inspects or toggles the ``TensorQuantizer`` modules of an already
-prepared tree — nothing changes ``state_dict`` keys.
+None of them changes ``state_dict`` keys.
 """
 
 from __future__ import annotations
@@ -32,16 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def set_quantizers_enabled(module: nn.Module, enabled: bool) -> int:
-    """Enable or disable every ``TensorQuantizer`` under ``module`` (itself included).
-
-    Args:
-        module: Model or submodule whose quantizers to toggle.
-        enabled: ``False`` disables fake-quant (the quantizers pass through),
-            ``True`` re-enables it.
-
-    Returns:
-        Number of quantizers toggled.
-    """
+    """Enable or disable every ``TensorQuantizer`` under ``module`` and return how many."""
     count = 0
     for _name, submodule in module.named_modules():
         if isinstance(submodule, TensorQuantizer):
@@ -52,12 +42,7 @@ def set_quantizers_enabled(module: nn.Module, enabled: bool) -> int:
 
 @contextmanager
 def quantizers_disabled(model: nn.Module):
-    """Context manager: run with every quantizer under ``model`` disabled, then re-enable.
-
-    Example:
-        >>> with quantizers_disabled(model):
-        ...     fp_output = model(batch)  # FP forward through the quantized tree
-    """
+    """Disable every quantizer under ``model`` inside the block, then enable all of them."""
     set_quantizers_enabled(model, False)
     try:
         yield model
@@ -66,21 +51,11 @@ def quantizers_disabled(model: nn.Module):
 
 
 def disable_quantizers_in(model: nn.Module, module_names: Iterable[str]) -> int:
-    """Disable every ``TensorQuantizer`` inside the named modules — the ``skip_quantize`` disable loop.
+    """Disable the quantizers under each named module and return how many modules were found.
 
-    The single spelling of "turn the ``skip_quantize`` subtrees off after calibration / checkpoint load,"
-    shared by the quantize stage and the deploy loaders. ``module_names`` is the concrete
-    set produced by :func:`~autoware_ml.quantization.core.replace.expand_skip_quantize` (matched modules
-    plus all descendants), so an exact ``named_modules()`` lookup per name is sufficient;
-    :func:`set_quantizers_enabled` then recursively disables the quantizers under each hit.
-
-    Args:
-        model: Model whose quantizers to disable.
-        module_names: Concrete dotted module names (typically from ``expand_skip_quantize``).
-
-    Returns:
-        Number of named modules found and disabled. Names not present in the model are logged as
-        warnings and skipped (an expanded set can never miss, so a miss means stale input).
+    ``module_names`` are exact names, such as the output of
+    :func:`~autoware_ml.quantization.core.replace.expand_skip_quantize`; a missing one is
+    logged and skipped.
     """
     modules = dict(model.named_modules())
     count = 0
@@ -97,23 +72,11 @@ def disable_quantizers_in(model: nn.Module, module_names: Iterable[str]) -> int:
 
 
 def validate_quantizer_amax(model: nn.Module) -> None:
-    """Validate every enabled ``TensorQuantizer``'s ``amax`` (TensorRT needs positive finite scales).
+    """Check the ``amax`` of every enabled quantizer; TensorRT needs positive finite scales.
 
-    The one amax health policy, shared by the PTQ producer, the QAT callback, and the
-    checkpoint loader:
-
-    - ``None`` (never calibrated) or non-finite (NaN/Inf — poisoned calibration input) is
-      fatal: fake-quant would emit NaN and an exported graph would bake invalid scales.
-    - A finite but non-positive amax (a genuinely dead / all-zero channel) is clamped to a
-      small epsilon and warned: that channel quantizes to ~0 either way, and TensorRT
-      rejects a zero scale.
-
-    Disabled quantizers are skipped: they are not used in forward and may legitimately
-    carry ``amax=None`` (e.g. inside ``skip_quantize`` subtrees, or modelopt's always-off
-    ``output_quantizer``).
-
-    Raises:
-        RuntimeError: If any enabled quantizer has ``amax`` that is ``None`` or non-finite.
+    A missing or non-finite ``amax`` raises a ``RuntimeError``. A non-positive one (a dead
+    channel) is clamped to 1e-8 with a warning: the channel quantizes to zero either way, and
+    TensorRT rejects a zero scale. Disabled quantizers, which may have no ``amax``, are skipped.
     """
     fatal: list[tuple[str, str]] = []
     clamped: list[str] = []
@@ -149,14 +112,7 @@ def validate_quantizer_amax(model: nn.Module) -> None:
 
 
 def print_quantizer_status(model: nn.Module) -> None:
-    """Log the status of all TensorQuantizers in the model.
-
-    One INFO summary line (enabled / disabled / calibrated counts); the per-quantizer
-    name, status, and amax details are emitted at DEBUG for debugging placement.
-
-    Args:
-        model: PyTorch model
-    """
+    """Log the enabled, disabled and calibrated quantizer counts, and each quantizer at DEBUG."""
     enabled = disabled = calibrated = 0
     for name, module in model.named_modules():
         if not isinstance(module, TensorQuantizer):
@@ -190,11 +146,7 @@ def print_quantizer_status(model: nn.Module) -> None:
 
 
 def count_quantizers(model: nn.Module) -> dict:
-    """Count enabled and disabled quantizers in the model.
-
-    Returns:
-        Dict with 'enabled', 'disabled', and 'total' counts
-    """
+    """Count the enabled and disabled quantizers in the model."""
     enabled = 0
     disabled = 0
     for _name, module in model.named_modules():

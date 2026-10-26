@@ -14,10 +14,8 @@
 
 """A model's quantization declaration.
 
-This module is what a model imports to state its rules. It depends on nothing but the
-typed config, so declaring rules costs a model nothing at import time — the engine
-(nvidia-modelopt, :mod:`autoware_ml.quantization.core`) is first imported by
-:mod:`autoware_ml.quantization.plan`, when a plan is actually built.
+Every model imports this module, so it must not import modelopt or
+:mod:`autoware_ml.quantization.core`; those load with :mod:`autoware_ml.quantization.plan`.
 """
 
 from __future__ import annotations
@@ -32,22 +30,14 @@ from autoware_ml.quantization.config import VALID_MODULE_KINDS, Precision
 class QuantRules:
     """A model's quantization declaration: which submodules carry which quantizable kinds.
 
-    Per-submodule module kinds are architecture facts and belong in the model's
-    rules, not in config; config (``skip_quantize``) only subtracts from what the
-    rules declare.
+    The kinds are architecture facts, so they live in code; the config's ``skip_quantize``
+    only subtracts from them.
 
     Attributes:
-        quantize_submodules: Dotted submodule path of the model -> module kinds to
-            replace inside it. Two spellings:
-
-            - ``("conv", "linear")`` — every kind at the config's
-              ``default_precision`` (the common case);
-            - ``{"conv": "int8", "linear": "fp8"}`` — per-kind precision, for a model
-              whose layer families tolerate different precisions. A kind mapped to
-              ``None`` follows ``default_precision``.
-
-            A declared submodule the model does not have is an error (the rules name
-            the module tree as it is).
+        quantize_submodules: Dotted submodule path -> module kinds to replace inside it,
+            either ``("conv", "linear")`` at the config's ``default_precision``, or
+            ``{"conv": "int8", "linear": "fp8"}`` with a precision per kind (``None`` for
+            the default). A path the model does not have is an error.
     """
 
     quantize_submodules: Mapping[str, tuple[str, ...] | Mapping[str, str | None]]
@@ -68,12 +58,7 @@ class QuantRules:
     def resolved_kinds(
         self, submodule_name: str, default_precision: Precision
     ) -> Mapping[str, Precision]:
-        """The submodule's kinds with every precision resolved.
-
-        Args:
-            submodule_name: Key of :attr:`quantize_submodules`.
-            default_precision: Config precision used for kinds without their own.
-        """
+        """Return the submodule's kinds with their precision, ``default_precision`` if unset."""
         kinds = self.quantize_submodules[submodule_name]
         if isinstance(kinds, Mapping):
             return {
