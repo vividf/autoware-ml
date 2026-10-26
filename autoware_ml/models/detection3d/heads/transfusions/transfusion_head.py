@@ -900,12 +900,11 @@ class TransFusionHead(nn.Module):
 
     @property
     def export_output_names(self) -> tuple[str, ...]:
-        """The :class:`TransFusionHeadOutputs` tensors in the order a graph that exports the
-        raw head outputs emits them: the dense heatmap and the proposal selection first,
-        then the :class:`TransFusionSeparateHeadOutputs` fields in their declared order
-        (``vel`` only with ``use_velocity``). The names are the output fields, not the
-        head's branch keys (``centers``, ``heights``, ...). A graph that decodes inside the
-        export (packed boxes, scores and labels) names its own outputs instead."""
+        """Output names of a graph that exports the raw :class:`TransFusionHeadOutputs`.
+
+        They are the output fields, not the head's branch keys (``centers``, ``heights``, ...).
+        A graph that decodes inside the export names its own outputs.
+        """
         branches = tuple(
             name
             for name in TransFusionSeparateHeadOutputs.model_fields
