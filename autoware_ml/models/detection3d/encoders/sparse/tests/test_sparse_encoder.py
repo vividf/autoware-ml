@@ -120,8 +120,8 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
 
     def test_fold_sparse_encoder_bn_folds_every_pair_into_the_export_copy(self) -> None:
         """
-        Test that the fold leaves the export copy BatchNorm-free with the folded weight and
-        the bias the fold introduces, while the training encoder keeps its BN layers.
+        Test that the export copy gets the folded weight and bias and no BatchNorm, while the
+        original keeps its BatchNorm layers.
         """
         self.encoder.eval()
         export_encoder = deepcopy(self.encoder)
@@ -139,12 +139,10 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
             any(isinstance(module, nn.BatchNorm1d) for module in self.encoder.modules())
         )
         fold_scale = batch_norm.weight / torch.sqrt(batch_norm.running_var + batch_norm.eps)
-        # spconv kernels are (out_channels, *kernel, in_channels), so the per-output-channel
-        # fold scale applies along dim 0.
+        # spconv weights are (out_channels, *kernel, in_channels).
         expected_weight = self.encoder.conv_input[0].weight * fold_scale.view(-1, 1, 1, 1, 1)
         torch.testing.assert_close(export_encoder.conv_input[0].weight, expected_weight)
-        # The bias the fold introduces is beta - mu * fold_scale; a wrapper built without it
-        # would leave the fold half-applied and silently shift every output.
+        # A wrapper built without the folded bias would silently shift every output.
         expected_bias = batch_norm.bias - batch_norm.running_mean * fold_scale
         self.assertIsNotNone(export_encoder.conv_input[0].bias)
         torch.testing.assert_close(
@@ -152,11 +150,7 @@ class TestSparseEncoderPrepareForExport(unittest.TestCase):
         )
 
     def test_fold_sparse_encoder_bn_refuses_to_leave_a_batchnorm(self) -> None:
-        """
-        Test that "the deployed sparse graph has no BatchNormalization node" is enforced: a
-        norm that is not adjacent to its convolution is not paired, and the fold says so
-        instead of leaving the node for a plugin that cannot absorb it.
-        """
+        """Test that the fold raises on a norm that is not adjacent to its convolution."""
         encoder = SparseEncoder(
             in_channels=4, sparse_shape=[16, 16, 9], dense_output_shapes=[2, 2, 2]
         )

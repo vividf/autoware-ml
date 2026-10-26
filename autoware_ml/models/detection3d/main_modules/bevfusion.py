@@ -591,9 +591,8 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         """Return an export-ready model copy with exportable submodules.
 
         Args:
-            fold_sparse_bn: Whether to fold the sparse encoder's BatchNorm layers into its
-                convolutions before the exportable wrappers are built, for a graph whose
-                sparse convolutions become plugin nodes (which absorb no BatchNormalization).
+            fold_sparse_bn: Fold the sparse encoder's BatchNorm into its convolutions, for a
+                graph whose sparse convolutions become plugin nodes.
 
         Returns:
             Deep copy of the model with the sparse middle encoder and the

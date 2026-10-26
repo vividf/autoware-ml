@@ -107,33 +107,20 @@ def _convert_sparse_convolution(module: nn.Module, do_sort: bool) -> nn.Module:
 def fold_sparse_encoder_bn(encoder: nn.Module) -> int:
     """Fold every adjacent (sparse convolution, BatchNorm1d) pair of an export copy in place.
 
-    Inference-identity rewrite for the plugin graph: a plugin node has no BatchNormalization
-    to fuse at engine build (a dense graph keeps its BN nodes for the runtime to fuse), so
-    the deployed sparse graph has to carry the folded weights. Call it on an eval-mode
-    copy of the encoder *before* :meth:`SparseEncoder.prepare_for_export`, which builds a
-    wrapper with the bias the fold introduces; ``prepare_for_export`` itself keeps the
-    weights as trained.
-
-    The fold pairs a convolution with the BatchNorm declared *next to* it. Insert anything
-    between the two, or hang the norm one container deeper, and the pair stops matching;
-    rather than silently leaving a BatchNormalization node no plugin absorbs, the fold
-    refuses the encoder.
-
-    Args:
-        encoder: Export copy of the encoder, already in eval mode, with native spconv layers.
+    TensorRT fuses the BatchNorm of a dense graph itself but cannot fuse one into a plugin
+    node, so the plugin graph has to carry folded weights. Call it on an eval-mode copy
+    before :meth:`SparseEncoder.prepare_for_export`, which then builds the wrappers with the
+    bias the fold introduces.
 
     Returns:
         Number of folded pairs.
 
     Raises:
-        RuntimeError: If a BatchNorm1d layer is left after the fold.
+        RuntimeError: If a BatchNorm1d is left, i.e. a norm that does not directly follow
+            its convolution in the same container.
     """
     fused = 0
     for parent in list(encoder.modules()):
-        # `children` is a snapshot, so replacing a pair's members while scanning is safe:
-        # the folded convolution takes the left slot and an Identity the right one, and a
-        # folded convolution is never followed by another BatchNorm, so the overlapping
-        # pairs this walk produces cannot fold anything twice.
         children = list(parent.named_children())
         for (left_name, left), (right_name, right) in pairwise(children):
             if isinstance(left, SparseConvolution) and isinstance(right, nn.BatchNorm1d):
@@ -222,15 +209,11 @@ class SparseEncoder(BEVMiddleEncoder):
         dense_output_shapes: Dense output shape ``(Y, X, Z)`` after ``conv_out``.
         norm_eps: BatchNorm epsilon.
         norm_momentum: BatchNorm momentum.
-        export_do_sort: Whether the deployed graph's pair-mask generation argsorts its
-            result. Sorting improves memory locality without changing the pairing math,
-            so it is purely a latency trade-off and the answer is hardware-specific:
-            measured on this project's Blackwell workstation (BEVFusion j6gen2, 100
-            frames, FP16 dense + FP32 sparse), sorting is 0.44 ms/frame FASTER
-            (6.70 vs 7.13 ms), which is why it defaults on. Turning it off pays on other
-            targets — the reference deployment does exactly that — so measure before
-            changing it. Applies only to the export copy
-            (:meth:`prepare_for_export`); training always uses spconv's own default.
+        export_do_sort: Whether the exported pair-mask generation argsorts its result.
+            Sorting only changes memory locality, so this is a per-target latency choice:
+            on a Blackwell workstation (BEVFusion j6gen2, 100 frames, FP16 dense + FP32
+            sparse) sorting is faster, 6.70 vs 7.13 ms/frame, while other targets can be
+            faster without it. Export copy only; training uses spconv's default.
     """
 
     def __init__(
@@ -324,9 +307,7 @@ class SparseEncoder(BEVMiddleEncoder):
         """Return the expected ``(height, width)`` of the dense BEV output."""
         return self.dense_output_shapes[0], self.dense_output_shapes[1]
 
-    #: Column order the convolutions run on: ``[batch, y, x, z]``, matching ``sparse_shape``
-    #: ``(Y, X, Z)``. Voxel coordinates arrive as ``[batch, z, y, x]``; :meth:`conv_coords`
-    #: applies this, so the convention is stated exactly once.
+    #: Voxel columns ``[batch, z, y, x]`` -> ``[batch, y, x, z]``, the ``sparse_shape`` order.
     CONV_COORDS_PERMUTATION: tuple[int, ...] = (0, 2, 3, 1)
 
     def conv_coords(self, coords: torch.Tensor) -> torch.Tensor:
@@ -379,9 +360,8 @@ class SparseEncoder(BEVMiddleEncoder):
 
         Returns:
             Deep copy of the encoder with native spconv layers replaced by the
-            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`, with the
-            weights as they are (a plugin graph folds its BatchNorm layers first, see
-            :func:`fold_sparse_encoder_bn`).
+            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`. BatchNorm is not
+            folded (see :func:`fold_sparse_encoder_bn`).
         """
         encoder = deepcopy(self)
         _replace_sparse_convolutions(encoder, self.export_do_sort)

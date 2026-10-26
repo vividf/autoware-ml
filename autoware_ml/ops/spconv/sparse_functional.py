@@ -14,19 +14,14 @@
 
 """Autograd bridges and ONNX symbolics for deployment-aware sparse ops.
 
-Export-only: the eager path mirrors spconv's implicit-GEMM execution so a traced
-graph matches what the engine will do, and anything outside that subset raises rather
-than silently diverging (see :func:`_validate_implicit_gemm_export_arguments`).
+Used by the export copy only. The eager path mirrors spconv's implicit-GEMM execution so a
+traced graph matches the engine, and arguments outside that subset raise instead of
+diverging (:func:`_validate_implicit_gemm_export_arguments`).
 
-These bridges subclass spconv internals (``SpconvOps``, ``ConvGemmOps``,
-``AllocKeys``, ``TorchAllocator``) and emit the operator set the runtime plugin
-consumes, so they are pinned to two external contracts:
-
-- **spconv 2.3.6** (``spconv-cu120`` in ``pyproject.toml``). A version bump can move or
-  rename any internal used here; treat it as a review item, not a routine upgrade.
-- **the plugin's attribute set** (autoware_universe
-  ``perception/autoware_tensorrt_plugins``), pinned by
-  ``autoware_ml/ops/tests/test_sparse_graph_contract.py``.
+The bridges subclass internals of spconv 2.3.6 (pinned in ``pyproject.toml``), so a spconv
+upgrade needs review. The emitted attributes are the runtime plugin's contract
+(autoware_universe ``perception/autoware_tensorrt_plugins``), pinned by
+``test_sparse_graph_contract.py``.
 """
 
 from collections.abc import Sequence
@@ -147,10 +142,7 @@ def _no_gradients(count: int) -> tuple[None, ...]:
 
 
 def _gemm_activation_to_onnx_int(act_type: Any) -> int:
-    """Map a ``tv.gemm.Activation`` to the integer the runtime plugin expects.
-
-    The plugin mirrors cumm's activation enum (0 = none, 1 = ReLU).
-    """
+    """Map a ``tv.gemm.Activation`` to the plugin's integer ``act_type``."""
     if act_type is None:
         return 0
     if isinstance(act_type, int):
@@ -466,8 +458,7 @@ class GetIndicePairsImplicitGemm(Function):
             subm_i=subm,
             transpose_i=transpose,
             is_train_i=is_train,
-            # The runtime plugin reads do_sort from the graph; omitting it puts the plugin
-            # on its legacy 11-field path, which warns and assumes sorting is on.
+            # Without do_sort the plugin takes its legacy path, which warns and sorts.
             do_sort_i=int(do_sort),
             outputs=5,
         )

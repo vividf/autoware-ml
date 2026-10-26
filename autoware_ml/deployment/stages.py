@@ -128,11 +128,10 @@ class GraphStage:
         onnx_dynamic_axes: Axes dynamic by construction, ``{tensor: {dim: name}}``. They
             become the spec's ``dynamic_axes``; the module's config ``dynamic_axes`` apply
             only when the stage declares none.
-        onnx_transforms: Rewrites applied to this stage's exported ``.onnx``, in order,
-            each taking and returning the file path. For fusions intrinsic to the
-            deployed form of this graph — folding a bias and an activation into a
-            runtime plugin node, say — not for user-configurable graph surgery, which
-            belongs in ``deploy.onnx.modify_graph``.
+        onnx_transforms: Rewrites of the exported ``.onnx``, in order, each taking and
+            returning the file path: fusions the deployed graph needs, such as folding a
+            bias and an activation into a plugin node. Configurable surgery belongs in
+            ``deploy.onnx.modify_graph``.
     """
 
     name: str

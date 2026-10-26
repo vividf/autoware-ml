@@ -77,10 +77,8 @@ deploy:
           attention_node_name_substring: /bbox_head/decoder
   tensorrt:
     enabled: false
-    # The encoder and head graphs carry autoware:: plugin ops (the cpe sparse
-    # convolutions); TensorRT loads their library before parsing (built by the image, see
-    # docker/tensorrt_plugins/README.md). ONNX Runtime cannot run them, so the stage graph
-    # falls back to PyTorch on that backend.
+    # Implements the autoware:: sparse-convolution ops (the cpe layers) of the encoder and
+    # head graphs; built by the image (docker/tensorrt_plugins/README.md).
     plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
 
 model:

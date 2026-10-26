@@ -12,20 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export fusion for exported sparse-convolution graphs.
+"""Fold the bias ``Add`` and ``Relu`` after each ``autoware::ImplicitGemm`` into the node.
 
-TensorRT cannot fuse a standard ONNX operator into a plugin node, so a traced sparse
-encoder leaves the per-channel bias and the block's ReLU as separate ``Add`` and ``Relu``
-nodes after every ``autoware::ImplicitGemm``. The runtime plugin computes both itself —
-an optional sixth input carries the bias and ``act_type`` selects the activation — so
-this module rewrites the exported graph into that form.
-
-The PyTorch side is deliberately untouched: it keeps the explicit bias add and the
-block's ReLU, and the exported artifact is the only thing that changes.
-
-Order matters. The activation can only be folded into the plugin once the bias is folded
-too, because the plugin applies the activation *after* its bias add, while the traced
-graph adds the bias after the GEMM: ``relu(gemm(x) + b) != relu(gemm(x)) + b``.
+TensorRT cannot fuse standard ops into a plugin node, but the plugin applies a bias
+(optional sixth input) and an activation (``act_type``) itself. Only the exported graph
+changes; the PyTorch modules keep the explicit bias add and ReLU.
 """
 
 from __future__ import annotations
@@ -65,15 +56,12 @@ def _set_attribute(node: onnx.NodeProto, name: str, value: int) -> None:
 
 
 def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int]:
-    """Fold trailing bias adds and ReLUs into ``autoware::ImplicitGemm`` nodes.
+    """Fold trailing bias adds and ReLUs into ``autoware::ImplicitGemm`` nodes, in place.
 
-    Rewrites each ``ImplicitGemm -> Add(bias initializer) [-> Relu]`` chain, where every
-    intermediate value feeds only the next node in the chain, into a single
-    ``ImplicitGemm`` carrying the bias as its sixth input and, when a ReLU was folded,
-    ``act_type = ACT_RELU``.
-
-    Args:
-        model: Exported graph, modified in place.
+    Each ``ImplicitGemm -> Add(bias initializer) [-> Relu]`` chain whose intermediate values
+    feed only the next node becomes one ``ImplicitGemm`` with the bias as its sixth input and,
+    with the ReLU, ``act_type = ACT_RELU``. Only this order folds: the plugin computes
+    ``relu(gemm(x) + b)``.
 
     Returns:
         Number of folded biases and number of folded activations.
@@ -105,7 +93,6 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
         if bias is None or len(add.input) != 2:
             continue
 
-        # The bias becomes the plugin's optional sixth input.
         gemm.input.append(bias)
         fused_biases += 1
         last, last_output = add, add.output[0]
@@ -122,15 +109,13 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
             removed.append(relu)
             last, last_output = relu, relu.output[0]
 
-        # The plugin now produces what the folded chain produced, so it takes over the
-        # chain's output name and every downstream reader follows unchanged.
+        # Take over the chain's output name so downstream readers stay connected.
         removed.append(add)
         gemm.output[0] = last_output
         del last
 
     if removed:
-        # Identity, not equality: `in` on a protobuf message compares by *value*, so two
-        # structurally identical nodes would remove each other.
+        # By identity: `in` compares protobuf messages by value.
         removed_ids = {id(node) for node in removed}
         kept = [node for node in graph.node if id(node) not in removed_ids]
         del graph.node[:]
@@ -140,16 +125,9 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
 
 
 def fuse_sparse_graph(onnx_path: str | Path) -> Path:
-    """Apply :func:`fuse_implicit_gemm_bias_activation` to an exported ONNX file.
+    """Apply :func:`fuse_implicit_gemm_bias_activation` to an ONNX file in place.
 
-    A no-op for graphs without ``autoware::ImplicitGemm`` nodes, so it is safe to run
-    over any stage.
-
-    Args:
-        onnx_path: Exported graph, rewritten in place.
-
-    Returns:
-        The same path.
+    A no-op for graphs without ``autoware::ImplicitGemm`` nodes. Returns the path.
     """
     onnx_path = Path(onnx_path)
     model = onnx.load(str(onnx_path))
@@ -162,10 +140,8 @@ def fuse_sparse_graph(onnx_path: str | Path) -> Path:
             fused_biases,
             fused_activations,
         )
-    # A plugin node still carrying five inputs was not folded. That is not an error — the
-    # bias Add and the ReLU stay standard ONNX ops, TensorRT builds them and the numbers
-    # are right — but it costs two extra kernels and an output round-trip per block, and
-    # the failure is otherwise invisible. Exporter or graph-shape changes show up here.
+    # An unfolded node is still correct but costs extra kernels per block, and nothing else
+    # would show that the pattern stopped matching the export.
     unfused = sum(
         1
         for node in model.graph.node
