@@ -77,7 +77,7 @@ def export_detection3d_outputs(
     return bbox_pred, score, query_labels[0]
 
 
-# The packed ``bbox_pred`` channel layout of :func:`export_detection3d_outputs`.
+# Channels of the packed bbox_pred, in export_detection3d_outputs order.
 _PACKED_CENTER = slice(0, 2)
 _PACKED_HEIGHT = slice(2, 3)
 _PACKED_DIM = slice(3, 6)
@@ -90,19 +90,15 @@ def decode_packed_detections(
 ) -> ModelPredictions:
     """Turn the deployed graph's packed tensors into the typed detections.
 
-    The inverse of :func:`export_detection3d_outputs` up to the post-processing: the graph
-    already fused the per-proposal score and picked the winning label, so the class scores
-    are re-scattered into the per-class layout the head's post-processing expects, and that
-    post-processing (metric-space decoding, score and range filtering, NMS) is the head's
-    own :meth:`TransFusionHead.decode_proposals`, not a copy of it.
+    The graph has already picked one label and score per proposal, so the score goes back
+    into the per-class layout that :meth:`TransFusionHead.decode_proposals` post-processes.
 
     Args:
-        head: The model's detection head, providing the post-processing.
+        head: The model's detection head.
         outputs: ``bbox_pred`` / ``score`` / ``label_pred`` of one sample.
 
     Returns:
-        The one sample's typed predictions, as :meth:`TransFusionHead.decode_outputs`
-        returns them.
+        The sample's typed predictions, as :meth:`TransFusionHead.decode_outputs` returns them.
     """
     bbox_pred = outputs["bbox_pred"].float()
     scores = outputs["score"].float()

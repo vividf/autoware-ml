@@ -532,7 +532,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             self.model.build_eval_output(self.batch_inputs, empty_outputs)
 
     def test_build_export_specs_keeps_first_sample_voxels_in_runtime_dtypes(self) -> None:
-        """Test that the voxels of the one-sample batch are exported, as ``float32`` and ``int32``."""
+        """Test that the one-sample batch's voxels are exported as ``float32`` and ``int32``."""
         self.model.eval()
         batch_inputs = self._build_single_sample_batch_inputs()
         voxels_data = batch_inputs.voxels_data
@@ -615,9 +615,8 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
 
     def test_stage_graph_keeps_the_runtime_module_and_falls_back_on_onnx(self) -> None:
         """
-        Test that the lidar-only declaration is one glue stage feeding the ``bevfusion_lidar``
-        graph with the runtime's input and output names, and that only ONNX Runtime falls
-        back to PyTorch (it cannot run the sparse plugin ops TensorRT executes).
+        Test that the lidar-only declaration keeps the runtime's graph name and I/O, and that
+        only ONNX Runtime falls back to PyTorch.
         """
         stages = validate_stages(self.model.build_stages())
 
@@ -632,8 +631,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
-        """Test that the single-sample graph refuses a batch of several samples instead of
-        silently exporting the first one."""
+        """Test that a multi-sample batch is refused instead of exporting only its first sample."""
         self.model.eval()
 
         with self.assertRaisesRegex(ValueError, "batch_size=1"):
@@ -649,9 +647,8 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
 
     def test_packed_decode_matches_the_head_on_the_same_outputs(self) -> None:
         """
-        Test that decoding the graph's packed tensors through the head's own post-processing
-        gives the detections the head decodes from its typed outputs, and that the deployed
-        eval output therefore scores like ``build_eval_output``.
+        Test that the packed tensors decode to the head's own detections, so the deployed eval
+        output matches ``build_eval_output``.
         """
         self.model.eval()
         batch_inputs = self._build_single_sample_batch_inputs()
@@ -681,8 +678,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             )
 
     def test_stage_graph_reproduces_the_export_wrapper(self) -> None:
-        """Test that running the stages in PyTorch yields the packed tensors of the exported
-        wrapper on the same batch."""
+        """Test that the stages run in PyTorch reproduce the export wrapper's packed tensors."""
         self.model.eval()
         batch_inputs = self._build_single_sample_batch_inputs()
         stages = self.model.build_stages()
