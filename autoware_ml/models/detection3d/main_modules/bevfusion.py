@@ -142,11 +142,7 @@ class _BEVFusionExportWrapperBase(nn.Module):
 
 
 def _runtime_coors_to_batch_zyx(coors: torch.Tensor) -> torch.Tensor:
-    """Prepend the single-sample batch column to the runtime's ``[z, y, x]`` coordinates.
-
-    The deployed graph's ``coors`` input carries no batch column; the sparse encoder
-    (and the rulebook precompute that feeds it) consumes ``[batch, z, y, x]``.
-    """
+    """Prepend a zero batch column to the graph's batch-less ``[z, y, x]`` ``coors``."""
     batch_column = torch.zeros((coors.shape[0], 1), dtype=coors.dtype, device=coors.device)
     return torch.cat([batch_column, coors], dim=1)
 
@@ -177,10 +173,9 @@ class _BEVFusionLidarExportWrapper(_BEVFusionExportWrapperBase):
             coors: Voxel coordinates in ``(z, y, x)`` order without batch column.
                 Must be in this order to align with autoware.
             num_points_per_voxel: Number of points in each voxel.
-            rulebooks: Rulebooks of the sparse encoder's down-sampling layers, computed by
-                the ``precompute_rulebooks`` glue stage from the same coordinates
-                (:mod:`autoware_ml.ops.spconv.rulebook`); their order is the encoder's
-                down-sampling order. Empty unless the encoder opts in.
+            rulebooks: The ``precompute_rulebooks`` glue stage's tensors, in
+                :func:`~autoware_ml.ops.spconv.rulebook.rulebook_input_names` order; empty
+                unless the encoder precomputes rulebooks.
 
         Returns:
             Tuple of ``bbox_pred``, ``score``, and ``label_pred``.
@@ -463,9 +458,8 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
             multi_task_batch_inputs: ModelBatchInputs containing the voxelized lidar inputs.
             batch_size: Optional explicit batch size.
             image_bev: Optional precomputed image BEV tensor.
-            precomputed_rulebooks: Rulebooks of the sparse encoder's down-sampling layers
-                generated outside the graph (deployment only; see
-                :mod:`autoware_ml.ops.spconv.rulebook`). Passed through to the lidar branch.
+            precomputed_rulebooks: Sparse-encoder rulebooks precomputed for deployment, by
+                indice key.
 
         Returns:
             TransFusion-based detection head outputs for the configured branches.
@@ -630,8 +624,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
 
         export_model = self._prepare_export_model(fold_sparse_bn=True)
         middle_encoder = self.lidar_network.pts_middle_encoder
-        # The export copy's encoder is what the graph runs: its exportable layers carry
-        # the algorithm and sorting the rulebooks must be generated with.
+        # The graph runs the export copy's layers, whose algorithm and sorting the rulebooks need.
         export_encoder = export_model.lidar_network.pts_middle_encoder
         precompute = (
             isinstance(export_encoder, SparseEncoder) and export_encoder.export_precompute_rulebooks
