@@ -679,9 +679,8 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
     @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
     def test_rulebook_precompute_is_an_opt_in_that_adds_graph_inputs(self) -> None:
         """
-        Test that a sparse encoder opting into the rulebook precompute makes the graph take
-        the rulebooks as extra inputs with dynamic axes, in the order of the layers its
-        wrapper holds, and that the metadata transform closes the transforms.
+        Test that opting into the rulebook precompute adds the rulebooks as graph inputs with
+        dynamic axes, in the order of the wrapper's layers, and the metadata transform last.
         """
         model = self._build_rulebook_precompute_model()
 
@@ -696,7 +695,6 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(
             graph.onnx_transforms[-1].keywords["stages"], export_encoder.downsample_stages()
         )
-        # The default stays the plain three-input graph.
         (plain,) = validate_graphs(self.model.eval().deploy_graphs())
         self.assertEqual(plain.inputs, ("voxels", "coors", "num_points_per_voxel"))
         self.assertEqual(set(plain.onnx_dynamic_axes), set(plain.inputs))
@@ -705,8 +703,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         IS_SPCONV_AVAILABLE and torch.cuda.is_available(), "spconv kernels need CUDA"
     )
     def test_precomputed_rulebooks_leave_the_graph_outputs_unchanged(self) -> None:
-        """Test that feeding the graph precomputed rulebooks yields the packed outputs of the
-        plain graph on the same frame: the precompute moves work, not arithmetic."""
+        """Test that precomputed rulebooks leave the packed outputs bit-identical."""
         model = self._build_rulebook_precompute_model()
         batch_inputs = self._build_single_sample_batch_inputs()
 
@@ -726,12 +723,11 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             )
 
     def _build_rulebook_precompute_model(self) -> BEVFusionDetection3DModel:
-        """A lidar-only model whose sparse encoder opts into the rulebook precompute.
+        """Build a lidar-only model whose sparse encoder precomputes rulebooks.
 
-        One submanifold stage, so the only down-sampling layer is ``conv_out``, whose
-        ``(1, 1, 3)`` / stride-2 kernel takes the three z cells to one: the BEV map keeps
-        the 16x16 grid the backbone and head are built for (the scene's voxels all sit at
-        z = 0, within the three cells).
+        One submanifold stage, so ``conv_out`` is the only down-sampling layer; its
+        ``(1, 1, 3)`` kernel collapses the three z cells and keeps the 16x16 BEV grid the
+        backbone and head are built for.
         """
         lidar_network = self._build_lidar_network()
         lidar_network.pts_middle_encoder = SparseEncoder(
