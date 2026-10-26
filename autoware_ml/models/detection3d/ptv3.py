@@ -367,10 +367,9 @@ def build_det3d_head_stage(
     bbox_head: nn.Module,
     output_names: Sequence[str],
 ) -> GraphStage:
-    """The ``ptv3_det3d_head`` graph over the two coarsest encoder stages.
+    """Build the ``ptv3_det3d_head`` graph over the two coarsest encoder stages.
 
-    No plugin op: dense BEV convolutions and the TransFusion head, so every backend runs
-    the artifact. The graph emits the head's tensors under ``output_names``.
+    It has no plugin ops, so every backend runs the artifact.
     """
     stage_count = len(model.encoder.stride) + 1
     output_names = tuple(output_names)
@@ -378,14 +377,12 @@ def build_det3d_head_stage(
         DET3D_HEAD_STAGE,
         module=_PTv3Det3DHeadExportModule(
             bev_neck=deepcopy(bev_neck).eval(),
-            # The dense BEV grid is fixed at export, so the decoder's key positional
-            # encoding is frozen into a constant of the graph.
             bbox_head=bbox_head.prepare_for_export(bev_shape=bev_neck.bev_projector.output_shape),
             output_names=output_names,
         ).eval(),
         inputs=tuple(det3d_head_export_input_names(stage_count)),
-        # The head's ONNX outputs are its TransFusionHeadOutputs tensors under their
-        # names; build_deployed_eval_output rebuilds the typed outputs from them.
+        # Named after the TransFusionHeadOutputs tensors; build_deployed_eval_output
+        # rebuilds the typed outputs by name.
         outputs=output_names,
         onnx_dynamic_axes=det3d_head_export_dynamic_axes(stage_count),
     )
@@ -521,7 +518,7 @@ class PTv3Detection3DModel(PTv3BaseModel):
         return self.bbox_head.decode_outputs(outputs=outputs.detection3d())
 
     def build_stages(self) -> Sequence[Stage]:
-        """``serialize_points -> ptv3_encoder -> ptv3_det3d_head``; the export specs derive from it."""
+        """Declare ``serialize_points -> ptv3_encoder -> ptv3_det3d_head``."""
         return build_ptv3_stages(
             self,
             build_det3d_head_stage(self, self.bev_neck, self.bbox_head, self.export_output_names),

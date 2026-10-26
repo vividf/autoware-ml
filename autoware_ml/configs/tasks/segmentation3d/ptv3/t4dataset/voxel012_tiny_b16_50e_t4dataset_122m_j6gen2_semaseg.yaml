@@ -19,24 +19,18 @@ callbacks:
 
 deploy:
   tensorrt:
-    # Optimization profiles for every dynamic input of the two graphs (one mapping
-    # for both modules; an entry that is not an input of the graph being built is
-    # not applied to it).
-    # Every dynamic dimension is a voxel count. min = 0.5x the smallest count seen,
-    # opt = the midpoint, max = 1.5x the largest, since an engine must also accept
-    # frames denser than any measured one. The counts below were measured over 30
-    # j6gen2 test frames on the single-sweep grid-sampling pipeline (before the
-    # multi-sweep voxelizer): re-measure them with the torch stage pipeline before
-    # enabling TensorRT. Counts per encoder level (level 0 = the voxels, level i+1 =
-    # after pooling i):
+    # One table for both engines, keyed by ONNX input name; each engine takes its own inputs.
+    # Every dynamic dimension is a voxel count: min = 0.5x the smallest count seen, opt = the
+    # middle of the measured range, max = 1.5x the largest, so denser frames still fit. The
+    # counts come from 30 j6gen2 test frames of the single-sweep grid-sampling pipeline, before
+    # the multi-sweep voxelizer: re-measure them before enabling TensorRT, and whenever the
+    # grid size, range or data change. Level 0 is the voxels, level i+1 the output of pooling i:
     #   level 0: 126052-135079   level 1: 60010-66581   level 2: 24389-28047
     #   level 3: 9337-11041      level 4: 3467-4226
-    # point_feat_{i}, pooling_cluster_{i} and serialized_pooling_{i}_indices take
-    # level i; the other serialized_pooling_{i}_* inputs take level i+1 (indptr is
-    # that count + 1, CSR offsets); serialized_inverse is [2, N] for the two serialization
-    # orders, and patch_order is [2, N] with N rounded up to whole attention windows
-    # of its level (enc_patch_size, 512 on every level here). Re-measure when the grid
-    # size, range or data change.
+    # point_feat_{i}, pooling_cluster_{i} and serialized_pooling_{i}_indices take level i, the
+    # other serialized_pooling_{i}_* inputs level i+1 (indptr: count + 1, CSR offsets).
+    # serialized_inverse and patch_order are [2, N], one row per serialization order;
+    # patch_order rounds N up to whole attention windows (enc_patch_size, 512 on every level).
     input_shapes:
       voxels:
         min_shape: [63026, 32, 5]
