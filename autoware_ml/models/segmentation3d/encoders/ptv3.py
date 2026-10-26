@@ -96,10 +96,8 @@ def replace_submconv3d_for_export(module: nn.Module) -> None:
             exportable_child = exportable_child.to(
                 device=child.weight.device, dtype=child.weight.dtype
             )
-            # Only the convolution's own tensors: a quantized cpe conv also carries the
-            # calibration buffers of its input / weight quantizers, and the export copy is
-            # deliberately float — its INT8 form is scales on the exported plugin node
-            # (autoware_ml.ops.spconv.onnx_int8), not fake quantization in the graph.
+            # A calibrated cpe conv also holds quantizer amax buffers. The export copy stays
+            # float; its INT8 scales go onto the plugin node (autoware_ml.ops.spconv.onnx_int8).
             own_keys = exportable_child.state_dict().keys()
             exportable_child.load_state_dict(
                 {key: value for key, value in child.state_dict().items() if key in own_keys}

@@ -50,9 +50,8 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
 from autoware_ml.quantization.rules import QuantRules
 
 
-#: PTv3's quantization declaration: the GEMM-bearing submodules, nothing else. Linear
-#: layers follow ``default_precision`` (INT8, or FP8 in the ``_fp8`` variant);
-#: the cpe sparse convolutions deploy as INT8 plugin nodes when quantized.
+#: Linears follow ``default_precision`` (FP8 in the ``_fp8`` variant); the cpe sparse
+#: convolutions deploy as INT8 plugin nodes when quantized.
 PTV3_SEG_QUANT_RULES = QuantRules(
     quantize_submodules={
         "encoder": {"linear": None, "spconv": "int8"},
