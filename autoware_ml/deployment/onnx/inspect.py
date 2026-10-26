@@ -33,12 +33,7 @@ def onnx_has_qdq(onnx_path: str | Path) -> bool:
 
 
 def onnx_custom_op_domains(onnx_path: str | Path) -> tuple[str, ...]:
-    """Non-standard operator domains used by the graph's nodes.
-
-    Nodes outside the default ONNX domain (and ``ai.onnx.*``) are runtime plugins —
-    ``autoware::ImplicitGemm`` and friends. ONNX Runtime cannot execute such a graph
-    without the plugin, and generic precision converters cannot type it.
-    """
+    """Sorted domains of the graph's non-standard nodes, such as runtime plugins."""
     model = onnx.load(str(onnx_path), load_external_data=False)
     domains = {
         node.domain
