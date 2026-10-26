@@ -529,20 +529,16 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         return multi_task_predictions
 
     def build_stages(self) -> Sequence[Stage] | None:
-        """Declare the deployed lidar-only BEVFusion; camera-lidar keeps its export specs.
-
-        ::
+        """Declare the lidar-only split; the graph keeps the name and I/O the runtime loads::
 
             fetch_voxels (torch) -> bevfusion_lidar (graph)
 
-        The single ``bevfusion_lidar`` graph is the module the runtime loads, unchanged
-        in name and I/O. Its ONNX carries ``autoware::`` plugin ops (the sparse encoder),
-        which TensorRT executes through its plugin library and ONNX Runtime cannot run,
-        so only that backend falls back to PyTorch. The graph is single-sample.
+        The graph is single-sample. ONNX Runtime cannot run the ``autoware::`` plugin ops of
+        its sparse encoder, so that backend falls back to PyTorch.
 
         Returns:
-            The stages for a lidar-only model, ``None`` for camera-lidar (its two-graph
-            export keeps the hand-written :meth:`build_export_specs`) and camera-only.
+            The stages, or ``None`` for camera-only and camera-lidar models; the latter keep
+            the hand-written two-graph :meth:`build_export_specs`.
         """
         if self.camera_network is not None or self.lidar_network is None:
             return None
@@ -561,15 +557,15 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
             TorchStage(
                 "fetch_voxels",
                 run=fetch_voxels,
-                inputs=(),  # reads only the batch
+                inputs=(),
                 outputs=("voxels", "coors", "num_points_per_voxel"),
             ),
             GraphStage(
                 "bevfusion_lidar",
                 module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
                 inputs=("voxels", "coors", "num_points_per_voxel"),
-                # The packed outputs are the names build_deployed_eval_output decodes; the
-                # voxel axes stay dynamic through deploy.onnx.modules.bevfusion_lidar.
+                # Decoded by build_deployed_eval_output; the dynamic voxel axes come from
+                # deploy.onnx.modules.bevfusion_lidar.
                 outputs=("bbox_pred", "score", "label_pred"),
                 torch_fallback_backends=(Backend.ONNX,),
             ),
@@ -578,8 +574,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
     def build_deployed_eval_output(
         self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
     ) -> dict[str, Any]:
-        """Decode the graph's packed boxes through the head's post-processing and pair
-        them with the ground truth, as :meth:`build_eval_output` does for forward()."""
+        """Score the packed outputs through the head's post-processing, like forward()'s."""
         return detection3d_eval_output(
             predictions=decode_packed_detections(self.bbox_head, outputs),
             batch_inputs=multi_task_batch_inputs,
@@ -625,7 +620,6 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
                 depth maps when the camera branch is configured.
         """
         if self.camera_network is None:
-            # The lidar-only export is derived from the stage graph (the base default).
             return super().build_export_specs(multi_task_batch_inputs)
 
         voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(

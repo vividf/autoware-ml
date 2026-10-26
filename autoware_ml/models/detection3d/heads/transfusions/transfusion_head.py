@@ -967,12 +967,8 @@ class TransFusionHead(nn.Module):
     ) -> ModelPredictions:
         """Turn per-proposal predictions into the final detections.
 
-        The post-processing every consumer must agree on: metric-space decoding with the
-        configured bbox coder, the per-class score thresholds and the post-center range
-        filter, then NMS. Split out of :meth:`decode_outputs` because a deployment whose
-        graph performs the proposal selection itself arrives with the same per-proposal
-        tensors and must run exactly this tail; sharing it is what keeps the deployed
-        behavior tied to the model's.
+        A deployed graph that selects the proposals itself is decoded here too, so it
+        post-processes exactly like the model.
 
         Args:
             batch_scores: Per-class proposal scores after the dense-heatmap calibration,

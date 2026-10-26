@@ -16,9 +16,8 @@ trainer:
 
 deploy:
   tensorrt:
-    # Voxel count varies per frame; the max matches the evaluation pillar budget
-    # (eval_max_voxels), the largest the runtime can hand the engine. The point channels
-    # are [x, y, z, intensity, time lag].
+    # The max is the evaluation voxel budget (eval_max_voxels), the most the runtime hands
+    # the engine. Point channels: x, y, z, intensity, time lag.
     input_shapes:
       voxels:
         min_shape: [1000, "${max_num_points}", 5]
