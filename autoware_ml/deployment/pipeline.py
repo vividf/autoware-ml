@@ -212,8 +212,9 @@ class StagedPipeline:
     def run(self, batch: Any) -> tuple[PipelineResult, RunState]:
         """Run every stage and return the result together with the full run state.
 
-        The run state (every named tensor produced along the way) is what export uses
-        as trace inputs for each graph stage.
+        The run state holds every named tensor produced along the way, for a caller that
+        inspects the intermediate tensors; export traces its graph stages through
+        :func:`~autoware_ml.deployment.stages.run_stages_in_torch` instead.
         """
         state = RunState(batch=batch, device=self.device)
         times: dict[str, float] = {}
