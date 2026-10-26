@@ -241,18 +241,13 @@ class CenterPointDetection3DModel(ModuleBaseModel):
         )
 
     def build_stages(self) -> Sequence[Stage]:
-        """Declare the deployed CenterPoint: two exported graphs with PyTorch glue between.
-
-        The split is the one the Autoware runtime expects and the module names are the
-        artifact names it loads::
+        """Declare the split the Autoware runtime loads; stage names match its artifact names::
 
             decorate (torch) -> pts_voxel_encoder_centerpoint (graph)
                 -> scatter (torch) -> pts_backbone_neck_head_centerpoint (graph)
 
-        Pillar decoration and the BEV scatter are pure tensor bookkeeping without learned
-        parameters and stay outside the graphs. The export specs are derived from this
-        declaration, and running it reproduces forward() up to the head maps, which
-        :meth:`build_deployed_eval_output` scores.
+        Pillar decoration and the BEV scatter have no learned parameters and stay out of the
+        graphs.
         """
 
         def voxels_data(state: RunState) -> VoxelsData:
@@ -269,10 +264,9 @@ class CenterPointDetection3DModel(ModuleBaseModel):
         def scatter(state: RunState) -> dict[str, torch.Tensor]:
             voxels = voxels_data(state)
             pillar_features = state["pillar_features"].to(state.device).squeeze(1)
-            # One canvas per sample of the batch, counted like forward() counts them: a
-            # sample without a voxel keeps its empty canvas, which the voxel batch indices
-            # would leave out. The count comes from the collated point cloud first, so a
-            # batch without ground truth boxes has one too.
+            # Count samples like forward(): the voxel batch indices miss a sample without
+            # voxels. infer_batch_size() counts the collated point cloud first, so a batch
+            # without ground truth boxes works too.
             return {
                 "spatial_features": self.pts_middle_encoder(
                     pillar_features=pillar_features,
@@ -300,8 +294,8 @@ class CenterPointDetection3DModel(ModuleBaseModel):
                 "pts_backbone_neck_head_centerpoint",
                 module=head_wrapper,
                 inputs=("spatial_features",),
-                # The head's ONNX outputs are its CenterHeadOutputs branches under their
-                # names; build_deployed_eval_output rebuilds the typed outputs from them.
+                # Named after the CenterHeadOutputs fields; build_deployed_eval_output
+                # rebuilds the typed outputs by name.
                 outputs=tuple(head_wrapper.output_names),
             ),
         )
