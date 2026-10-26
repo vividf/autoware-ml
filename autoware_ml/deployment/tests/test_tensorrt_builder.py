@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorRT builder value objects that need no GPU: the optimization-profile validation."""
+"""Unit tests for the TensorRT optimization profile."""
 
 from __future__ import annotations
 

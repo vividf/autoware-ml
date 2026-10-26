@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The generic pipeline and artifact discovery — on toy stages, pytorch and onnx backends."""
+"""Unit tests for the staged pipeline and artifact discovery."""
 
 from __future__ import annotations
 
@@ -100,7 +100,6 @@ class TestStagedPipeline:
         assert cache.get(Backend.PYTORCH, torch.device("cpu")) is first
 
     def test_onnx_backend_matches_pytorch_and_reports_fallbacks(self, tmp_path):
-        """The onnx backend runs exported artifacts; a declared fallback runs torch instead."""
         stages = _toy_stages()
         for stage in (stages[1], stages[3]):
             torch.onnx.export(

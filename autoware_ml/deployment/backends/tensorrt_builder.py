@@ -12,17 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorRT engine builder — the build half of the TensorRT backend.
+"""Build TensorRT engines from ONNX.
 
-Owns everything between an ONNX file and a serialized ``.engine``: builder/network
-creation, the workspace pool, optimization profiles, plugin loading, and serialization.
-The runtime half lives next door in :mod:`.tensorrt_runner`.
-
-Every network is built STRONGLY TYPED: the ONNX graph's own tensor types are binding,
-and precision therefore lives in the ONNX, not in builder flags — ``deploy.onnx.precision``
-decides the dtypes the graph carries, quantized precisions come from its Q/DQ nodes. This
-matches the TensorRT direction: the weak-typing precision flags were deprecated in
-TensorRT 10.12 and removed in TensorRT 11.
+Networks are always strongly typed: precision comes from the ONNX graph
+(``deploy.onnx.precision`` and its Q/DQ nodes), not from builder flags. TensorRT deprecated
+the weak-typing precision flags in 10.12 and removed them in 11.
 """
 
 from __future__ import annotations
@@ -41,11 +35,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ShapeProfile:
-    """One TensorRT optimization-profile entry (``min_shape`` / ``opt_shape`` / ``max_shape``).
+    """One input's TensorRT optimization profile.
 
-    Validated on construction — equal ranks, ``min >= 0``, ``opt >= 1`` and
-    component-wise ``min <= opt <= max`` — so a bad profile is a config error naming the
-    input and dimension, not a TensorRT build failure.
+    Validated on construction, so a bad profile is a config error naming the input and
+    dimension rather than a TensorRT build failure.
     """
 
     min_shape: tuple[int, ...]
@@ -64,8 +57,8 @@ class ShapeProfile:
         for index, (low, opt, high) in enumerate(
             zip(self.min_shape, self.opt_shape, self.max_shape)
         ):
-            # A zero *minimum* is legal (TensorRT accepts empty tensors, and a point model
-            # may see an empty cloud); the optimum and maximum have to be real extents.
+            # Only the minimum may be 0: TensorRT accepts empty tensors, and a point model
+            # can get an empty cloud.
             if low < 0 or opt < 1:
                 raise ValueError(
                     f"dim {index} has min={low}, opt={opt}; min must be >= 0 and opt >= 1."
@@ -100,11 +93,7 @@ class ShapeProfile:
 
 
 def load_tensorrt_plugin_libraries(plugin_libraries: Sequence[str] | None) -> None:
-    """Load custom TensorRT plugin shared libraries before the plugin registry initializes.
-
-    Raises:
-        FileNotFoundError: If a configured plugin library does not exist.
-    """
+    """Load custom TensorRT plugin libraries; call before the plugin registry initializes."""
     for library in plugin_libraries or ():
         library_path = Path(library)
         if not library_path.exists():
@@ -117,7 +106,6 @@ def _create_builder(workspace_size: int, plugin_libraries: Sequence[str]):
     """Create ``(builder, network, parser, config)`` for one strongly typed engine build."""
     import tensorrt as trt
 
-    # Custom plugins must be loadable before plugin registry initialization.
     load_tensorrt_plugin_libraries(plugin_libraries)
 
     trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -152,11 +140,10 @@ def _parse_onnx_file(parser: Any, onnx_path: Path) -> None:
 def _create_optimization_profile(
     builder: Any, network: Any, input_shapes: Mapping[str, ShapeProfile]
 ):
-    """Profile over the configured inputs this network actually has.
+    """Build a profile over the configured inputs this network has.
 
-    ``deploy.tensorrt.input_shapes`` is one mapping for every exported module, so a
-    multi-module model lists the inputs of all of them; an entry that names another
-    module's input is skipped here rather than handed to TensorRT as an unknown tensor.
+    ``deploy.tensorrt.input_shapes`` is shared by every exported module, so entries for another
+    module's inputs are skipped rather than handed to TensorRT.
     """
     network_inputs = {network.get_input(i).name for i in range(network.num_inputs)}
     profile = builder.create_optimization_profile()
@@ -201,18 +188,12 @@ def build_engine(
     plugin_libraries: Sequence[str] = (),
     input_shapes: Mapping[str, ShapeProfile] | None = None,
 ) -> None:
-    """Build and serialize one strongly typed TensorRT engine from an ONNX file.
-
-    Precision is read from the ONNX graph (module docstring); there are no precision
-    knobs here by design.
+    """Build and serialize a strongly typed TensorRT engine from an ONNX file.
 
     Args:
-        onnx_path: Exported ONNX model.
-        output_path: Destination ``.engine`` path.
         workspace_size: Workspace memory-pool limit in bytes.
-        plugin_libraries: Custom plugin ``.so`` paths to load before parsing.
-        input_shapes: Optimization-profile shapes per dynamic input; ``None``/empty
-            builds without an explicit profile (static-shape graphs).
+        plugin_libraries: Custom plugin libraries to load before parsing.
+        input_shapes: Optimization profile per dynamic input; ``None`` for a static graph.
 
     Raises:
         RuntimeError: When ONNX parsing or the engine build fails.
@@ -243,12 +224,7 @@ def build_engine_from_config(
     deploy_cfg: DictConfig,
     output_path: Path,
 ) -> None:
-    """Build a strongly typed TensorRT engine from an ONNX model.
-
-    Thin config adapter over :func:`build_engine`: reads
-    ``deploy.tensorrt.{workspace_size, plugin_libraries, input_shapes}`` and validates
-    the optimization profile before TensorRT sees it.
-    """
+    """Build an engine with :func:`build_engine` from the ``deploy.tensorrt`` settings."""
     tensorrt_cfg = deploy_cfg.tensorrt
     raw_shapes = tensorrt_cfg.get("input_shapes", None)
     input_shapes = None

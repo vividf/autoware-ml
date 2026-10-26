@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ONNX Runtime runner for one graph stage.
-
-The ``onnx`` backend of :class:`~autoware_ml.deployment.pipeline.StagedPipeline` runs
-every exportable stage through this class: session creation (provider selection),
-I/O name discovery, tensor conversion and wall-clock timing of ``session.run``.
-"""
+"""ONNX Runtime runner for one graph stage."""
 
 from __future__ import annotations
 
@@ -32,8 +27,7 @@ from autoware_ml.deployment.onnx.inspect import onnx_has_qdq
 
 logger = logging.getLogger(__name__)
 
-# ONNX Runtime element-type string -> torch dtype, for casting feeds to the
-# graph's declared input types (feeding fp16 into a float32 graph is an error).
+# Feeds are cast to the declared input types; ONNX Runtime rejects a mismatched dtype.
 _ORT_TYPE_TO_TORCH_DTYPE = {
     "tensor(float)": torch.float32,
     "tensor(float16)": torch.float16,
@@ -49,10 +43,8 @@ _ORT_TYPE_TO_TORCH_DTYPE = {
 class OnnxModuleRunner:
     """Run one exported ONNX module through ONNX Runtime.
 
-    Args:
-        onnx_path: Path to the exported ``.onnx`` file.
-        device: Torch device the module should execute on. ``cuda`` requires the
-            CUDA execution provider.
+    Without the CUDA execution provider, a CUDA ``device`` is an error rather than a silent
+    CPU fallback.
     """
 
     def __init__(self, onnx_path: str | Path, device: torch.device) -> None:
@@ -71,14 +63,11 @@ class OnnxModuleRunner:
 
         session_options = ort.SessionOptions()
         if onnx_has_qdq(onnx_path):
-            # ONNX Runtime's graph optimizer mis-executes fp16-typed Q/DQ graphs: on the
-            # BEVFusion dense stage the optimized run deviates 30x from its own
-            # unoptimized run (mean 3.7e-3 vs 1.4e-4 on the heatmap), while the
-            # unoptimized run matches TensorRT and the fp32-typed reference to fp16
-            # precision (mAP 0.39 vs 0.45; no
-            # single transformer is responsible, the whole BASIC level is). ORT is the
-            # correctness reference here, never the latency deliverable, so quantized
-            # graphs run exactly as exported.
+            # ONNX Runtime's graph optimizer (the whole BASIC level, not one transformer)
+            # mis-executes fp16-typed Q/DQ graphs: on the BEVFusion dense stage the heatmap's
+            # mean error grows 30x (3.7e-3 vs 1.4e-4) and mAP drops from 0.45 to 0.39, while
+            # the unoptimized run matches TensorRT. ORT is the correctness reference, not a
+            # latency target, so quantized graphs run as exported.
             session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
             logger.info(
                 "ONNX module %s carries Q/DQ nodes: ONNX Runtime graph optimizations disabled "
@@ -110,14 +99,10 @@ class OnnxModuleRunner:
         )
 
     def run(self, inputs: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], float]:
-        """Run the module once.
+        """Run the module once and return the outputs by name and the time in ms.
 
-        Args:
-            inputs: Input tensor per ONNX input name. Tensors may live on any device.
-
-        Returns:
-            Tuple of (outputs by ONNX output name on :attr:`device`, wall-clock time in ms
-            for ``session.run`` only — host/device transfers excluded).
+        Only ``session.run`` is timed, not the host / device copies. Inputs may be on any
+        device; outputs are on :attr:`device`.
         """
         feed = {}
         for name, tensor in inputs.items():

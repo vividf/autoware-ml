@@ -316,16 +316,14 @@ def run_torch_stage(stage: TorchStage, state: RunState) -> dict[str, Any]:
 
 
 def run_graph_stage(stage: GraphStage, args: Sequence[Any]) -> dict[str, Any]:
-    """Call a graph stage's PyTorch module and name its outputs.
+    """Call a graph stage's module and check its return against ``outputs``.
 
-    The one place a module's return is checked against the declaration, shared by the
-    reference run below and by the pipeline's ``pytorch`` backend.
+    Every PyTorch run of a graph stage goes through here.
 
     Raises:
-        TypeError: When the module returns a mapping (a graph stage's outputs are
-            positional) or anything but tensors.
-        ValueError: When the module returns a different number of tensors than the stage
-            declares as ``outputs``, or modifies an input in place.
+        TypeError: When the module returns a mapping or a non-tensor.
+        ValueError: When the number of tensors differs from ``outputs``, or the module
+            modifies an input in place.
     """
     inputs = dict(zip(stage.inputs, args))
     versions = _tensor_versions(inputs)

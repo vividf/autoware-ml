@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BatchNorm folding: identity outputs, no BN node left, structure-proven pairs only."""
+"""Unit tests for BatchNorm folding."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from autoware_ml.utils.bn_fusion import find_conv_bn_pairs, fuse_model_bn
 def _conv_bn_relu() -> nn.Sequential:
     torch.manual_seed(0)
     module = nn.Sequential(nn.Conv2d(3, 4, 3, padding=1), nn.BatchNorm2d(4), nn.ReLU()).eval()
-    # Non-trivial BN statistics so the fold actually rewrites the conv weights.
+    # Non-default BatchNorm parameters, so that the fold changes the weights.
     module[1].running_mean.uniform_(-1, 1)
     module[1].running_var.uniform_(0.5, 2.0)
     module[1].weight.data.uniform_(0.5, 1.5)
@@ -44,7 +44,6 @@ def test_fold_removes_bn_and_preserves_outputs() -> None:
     fuse_model_bn(folded)
 
     assert not any(isinstance(m, nn.BatchNorm2d) for m in folded.modules())
-    # The original keeps its BN — the fold rewrites only what it is given.
     assert isinstance(module[1], nn.BatchNorm2d)
     x = torch.randn(2, 3, 8, 8)
     with torch.no_grad():

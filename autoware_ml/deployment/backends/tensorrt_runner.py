@@ -12,17 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorRT engine runner (torch-native I/O) for one graph stage.
-
-The ``tensorrt`` backend of :class:`~autoware_ml.deployment.pipeline.StagedPipeline`
-runs every exportable stage through this class. It uses torch CUDA tensors as device
-buffers: inputs that already live on the GPU are bound in place (no host round-trip)
-and outputs are returned as CUDA tensors, which is what the downstream glue stages
-(scatter, decode) want.
-
-Timing brackets only ``execute_async_v3`` with CUDA events on the current
-torch stream, so the reported time is the engine's pure GPU compute.
-"""
+"""TensorRT runner for one graph stage."""
 
 from __future__ import annotations
 
@@ -40,18 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] = ()):
-    """Deserialize a TensorRT engine and create its execution context, failing loud.
-
-    Args:
-        engine_path: Path to the serialized ``.engine`` file.
-        plugin_libraries: Custom TensorRT plugin ``.so`` paths the engine's ops come from.
-
-    Returns:
-        Tuple of ``(engine, execution_context)``.
+    """Deserialize a TensorRT engine and return ``(engine, execution_context)``.
 
     Raises:
-        RuntimeError: If deserialization or context creation fails
-            (context failure is usually GPU out-of-memory).
+        RuntimeError: If deserialization or context creation fails.
     """
 
     engine_path = Path(engine_path)
@@ -59,8 +41,7 @@ def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] 
     if not engine_path.exists():
         raise FileNotFoundError(f"TensorRT engine not found: {engine_path}")
 
-    # Custom plugin libraries (autoware::* ops) must be loaded before the registry
-    # initializes, in this process — an engine built elsewhere still needs them here.
+    # The engine's plugin ops need their libraries in this process, wherever it was built.
     load_tensorrt_plugin_libraries(plugin_libraries)
     trt_logger = trt.Logger(trt.Logger.WARNING)
     trt.init_libnvinfer_plugins(trt_logger, "")
@@ -93,23 +74,17 @@ def list_trt_io_names(engine) -> tuple[list[str], list[str]]:
 
 
 def _trt_dtype_to_torch(trt_dtype) -> torch.dtype:
-    """Map a TensorRT dtype to the matching torch dtype, failing loud on unknowns.
-
-    Guessing a size (e.g. defaulting to float32) would mis-size the GPU buffer and
-    silently corrupt the data, so unknown dtypes raise via TensorRT's own ``nptype``.
-    """
+    """Map a TensorRT dtype to torch; an unknown one raises instead of mis-sizing the buffer."""
 
     numpy_dtype = np.dtype(trt.nptype(trt_dtype))
     return torch.from_numpy(np.zeros(0, dtype=numpy_dtype)).dtype
 
 
 class TensorRTModuleRunner:
-    """Run one serialized TensorRT engine with torch tensors as device buffers.
+    """Run one serialized TensorRT engine with torch CUDA tensors as I/O buffers.
 
-    Args:
-        engine_path: Path to the serialized ``.engine`` file.
-        device: CUDA device the engine executes on.
-        plugin_libraries: Custom plugin ``.so`` paths to load before deserializing.
+    Inputs already on the GPU are bound in place and outputs stay on the GPU. The reported
+    time covers only ``execute_async_v3``, measured with CUDA events on the current stream.
     """
 
     def __init__(
@@ -120,11 +95,8 @@ class TensorRTModuleRunner:
             raise ValueError(f"TensorRT requires a CUDA device, got {self.device}.")
         self.engine, self.context = load_trt_engine(engine_path, plugin_libraries=plugin_libraries)
         self.input_names, self.output_names = list_trt_io_names(self.engine)
-        # Bindings persist across calls: input shapes are re-declared and output buffers
-        # re-allocated only when a shape actually changes. Re-binding every call was
-        # measured to inflate the reported per-engine time by ~0.5 ms/engine on
-        # BEVFusion (the deployment report showed 6.08 ms for a chain whose paired
-        # single-window measurement is 5.16 ms).
+        # Re-bind only when a shape changes: re-binding every call added ~0.5 ms per engine to
+        # the measured time on BEVFusion.
         self._bound_input_shapes: dict[str, tuple[int, ...]] = {}
         self._output_buffers: dict[str, torch.Tensor] = {}
         self._start_event = torch.cuda.Event(enable_timing=True)
@@ -137,11 +109,10 @@ class TensorRTModuleRunner:
         )
 
     def _cast_to_binding_dtype(self, tensor_name: str, tensor: torch.Tensor) -> torch.Tensor:
-        """Return ``tensor`` on :attr:`device`, contiguous, in the engine binding's dtype.
+        """Return ``tensor`` on :attr:`device`, contiguous, in the binding's dtype.
 
-        Matching the binding dtype is critical for FP16 engines: a graph traced with
-        FP32 inputs may bind as ``HALF``, and feeding float32 bytes into a HALF binding
-        misaligns the GPU buffer and silently corrupts the activations.
+        TensorRT reads the raw buffer, so float32 data bound to a ``HALF`` input (an fp16
+        export of a graph traced in fp32) would silently corrupt the activations.
         """
         target_dtype = _trt_dtype_to_torch(self.engine.get_tensor_dtype(tensor_name))
         if tensor.dtype != target_dtype:
@@ -152,12 +123,11 @@ class TensorRTModuleRunner:
         return tensor.to(self.device).contiguous()
 
     def _bind_input_shape(self, name: str, shape: tuple[int, ...]) -> None:
-        """Declare ``shape`` for input ``name``, failing loud when the engine rejects it.
+        """Declare an input shape, raising when the engine rejects it.
 
-        ``set_input_shape`` only returns False (TensorRT logs the reason) for a shape of
-        the wrong rank or outside the optimization profile. Executing anyway leaves the
-        previous call's results in the reused output buffers, so the failure surfaces here
-        and the rejected shape is not recorded as bound.
+        ``set_input_shape`` only returns False for a wrong rank or a shape outside the profile;
+        executing anyway would return the previous call's outputs from the reused buffers. A
+        rejected shape is not recorded as bound.
         """
         if self.context.set_input_shape(name, shape):
             self._bound_input_shapes[name] = shape
@@ -173,26 +143,14 @@ class TensorRTModuleRunner:
         raise RuntimeError(f"TensorRT rejected shape {shape} for input {name!r} ({allowed}).")
 
     def run(self, inputs: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], float]:
-        """Run the engine once and return ``(outputs_by_name, pure_gpu_time_ms)``.
+        """Run the engine once and return the outputs by name and the GPU time in ms.
 
-        Args:
-            inputs: Engine input tensor name -> torch tensor (any device / dtype;
-                cast and moved as needed).
-
-        Returns:
-            Tuple of (outputs by engine output name as CUDA tensors, pure-GPU time in
-            ms measured with CUDA events around ``execute_async_v3`` only).
-
-        NOTE: output tensors are owned by the runner and REUSED on the next ``run``
-        with the same shapes — consume (or copy) them before calling ``run`` again.
-        Every current caller is strictly sequential per runner (evaluation processes a
-        frame to completion; verification compares per batch, and its reference and
-        test pipelines hold separate runners).
+        Inputs may be on any device and of any dtype. The outputs are the runner's own buffers,
+        which the next call may overwrite: copy them to keep them.
 
         Raises:
             ValueError: If the input names are not exactly the engine's inputs.
-            RuntimeError: If TensorRT rejects an input shape, or ``execute_async_v3``
-                reports a failure status.
+            RuntimeError: If TensorRT rejects an input shape or the execution fails.
         """
         if set(inputs) != set(self.input_names):
             missing = sorted(set(self.input_names) - set(inputs))
@@ -213,8 +171,7 @@ class TensorRTModuleRunner:
             # Input tensors arrive from the caller, so their addresses change per call.
             self.context.set_tensor_address(name, int(tensor.data_ptr()))
 
-        # Output shapes can depend on the input shapes, so re-derive (and re-allocate
-        # only what actually changed) when any input shape did.
+        # Output shapes can depend on the input shapes.
         if shapes_changed or not self._output_buffers:
             for name in self.output_names:
                 shape = tuple(self.context.get_tensor_shape(name))

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""ONNX Runtime runner: session options follow the graph's quantization."""
+"""Unit tests for the ONNX Runtime runner."""
 
 import numpy as np
 import onnx
@@ -52,8 +52,6 @@ def _gemm_graph(tmp_path, quantized: bool):
 
 
 def test_runner_disables_graph_optimizations_for_qdq_graphs(tmp_path) -> None:
-    """A quantized graph runs exactly as exported: ORT's optimizer mis-executes fp16 Q/DQ."""
-
     runner = OnnxModuleRunner(_gemm_graph(tmp_path, quantized=True), torch.device("cpu"))
     level = runner.session.get_session_options().graph_optimization_level
     assert level == ort.GraphOptimizationLevel.ORT_DISABLE_ALL
