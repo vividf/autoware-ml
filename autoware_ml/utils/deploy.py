@@ -273,9 +273,10 @@ def export_to_onnx(
     if dynamo and dynamic_axes_override:
         raise ValueError(
             "The export spec declares dynamic_axes (a stage graph's onnx_dynamic_axes or a "
-            "hand-written spec) but deploy.onnx.dynamo=true ignores them and would export a "
-            "static graph. Set deploy.onnx.dynamo=false for this module, or express the axes "
-            "as deploy.onnx.dynamic_shapes."
+            "hand-written spec), which only the legacy exporter applies: with "
+            "deploy.onnx.dynamo=true those axes would be exported static. Set "
+            "deploy.onnx.dynamo=false for this module, or declare no dynamic_axes on the spec "
+            "and configure deploy.onnx.dynamic_shapes instead."
         )
     dynamic_shapes = build_dynamic_shapes(onnx_cfg, input_param_names) if dynamo else None
     dynamic_shapes = normalize_dynamic_shapes_for_model(model, dynamic_shapes) if dynamo else None
