@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export verification end to end on a toy stage-graph model (pytorch vs onnx, CPU)."""
+"""Unit tests for the post-export steps on a toy stage-graph model, on the CPU."""
 
 from __future__ import annotations
 
@@ -51,8 +51,6 @@ class _Head(nn.Module):
 
 
 class _ToyModel(ModuleBaseModel):
-    """The toy models take a plain batch; the base class only needs the two ctor args."""
-
     def __init__(self) -> None:
         super().__init__(
             log_dict_configs=LogDictConfigs(prog_bar=False),
@@ -60,7 +58,7 @@ class _ToyModel(ModuleBaseModel):
         )
 
     def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
-        return batch  # the toy batch is its own model input
+        return batch
 
     def decode_outputs(self, multi_task_batch_inputs: Any, outputs: Any) -> Any:
         del multi_task_batch_inputs
@@ -134,8 +132,6 @@ class _DataModule(L.LightningDataModule):
     def predict_dataloader(self):
         return DataLoader([ToyBatch(points=p) for p in self.points], batch_size=None)
 
-    # The split's own setting is the training-time one; evaluation builds the loader at
-    # its own batch size (deploy.evaluation.batch_size) and this records what it asked for.
     test_dataloader_config = DataLoaderConfig(batch_size=16)
 
     def build_dataloader(self, split: SplitType, config: DataLoaderConfig) -> DataLoader:
@@ -147,7 +143,7 @@ class _DataModule(L.LightningDataModule):
 
 
 class _ErrorSuite:
-    """Duck-typed suite: mean absolute error of ``plus`` against the batch target."""
+    """Duck-typed metric suite."""
 
     prefix = "toy"
     headline_metrics = ("error",)
@@ -229,7 +225,7 @@ def test_a_diverging_artifact_fails_the_deploy(tmp_path) -> None:
     torch.manual_seed(0)
     model = _StagedModel().eval()
     _export_stage_artifacts(model, tmp_path)
-    # Perturb the weights after export: the artifacts no longer match the reference.
+    # The PyTorch reference now differs from the exported artifacts.
     with torch.no_grad():
         model.encoder.linear.weight.add_(10.0)
     with pytest.raises(RuntimeError, match="verification FAILED"):
@@ -267,9 +263,9 @@ def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) ->
         torch.device("cpu"),
         log_metric=logged.__setitem__,
     )
-    # tensorrt has no artifacts in this run and is skipped; the other two are scored.
+    # tensorrt has no artifacts and is skipped.
     assert [r.backend.value for r in results] == ["pytorch", "onnx"]
-    # One frame per batch regardless of the split's training-time setting (16 here).
+    # deploy.evaluation.batch_size, not the split's training-time 16.
     assert datamodule.built_batch_sizes == [(SplitType.TEST, 1), (SplitType.TEST, 1)]
     assert results[0].num_samples == 12
     assert results[0].metrics["test/pytorch/toy/error"] == pytest.approx(
@@ -280,7 +276,6 @@ def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) ->
 
 
 def test_evaluation_writes_every_metric_without_a_tracker(tmp_path) -> None:
-    """``logger=null`` deploys keep the full report: the log holds the headline rows only."""
     torch.manual_seed(0)
     model = _StagedModel().eval()
     _export_stage_artifacts(model, tmp_path)

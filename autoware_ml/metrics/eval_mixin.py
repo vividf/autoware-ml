@@ -92,17 +92,16 @@ class MetricEvalMixin:
         return self._metrics_by_stage[stage.value]
 
     def clone_metrics(self, stage: EvalStage) -> list[MetricSuite]:
-        """Fresh, reset clones of the suites that report at ``stage``.
+        """Return fresh clones of the suites that report at ``stage``, with empty state.
 
-        Deployment evaluation scores several backends on the same split and needs one
-        independent accumulator per backend; the model's own per-stage suites keep
-        serving the Lightning lifecycle untouched.
+        Deployment evaluation needs one accumulator per backend, apart from the suites of the
+        Lightning lifecycle.
 
         Args:
             stage: Evaluation stage whose suites to clone.
 
         Returns:
-            Suites bound to ``stage`` with empty state.
+            Suites bound to ``stage``.
         """
         clones = [self._stage_clone(metric, stage) for metric in self._stage_metrics(stage)]
         for clone in clones:

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export config: typo guard and defaults for the verification / evaluation sections."""
+"""Unit tests for the post-export config sections."""
 
 # cspell:ignore tolerence devcie
 

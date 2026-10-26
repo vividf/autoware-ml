@@ -12,25 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Pure output comparison for model verification.
+"""Element-wise comparison of model outputs for verification.
 
-This module contains `OutputComparator`, a stateless recursive comparator
-for structured model outputs. Deployment verification expects pipeline raw
-outputs that are **sequences (list/tuple) of tensors/arrays** and/or tensor
-leaves; dict and bare scalar outputs are not handled (they fail with a type
-mismatch).
-
-Naming:
-    - **OutputDiffSummary**: one object for the **whole output** — whether it
-      passed, overall max/mean diff (aggregated), and first failure reason.
-    - **TensorDiffDetail**: one row per **tensor** in the structure — path,
-      shape, and that tensor's max/mean diff (for per-head logging).
-
-Design notes:
-    - No logging here; callers (e.g. ``BackendVerifier``) render logs.
-    - :meth:`OutputComparator.compare` returns ``(OutputDiffSummary, list of
-      TensorDiffDetail)`` in a single traversal.
+Outputs are tensors / arrays or nested lists and tuples of them; a dict or a bare scalar fails
+as a type mismatch.
 """
 
 from __future__ import annotations
@@ -42,30 +27,26 @@ from typing import Any
 import numpy as np
 import torch
 
-#: Fraction of an integer output (argmax labels, indices) allowed to differ between two
-#: backends. Labels flip at near-ties (measured 0.03 % fp16, 0.3-0.4 % INT8 on PTv3); a
+#: Share of an integer output (argmax labels, indices) allowed to differ between two
+#: backends. Labels flip at near-ties (measured on PTv3: 0.03 % fp16, 0.3-0.4 % INT8); a
 #: wiring or class-order mistake flips most of them.
 DECISION_MISMATCH_TOLERANCE = 0.05
 
-#: Headroom multiplier for the gate suggested on a verification failure. Observed
-#: max_diff varies a little run to run (kernel/tactic nondeterminism), so the suggested
-#: gate leaves margin above one observation without becoming a rubber stamp.
+#: Margin of the gate a failure suggests over the observed max_diff, which varies a little
+#: from run to run (kernel / tactic selection).
 SUGGESTED_GATE_HEADROOM = 1.25
 
 
 @dataclass(frozen=True)
 class OutputDiffSummary:
-    """Rolled-up comparison for an entire structured output (or subtree).
-
-    Use this for pass/fail and **global** max/mean diff. For each tensor's
-    own stats, see :class:`TensorDiffDetail`.
+    """Comparison result of a whole output tree.
 
     Attributes:
-        passed: True if the full structure is within ``tolerance``.
-        max_diff: Largest per-tensor max diff anywhere in the tree.
-        mean_diff: Element-weighted mean of absolute differences over the tree.
-        num_elements: Total tensor elements compared (for weighted mean).
-        reason: First failing tensor's message, or ``None`` if passed.
+        passed: Whether every tensor passed.
+        max_diff: Largest absolute difference of the float tensors.
+        mean_diff: Mean absolute difference of the float tensors, over all their elements.
+        num_elements: Number of float elements compared.
+        reason: First failure, or ``None``.
     """
 
     passed: bool
@@ -77,13 +58,13 @@ class OutputDiffSummary:
 
 @dataclass(frozen=True)
 class TensorDiffDetail:
-    """Stats for **one tensor** at a path (used for verbose per-output logs).
+    """Comparison result of one tensor, for the log.
 
     Attributes:
-        path: Dot/bracket path (e.g. ``output[heatmap]``).
-        shape: NumPy shape of this tensor.
-        max_diff: Max absolute difference on this tensor.
-        mean_diff: Mean absolute difference on this tensor.
+        path: Position in the output, e.g. ``output[heatmap]``.
+        shape: Shape of the reference tensor.
+        max_diff: Largest absolute difference; the mismatch ratio for an integer tensor.
+        mean_diff: Mean absolute difference; the mismatch ratio for an integer tensor.
     """
 
     path: str
@@ -93,13 +74,11 @@ class TensorDiffDetail:
 
 
 class OutputComparator:
-    """Recursively compare structured outputs within an absolute tolerance.
-
-    Optional ``output_names`` label sequence slots (e.g. head names) in paths.
+    """Recursively compare nested outputs.
 
     Args:
-        output_names: Names aligned with sequence indices; children become
-            ``output[name]`` instead of ``output_0``, ``output_1``, ...
+        output_names: Labels of the sequence items in the reported paths, by index:
+            ``output[heatmap]`` instead of ``output[output_0]``.
     """
 
     def __init__(self, output_names: Sequence[str] | None = None) -> None:
@@ -112,7 +91,7 @@ class OutputComparator:
         tolerance: float,
         path: str = "output",
     ) -> tuple[OutputDiffSummary, list[TensorDiffDetail]]:
-        """Compare two structured outputs; collect per-tensor rows and a summary."""
+        """Compare two outputs; return the summary and one detail row per tensor."""
         tensor_details: list[TensorDiffDetail] = []
         summary = self._compare_nested(reference, test, tolerance, path, tensor_details)
         return summary, tensor_details
@@ -125,7 +104,6 @@ class OutputComparator:
         path: str,
         tensor_details: list[TensorDiffDetail],
     ) -> OutputDiffSummary:
-        """Recursive compare; appends one :class:`TensorDiffDetail` per tensor leaf."""
         if reference is None and test is None:
             return OutputDiffSummary(passed=True, max_diff=0.0, mean_diff=0.0)
 
@@ -151,7 +129,6 @@ class OutputComparator:
         path: str,
         tensor_details: list[TensorDiffDetail],
     ) -> OutputDiffSummary:
-        """Compare list/tuple outputs element-wise using ``output_names`` when provided."""
         if len(reference) != len(test):
             return _fail(path, f"length mismatch {len(reference)} vs {len(test)}")
 
@@ -174,7 +151,6 @@ class OutputComparator:
         path: str,
         tensor_details: list[TensorDiffDetail],
     ) -> OutputDiffSummary:
-        """Compare tensor/ndarray leaves (same shape required)."""
         ref_np = self._to_numpy(reference)
         test_np = self._to_numpy(test)
 
@@ -190,12 +166,10 @@ class OutputComparator:
             return _fail(path, f"shape mismatch {ref_np.shape} vs {test_np.shape}")
 
         if ref_np.dtype.kind in "iub":
-            # Integer / boolean outputs (class labels, indices) are decisions taken over
-            # the float outputs compared elsewhere: a label flips whenever two logits are
-            # within backend noise of each other, so an element-wise max-diff gate would
-            # fail on a handful of near-tie points with the probabilities equal. Gate on
-            # the mismatch *ratio* instead: a few flips pass, a swapped or mis-wired
-            # integer output (ratio ~1) does not.
+            # Integer / boolean outputs (labels, indices) are decisions over float outputs: one
+            # flips whenever two logits tie within backend noise, so a max-diff gate would fail
+            # on a few near-ties. Gate on the share that differ; a mis-wired output differs
+            # almost everywhere.
             mismatch_ratio = float(np.mean(ref_np != test_np)) if ref_np.size else 0.0
             passed = mismatch_ratio <= DECISION_MISMATCH_TOLERANCE
             tensor_details.append(
@@ -255,7 +229,6 @@ class OutputComparator:
 
     @staticmethod
     def _merge_summaries(results: Iterable[OutputDiffSummary]) -> OutputDiffSummary:
-        """Combine child :class:`OutputDiffSummary` values into one summary."""
         max_diff = 0.0
         total_diff = 0.0
         total_elements = 0
@@ -264,9 +237,8 @@ class OutputComparator:
 
         for result in results:
             max_diff = max(max_diff, result.max_diff)
-            # Skip zero-element children (shape/type mismatches carry mean_diff=inf,
-            # num_elements=0): inf * 0 is nan and would poison the whole mean. The
-            # mismatch still surfaces via all_passed=False and max_diff=inf.
+            # A shape or type mismatch has mean_diff=inf and no elements; inf * 0 would turn
+            # the mean into nan. The mismatch still fails the summary with max_diff=inf.
             if result.num_elements:
                 total_diff += result.mean_diff * result.num_elements
             total_elements += result.num_elements
@@ -285,12 +257,10 @@ class OutputComparator:
 
     @staticmethod
     def _is_array_like(obj: Any) -> bool:
-        """Return True when ``obj`` is a tensor or ndarray (leaf comparison path)."""
         return isinstance(obj, (torch.Tensor, np.ndarray))
 
     @staticmethod
     def _to_numpy(tensor: Any) -> np.ndarray:
-        """Convert tensors to CPU NumPy arrays; pass through ``ndarray``."""
         if isinstance(tensor, torch.Tensor):
             return tensor.detach().cpu().numpy()
         if isinstance(tensor, np.ndarray):
@@ -299,7 +269,6 @@ class OutputComparator:
 
 
 def _fail(path: str, reason: str) -> OutputDiffSummary:
-    """Build a failing summary with infinite diffs and a short reason."""
     return OutputDiffSummary(
         passed=False,
         max_diff=float("inf"),

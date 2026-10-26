@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-export steps over a model's stage graph: verification and per-backend evaluation.
-
-Both need the same things — the exported artifacts, pipelines per backend, batches from
-the datamodule preprocessed the way the model's ``on_after_batch_transfer`` does — so
-they are wired here rather than in ``scripts/deploy.py``, which only decides whether to
-call in.
-"""
+"""Post-export verification and per-backend evaluation over a model's stage graph."""
 
 from __future__ import annotations
 
@@ -61,14 +55,8 @@ def predict_batches(
     *,
     limit: int,
 ) -> list[Any]:
-    """Load up to ``limit`` predict batches and preprocess them like Lightning would.
-
-    ``limit < 0`` loads the whole split. The batch goes through
-    ``model.on_after_batch_transfer`` — the one place preprocessing runs — so a stage
-    graph sees exactly what ``forward()`` sees.
-    """
-    # The record tables are built once per process (the export did it already in the
-    # deploy flow; a stand-alone call starts here).
+    """Load up to ``limit`` predict batches, all if negative, preprocessed as Lightning does."""
+    # A cache hit after the export; a stand-alone call builds the record tables here.
     datamodule.prepare_data()
     datamodule.setup("predict")
     dataloader = datamodule.predict_dataloader()
@@ -88,7 +76,7 @@ def run_verification(
     datamodule: L.LightningDataModule,
     device: torch.device,
 ) -> None:
-    """Compare the backends' raw graph outputs on the first predict batches; raise on failure."""
+    """Compare the backends' raw model outputs on the first predict batches; raise on failure."""
     batches = predict_batches(datamodule, model, device, limit=cfg.num_verify_batches)
     if not batches:
         raise ValueError("Verification produced zero batches from the predict dataloader.")
@@ -110,13 +98,7 @@ def run_evaluation(
     datamodule: L.LightningDataModule,
     device: torch.device,
 ) -> list[EvaluationResult]:
-    """Score every enabled backend with artifacts against ground truth; log the comparison.
-
-    The ``test`` split scores the test dataloader (with ground truth); ``val`` scores the
-    validation dataloader and reports under ``val/...``. The loader is built at
-    ``cfg.batch_size`` (one frame by default), not at the split's training-time setting:
-    the deployed graphs are single-frame and the latency is per batch.
-    """
+    """Score every enabled backend that has artifacts, then log the comparison."""
     datamodule.prepare_data()
     if cfg.split == "val":
         datamodule.setup("validate")
@@ -139,7 +121,6 @@ def run_evaluation(
 
 
 def _split_dataloader(datamodule: Any, split: SplitType, batch_size: int) -> Any:
-    """The split's dataloader with its batch size replaced by ``batch_size``."""
     attribute = {
         SplitType.VAL: "validation_dataloader_config",
         SplitType.TEST: "test_dataloader_config",
@@ -150,13 +131,7 @@ def _split_dataloader(datamodule: Any, split: SplitType, batch_size: int) -> Any
 
 @contextmanager
 def _limited_cpu_threads(count: int) -> Iterator[None]:
-    """Cap the process's CPU worker pools while backends are timed.
-
-    See ``EvaluationConfig.cpu_threads``: busy-waiting BLAS / OpenMP workers left behind by
-    a CPU op inflate the measured time of engines with host-side shape syncs. Covers
-    PyTorch's intra-op pool and every pool threadpoolctl finds (numpy's OpenBLAS above
-    all); ``count <= 0`` changes nothing.
-    """
+    """Cap the PyTorch and BLAS / OpenMP thread pools (see ``EvaluationConfig.cpu_threads``)."""
     if count <= 0:
         yield
         return
@@ -231,19 +206,12 @@ def run_post_export(
     onnx_paths: Mapping[str, Path] | None = None,
     plugin_libraries: Sequence[str] = (),
 ) -> list[EvaluationResult]:
-    """Run the enabled post-export steps of ``deploy_cfg`` over the artifacts in ``output_dir``.
+    """Run the enabled ``deploy.verification`` and ``deploy.evaluation`` over ``output_dir``.
 
-    ``log_metric(key, value)`` receives every evaluation metric and mean latency (the
-    deploy run's MLflow client, say); with or without it, evaluation writes every metric
-    and latency of every backend to ``<output_dir>/evaluation.json``, since the log keeps
-    only the headline rows. ``plugin_libraries`` are the TensorRT plugin ``.so``
-    the engines were built with (``deploy.tensorrt.plugin_libraries``), handed to the
-    runners by the caller so this module reads only its own config sections.
-
-    Nothing runs when both ``deploy.verification`` and ``deploy.evaluation`` are disabled
-    (the default). Enabling either on a model without ``build_stages()`` is an error: the
-    steps execute the stage graph, there is nothing else that could run the artifacts
-    together with the model's glue.
+    Evaluation writes every metric and latency to ``<output_dir>/evaluation.json`` and passes
+    each to ``log_metric(key, value)`` when given. ``plugin_libraries`` are the TensorRT
+    plugins the engines were built with. Enabling either step on a model without
+    ``build_stages()`` is an error.
     """
     cfg = PostExportConfig.from_deploy_cfg(deploy_cfg)
     if not cfg.any_enabled:
@@ -256,8 +224,7 @@ def run_post_export(
             "graph (see autoware_ml.deployment.stages) or disable these sections."
         )
     output_dir = Path(output_dir)
-    # ``onnx_paths``: the graphs the export loop shipped (a config modifier may write under
-    # another name than <stage>.onnx); the engines are always <stage>.engine.
+    # A graph modifier may rename the ONNX files; the engines are always <stage>.engine.
     pipelines = PipelineCache(
         stages, output_dir, plugin_libraries=plugin_libraries, onnx_paths=onnx_paths
     )
