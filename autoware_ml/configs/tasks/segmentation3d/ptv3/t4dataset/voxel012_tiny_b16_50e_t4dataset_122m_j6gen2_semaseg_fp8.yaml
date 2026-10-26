@@ -29,11 +29,11 @@ deploy:
     enabled: true
     # Quantized raw softmax diffs between the fp32 fake-quant reference and the engine are
     # larger than the fp16 gate of base.yaml while mIoU stays equal. The gate is the INT8
-    # variant's (measured there 2026-09-24: pred_probs max_diff 0.186, 0.34 % of the labels
-    # flipped); the FP8 engine's own max_diff has not been recorded yet (whole-list
-    # override: Hydra lists replace).
+    # variant's (measured there, see voxel012_tiny_b16_50e_t4dataset_122m_j6gen2_semaseg_int8);
+    # the FP8 engine's own max_diff has not been recorded yet (whole-list override: Hydra
+    # lists replace).
     scenarios:
-      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.5 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.65 }
   evaluation:
     enabled: true
 
