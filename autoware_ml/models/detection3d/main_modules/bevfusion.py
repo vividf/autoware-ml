@@ -270,8 +270,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
             metrics: Detection metrics accumulated during validation and test.
-            scheduler_config: Lightning scheduler metadata (``interval``, ``monitor`` ...),
-                see :class:`~autoware_ml.models.module_base_model.ModuleBaseModel`.
+            scheduler_config: Lightning scheduler metadata.
             partial_annotations: Maps the dataset's per-sample annotation flag to the classes
                 the head must not supervise in that sample. None supervises every class.
 
