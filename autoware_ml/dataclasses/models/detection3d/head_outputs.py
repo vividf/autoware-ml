@@ -150,10 +150,10 @@ class TransFusionHeadOutputs(BaseModel):
     @classmethod
     def from_export_tensors(cls, tensors: Mapping[str, torch.Tensor]) -> TransFusionHeadOutputs:
         """
-        Rebuild the head outputs from the tensors a deployed graph emitted under their names.
+        Rebuild the head outputs from exported tensors keyed by name.
 
-        The inverse of :meth:`export_tensors`: the dense and query tensors and every
-        per-proposal branch the head predicts (``vel`` stays unset when absent).
+        The inverse of :meth:`export_tensors`; a branch the head does not predict (``vel``)
+        stays unset.
 
         Args:
             tensors: The exported tensors keyed by output name.
@@ -162,8 +162,7 @@ class TransFusionHeadOutputs(BaseModel):
             The head outputs.
 
         Raises:
-            ValueError: If a name is not an output of the head, or a tensor every head
-                emits is missing.
+            ValueError: If a name is not a head output, or a required tensor is missing.
         """
         own = ("dense_heatmap", "query_heatmap_score", "query_labels")
         branches = TransFusionSeparateHeadOutputs.model_fields

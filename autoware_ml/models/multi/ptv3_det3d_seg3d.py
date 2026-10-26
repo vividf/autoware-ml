@@ -309,11 +309,7 @@ class PTv3Det3DSeg3DModel(PTv3BaseModel):
     def build_deployed_eval_output(
         self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
     ) -> dict[str, Any]:
-        """Score the two head graphs' tensors exactly like forward()'s outputs.
-
-        The seg head graph emits the argmax labels and the softmax scores, the det head
-        graph its TransFusionHeadOutputs tensors; both are model outputs side by side.
-        """
+        """Score the two head graphs' tensors exactly like forward()'s outputs."""
         det_tensors = {
             name: tensor for name, tensor in outputs.items() if name not in SEG3D_HEAD_OUTPUT_NAMES
         }
@@ -351,11 +347,10 @@ class PTv3Det3DSeg3DModel(PTv3BaseModel):
         )
 
     def build_stages(self) -> Sequence[Stage]:
-        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head -> ptv3_det3d_head``.
+        """Declare ``serialize_points -> ptv3_encoder -> ptv3_seg3d_head -> ptv3_det3d_head``.
 
-        Both heads read the shared encoder graph and nothing from each other, so both are
-        model outputs: the seg head's names, then the det head's (the configured
-        ``export_output_names`` minus the seg head's).
+        The heads do not read each other, so the model outputs are the seg head's, then the
+        det head's: ``export_output_names`` minus the seg head's names.
 
         Raises:
             ValueError: If the export output names or the geometry were not configured.
@@ -382,11 +377,7 @@ def _joint_eval_output(
     det3d_outputs: Detection3DHeadOutputs,
     seg_eval_out: dict[str, Any],
 ) -> dict[str, Any]:
-    """Decode the boxes, blank the frames without detection supervision, add the seg frames.
-
-    Shared by ``build_eval_output`` (forward's typed outputs) and
-    ``build_deployed_eval_output`` (the head graphs' tensors), so both score identically.
-    """
+    """Decode the boxes, blank the frames without detection supervision, add the seg frames."""
     det3d_mask = model._detection3d_frame_mask(model._detection3d_gt_batch(batch))
     predictions = list(
         model.bbox_head.decode_outputs(outputs=det3d_outputs).detection3d_predictions

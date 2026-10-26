@@ -1292,6 +1292,5 @@ def test_export_rejects_a_multi_sample_batch() -> None:
         ).multi_task_gt_batch,
         is_training=True,
     )
-    # The stage graph's serialize glue prepares every export input.
     with pytest.raises(ValueError, match="single-sample"):
         model.build_export_specs(double)

@@ -159,10 +159,7 @@ class PTv3Segmentation3DModel(PTv3BaseModel):
         )
 
     def build_stages(self) -> Sequence[Stage]:
-        """``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``; the split the runtime loads.
-
-        The export specs derive from this declaration (:meth:`ModuleBaseModel.build_export_specs`).
-        """
+        """Declare ``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``, the runtime's split."""
         return build_ptv3_stages(self, build_seg3d_head_stage(self, self.seg3d_head))
 
     def build_deployed_eval_output(

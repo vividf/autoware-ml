@@ -440,11 +440,9 @@ def segmentation3d_eval_output(
 def segmentation3d_eval_output_from_scores(
     pred_labels: torch.Tensor, scores: torch.Tensor, batch_inputs: ModelBatchInputs
 ) -> dict[str, Any]:
-    """The ``seg3d_frames`` eval output from per-voxel labels and class scores.
+    """Same as :func:`segmentation3d_eval_output`, from per-voxel labels and softmax scores.
 
-    What a deployed segmentation graph emits (``pred_labels`` / ``pred_probs``); the
-    PyTorch path reaches it through :func:`segmentation3d_eval_output`, so both score the
-    same way.
+    These are what the deployed segmentation graph emits (``pred_labels`` / ``pred_probs``).
 
     Args:
         pred_labels: Predicted class of every voxel.
