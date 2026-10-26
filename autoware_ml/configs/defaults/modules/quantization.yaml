@@ -1,8 +1,7 @@
 # @package _global_
 
-# Quantization (see autoware_ml/quantization/config.py for the typed schema). Off by
-# default; a model's `_int8` / `_fp8` variant enables it and `autoware-ml quantize`
-# produces the self-describing checkpoint that `deploy` / `test` then take as --weights.
+# Schema: autoware_ml/quantization/config.py. A model's `_int8` / `_fp8` variant enables it
+# for `autoware-ml quantize`; deploy and test read the quantization from the checkpoint.
 quantization:
   enabled: false
   mode: ptq
@@ -10,7 +9,7 @@ quantization:
   # Modules (glob patterns over named_modules) left un-quantized, whole subtree included.
   skip_quantize: []
   dry_run: false
-  # Activation amax method: mse (default) | entropy | percentile | max | smoothquant.
+  # Activation amax method: mse | entropy | percentile | max | smoothquant.
   calibration:
     method: mse
   ptq:

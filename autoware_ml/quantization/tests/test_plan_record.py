@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the plan layer (rules validation, placement-record round-trip, decision recording).
-
-The one ``prepare`` test uses a model whose submodule rules match nothing
-quantizable, so only the BN-fuse and skip_quantize decisions are exercised.
-"""
+"""Unit tests for quantization rules, plans and placement records."""
 
 from __future__ import annotations
 
@@ -83,8 +79,6 @@ class TestRecordDiff:
 
 
 class TestVerifyMatchesIsStructural:
-    """Loading is gated on (module, transform); the recorded prose is not a contract."""
-
     def test_reworded_reason_and_detail_still_match(self):
         saved = _record(("a.conv", "replace_module", "submodule rule", "Conv2d -> QuantConv2d"))
         # A reworded reason, and a modelopt release that renamed the quantized class.
@@ -108,8 +102,6 @@ class TestVerifyMatchesIsStructural:
 
 
 class TestPrepareRecordsDecisions:
-    """Backend-free slice of ``prepare``: BN fuse + skip_quantize recording."""
-
     @staticmethod
     def _model() -> nn.Module:
         model = nn.Module()
@@ -136,8 +128,6 @@ class TestPrepareRecordsDecisions:
                 "ptq": {"calibrate_samples": 4},
             }
         )
-        # The declared tower is skipped whole and no recipe matches: only the fuse_bn and
-        # skip_quantize transforms run.
         plan = QuantizationPlan(
             rules=QuantRules(quantize_submodules={"some_tower": ("conv",)}), config=config
         )
@@ -149,7 +139,6 @@ class TestPrepareRecordsDecisions:
         fuse = [d for d in plan.placement_record.decisions if d.transform == "fuse_bn"]
         assert fuse[0].module == "some_tower.0"
         assert "some_tower.1" in fuse[0].detail
-        # The BN really was folded away.
         assert isinstance(model.some_tower[1], nn.Identity)
         kept = [d for d in plan.placement_record.decisions if d.transform == "skip_quantize"]
         assert kept[0].module == "some_tower"

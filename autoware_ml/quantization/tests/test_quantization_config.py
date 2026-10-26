@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the typed quantization config (typo guard, mode lies, defaults)."""
+"""Unit tests for the typed quantization config."""
 
 # cspell:ignore methd
 
@@ -75,7 +75,6 @@ class TestQuantizationConfig:
     def test_default_precision_values(self):
         config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "fp8"})
         assert config.default_precision is Precision.FP8
-        # Unknown precisions still die at parse time.
         with pytest.raises(ValueError, match="valid values"):
             QuantizationConfig.from_dict({"enabled": True, "default_precision": "int4"})
         config = QuantizationConfig.from_dict({"enabled": True, "default_precision": "int8"})

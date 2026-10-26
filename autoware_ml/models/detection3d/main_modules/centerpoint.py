@@ -101,9 +101,6 @@ class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
         return self.bbox_head(bev_features).export_tensors(self.output_names)
 
 
-#: CenterPoint's quantization declaration: which submodules carry which quantizable
-#: module kinds. An architecture fact, so it lives in code; the `quantization` config only
-#: subtracts from it (`skip_quantize`).
 CENTERPOINT_QUANT_RULES = QuantRules(
     quantize_submodules={
         "pts_backbone": ("conv", "linear"),

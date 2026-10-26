@@ -13,43 +13,11 @@
 # limitations under the License.
 
 """
-Quantization framework (model-agnostic).
+Model-agnostic quantization on nvidia-modelopt.
 
-PTQ / QAT building blocks based on NVIDIA's modelopt toolkit, organized in layers:
-
-- :mod:`~autoware_ml.quantization.rules`   — ``QuantRules``, a model's declaration; the
-  one module a model imports (no modelopt behind it).
-- :mod:`~autoware_ml.quantization.plan`    — ``QuantizationPlan`` (rules bound to config;
-  ``prepare`` builds the tree AND records a ``PlacementRecord`` of every placement decision).
-- :mod:`~autoware_ml.quantization.core`    — model-agnostic engine on nvidia-modelopt
-  (descriptor tables, in-place module conversion through modelopt's ``QuantModuleRegistry``,
-  BN fusion, calibration, quantizer state).
-- :mod:`~autoware_ml.quantization.config`  — typed view of the Hydra ``quantization`` section.
-- :mod:`~autoware_ml.quantization.checkpoint` — self-describing quantized checkpoints (config +
-  placement record embedded next to the ``state_dict``; no sidecar files).
-- :mod:`~autoware_ml.quantization.loader` — rebuild + verify + load from that description.
-- :mod:`~autoware_ml.quantization.qat_callback` — Lightning callback that turns a training run
-  into frozen-amax QAT fine-tuning.
-
-A model's quantization declaration (e.g. CenterPoint's ``QuantRules``) lives next to the model
-and is exposed through its ``build_quantization_rules()`` hook — the engine never imports a
-model.
-
-The invariant every stage preserves: the quantize stage (PTQ / QAT) and the loader all build the
-quantized module tree by calling the *same* ``QuantizationPlan.for_model(model, config).prepare(model)``,
-so the calibrated ``state_dict`` and the later ``load_state_dict`` line up by construction —
-and the placement record embedded in the checkpoint lets the loader machine-check that instead
-of trusting it. Because the config travels inside the checkpoint, ``deploy`` and ``test`` need
-no ``quantization`` section at all.
-
-The names exported here are the package's real external API. Deeper internals (descriptor
-tables, the single Conv-BN fold) stay importable from their defining
-modules but are deliberately not re-exported.
-
-The exports load on first access. Importing ``autoware_ml.quantization.rules`` runs this
-``__init__`` first, and every model imports ``rules`` through
-``models/module_base_model.py``; eager re-exports would pull modelopt (and its import-time
-patches) into every model import.
+The exports load on first access: every model imports :mod:`.rules` through
+``models/module_base_model.py``, which runs this ``__init__`` first, and eager re-exports
+would import modelopt with every model.
 """
 
 from __future__ import annotations
@@ -57,14 +25,10 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-# Defining module -> the names re-exported from it.
 _EXPORTS: dict[str, tuple[str, ...]] = {
-    # Typed config
     ".config": ("QuantizationConfig", "CalibrationConfig", "PTQConfig", "QATConfig"),
-    # Plan (the single interface between deployment stages and quantization)
     ".rules": ("QuantRules",),
     ".plan": ("QuantizationPlan", "PlacementRecord", "PlacementDecision"),
-    # Self-describing checkpoints
     ".checkpoint": (
         "QUANTIZATION_KEY",
         "QuantizationDescription",
@@ -73,17 +37,13 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "find_quantization",
     ),
     ".loader": ("load_quantized_model",),
-    # Replace / placement
     ".core.replace": (
         "replace_quantizable_modules",
         "expand_skip_quantize",
         "match_skip_quantize_roots",
     ),
-    # Calibration
     ".core.calibration": ("Calibrator",),
-    # Fusion
     "autoware_ml.utils.bn_fusion": ("fuse_model_bn",),
-    # Quantizer state
     ".core.quantizer_state": (
         "disable_quantizers_in",
         "quantizers_disabled",
