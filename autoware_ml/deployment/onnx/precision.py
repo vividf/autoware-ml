@@ -13,15 +13,11 @@
 # limitations under the License.
 
 
-"""FP16 conversion for exported graphs that carry Q/DQ nodes or runtime plugin ops.
+"""FP16 cast for exported graphs that carry Q/DQ nodes or runtime plugin ops.
 
-Plain graphs take ``autoware_ml.utils.onnx_precision`` (onnxconverter-common behind an
-FP32 I/O boundary). A graph with quantize/dequantize nodes or custom-domain plugin ops
-cannot: the converter has no rule for keeping a calibrated Q/DQ pair exact and cannot
-type a plugin op. :func:`cast_graph_to_fp16` is the whole-graph FP16 cast for those:
-conv-family Q/DQ go fp16 with the rest of the graph (legal from opset 19), the Q/DQ pairs
-feeding a Gemm/MatMul stay fp32-typed *islands* with one cast per float edge where they
-meet the FP16 sea, and the graph I/O stays FP32.
+The graph goes fp16 (the *sea*) except for fp32 *islands*: the Q/DQ pairs feeding a
+Gemm/MatMul and the ops TensorRT only parses in fp32. Conv-side Q/DQ go fp16 with the sea.
+Each float edge between the two gets one Cast, and the graph I/O stays fp32.
 """
 
 from __future__ import annotations
@@ -53,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 def _assign_missing_node_names(graph) -> None:
-    """Give every node a unique name (the island bookkeeping below is keyed by node name)."""
+    """Name the unnamed nodes; the island bookkeeping is keyed by node name."""
     taken = {node.name for node in graph.node if node.name}
     for index, node in enumerate(graph.node):
         if not node.name:
@@ -64,52 +60,45 @@ def _assign_missing_node_names(graph) -> None:
             taken.add(candidate)
 
 
-#: The quantized compute ops whose Q/DQ stay fp32-typed. TensorRT 10.8/10.16 emits NaN
-#: from a strongly-typed fp16 Q/DQ -> INT8 **Gemm** when the fp16 combined scale
-#: ``s_x * s_w[c]`` goes subnormal (the fused kernel folds the dequant scales into an fp16
-#: intermediate); fp32-typed Q/DQ take a different kernel path and are exact. Conv kernels
-#: are immune: CenterPoint and BEVFusion carry 26 conv modules with subnormal combined
-#: scales and evaluate identically under fp16-typed Q/DQ. Hence the split is by op type,
-#: not by node name or scale threshold — both were tried and are unreliable (a name list
-#: missed two culprits; 15 of PTv3's 19 head Gemms are subnormal yet only 6 misbehave).
-#: (Measured on PTv3's head: 15 of 19 Gemms have subnormal combined scales, 6 misbehave.)
+#: Ops whose Q/DQ stay fp32-typed. TensorRT 10.8/10.16 emits NaN from a strongly typed
+#: fp16 Q/DQ -> INT8 Gemm when the fp16 combined scale ``s_x * s_w[c]`` is subnormal (the
+#: fused kernel folds the dequant scales into an fp16 intermediate); fp32-typed Q/DQ take
+#: another kernel and are exact. Conv kernels are immune: the 26 conv modules of CenterPoint
+#: and BEVFusion with subnormal combined scales evaluate identically with fp16 Q/DQ.
+#: Splitting by node name or scale threshold was tried and is unreliable: a name list
+#: missed two failing Gemms, and only 6 of the 15 PTv3 head Gemms with a subnormal
+#: combined scale fail.
 _LINEAR_OPS = frozenset({"Gemm", "MatMul"})
 
-#: Ops TensorRT's parser only accepts with fp32 (or integer) inputs — an fp16 ``Range``
-#: fails the import outright ("only supports int32, int64, fp32"). They stay fp32 islands
-#: of their own, with the usual single cast per float edge where they meet the sea.
+#: Ops TensorRT's parser rejects in fp16 (``Range``: "only supports int32, int64, fp32");
+#: they stay fp32 islands of their own.
 _FP32_ONLY_OPS = frozenset({"Range"})
 
-#: Pure layout ops a DQ output may pass through on its way to the linear op (a weight
-#: DQ -> Transpose -> MatMul is how modelopt's FP8 export spells a Linear). They join the
-#: island so the DQ -> op edge stays castless (a Cast between DQ and its consumer defeats
-#: TensorRT's Q/DQ fusion — measured as "Per-tensor quantization/dequantization layer
-#: should have 1 scale factor element").
+#: Layout ops between a DQ and its linear op (modelopt's FP8 export spells a Linear as
+#: weight DQ -> Transpose -> MatMul). They join the island because a Cast between a DQ and
+#: its consumer defeats TensorRT's Q/DQ fusion ("Per-tensor quantization/dequantization
+#: layer should have 1 scale factor element").
 _LAYOUT_OPS = frozenset({"Transpose", "Reshape", "Flatten", "Squeeze", "Unsqueeze", "Identity"})
 
-#: Positions of the FLOAT-typed inputs, per island op, as the op's ONNX spec fixes them.
-#: The boundary-cast logic must never cast an integer edge (a Q/DQ zero-point, a Reshape
-#: shape...), so every op that can be an island member has a row; ``None`` means "every
-#: input is float".
+#: Float input slots of every island op per its ONNX spec, so that boundary casts never
+#: touch an integer edge (a zero point, a Reshape shape); ``None`` means every input.
 _ALL_FLOAT = None
 _ISLAND_FLOAT_INPUT_SLOTS: dict = {
-    # Q/DQ: data + scale are float for Q; only the scale for DQ (its data is int8/fp8).
+    # A DQ's data input is int8 / fp8.
     "QuantizeLinear": (0, 1),
     "TRT_FP8QuantizeLinear": (0, 1),
     "DequantizeLinear": (1,),
     "TRT_FP8DequantizeLinear": (1,),
-    # Layout hops: data input only — trailing inputs are int64 shape/axes.
+    # Inputs after the data are int64 shapes / axes.
     "Transpose": (0,),
     "Reshape": (0,),
     "Flatten": (0,),
     "Squeeze": (0,),
     "Unsqueeze": (0,),
     "Identity": (0,),
-    # The quantized linear op itself: all-float by spec.
     "Gemm": _ALL_FLOAT,
     "MatMul": _ALL_FLOAT,
-    # start / limit / delta share one type; integer Ranges are left alone by the per-edge
-    # dtype check, float ones stay fp32.
+    # The per-edge dtype check skips integer Ranges.
     "Range": _ALL_FLOAT,
 }
 _MISSING_SLOT_ENTRIES = (_LINEAR_OPS | _LAYOUT_OPS | _FP32_ONLY_OPS | set(QDQ_OPS)) - set(
@@ -120,13 +109,9 @@ assert not _MISSING_SLOT_ENTRIES, (
     "Every one needs a row so island boundary casts never touch integer edges."
 )
 
-#: Input slots of runtime plugin ops that the plugin only accepts in FP32, keyed by
-#: ``(domain, op_type)`` and gated on the node's input count (the same op has several
-#: input forms). ``autoware::ImplicitGemm`` in its INT8 form (7 inputs) takes the
-#: per-channel ``channel_scale`` / ``bias_scaled`` as FP32 while features and filters
-#: are FP16 (autoware_tensorrt_plugins ``supportsFormatCombination``); casting the
-#: scales with the sea makes the engine build fail with "could not find any supported
-#: formats consistent with input types".
+#: Plugin input slots that stay fp32 in the sea, keyed by ``(domain, op_type)`` and then by
+#: input count (one op can have several input forms). Casting them to fp16 fails the engine
+#: build with "could not find any supported formats consistent with input types".
 _PLUGIN_FP32_INPUT_SLOTS: dict[tuple[str, str], dict[int, tuple[int, ...]]] = {
     (AUTOWARE_DOMAIN, IMPLICIT_GEMM_OP): IMPLICIT_GEMM_FP32_INPUT_SLOTS,
 }
@@ -139,20 +124,17 @@ def _plugin_fp32_slots(node) -> tuple[int, ...]:
     return by_arity.get(len(node.input), ())
 
 
-#: Minimum default-domain opset for fp16-typed Q/DQ (fp16 ``x`` and ``y_scale`` on
-#: QuantizeLinear/DequantizeLinear are legal from opset 19).
+#: QuantizeLinear / DequantizeLinear accept an fp16 input and scale from opset 19.
 _FP16_QDQ_MIN_OPSET = 19
 
 
 def _quantized_island_names(graph) -> list[str]:
-    """The nodes that stay FP32-typed when the graph is cast to FP16: the linear islands.
+    """Return the names of the island nodes.
 
-    An island is a DQ whose output reaches a Gemm/MatMul (directly or through layout
-    ops), plus that DQ's Q, both nodes' scale/zero-point producers (their FP32 values
-    *are* the quantization), the layout hops and the linear op itself — the exact
-    pattern TensorRT fuses into one INT8 kernel, kept castless. Every other Q/DQ (the
-    conv family) is sea: it is retyped to fp16 with the rest of the graph, scale
-    included. See ``_LINEAR_OPS`` for why the split runs along op type.
+    A linear island is a DQ whose output reaches a Gemm/MatMul, directly or through layout
+    ops, with its Q, their scale and zero-point producers, the layout ops and the linear
+    op: the pattern TensorRT fuses into one INT8 kernel. ``_FP32_ONLY_OPS`` nodes are
+    islands of their own.
     """
     producer_of = {out: node for node in graph.node for out in node.output}
     consumers_of: dict[str, list] = {}
@@ -173,8 +155,6 @@ def _quantized_island_names(graph) -> list[str]:
     for node in graph.node:
         if node.op_type not in DEQUANTIZE_OPS or not node.output:
             continue
-        # Follow the DQ output forward through layout ops; collect the linear consumers
-        # and the hops that lead to them.
         hops: list = []
         linear: list = []
         frontier = [(node.output[0], [])]
@@ -201,35 +181,20 @@ def _quantized_island_names(graph) -> list[str]:
 
 
 def cast_graph_to_fp16(onnx_path: Path) -> None:
-    """Convert a graph to FP16 in place, around FP32 linear Q/DQ islands, keeping the I/O FP32.
+    """Cast a graph to fp16 in place around its fp32 islands, keeping the graph I/O fp32.
 
-    The FP16 path for graphs the generic converter cannot process: plugin graphs (it
-    cannot type an unregistered custom op) and quantized graphs (it has no rule keeping a
-    calibrated Q/DQ pair exact). The whole graph becomes FP16 — conv-family
-    Q/DQ included, scale and all (legal from opset 19; plugins run FP16 when their
-    tensors are) — except the linear islands (:func:`_quantized_island_names`): a Q/DQ
-    pair feeding a Gemm/MatMul stays fp32-typed exactly as the checkpoint calibrated it,
-    with single Casts on the float edges where it meets the FP16 sea. ``keep_io_types``
-    semantics hold the artifact ABI at FP32.
+    Casts are decided per tensor edge, so integer and boolean edges (a Shape result,
+    MaxPool indices) are never cast, and an island edge of unknown type is refused rather
+    than guessed as FLOAT.
 
-    Casts are decided per tensor edge, not per node: an island member's integer or
-    boolean edges (a Shape result, MaxPool's indices, an Expand shape) are never touched,
-    whatever the node's membership says. Every boundary edge must have a settled type —
-    from the op's float-slot row, or from the graph itself via
-    :func:`~autoware_ml.deployment.onnx.dtypes.tensor_types`; one that has neither is a
-    :class:`ValueError`, because guessing FLOAT is how a shape edge gets cast.
-
-    Implemented in-house rather than via onnxconverter-common: the library inserted
-    boundary casts around every blocked node (round-trip pairs inside islands), left
-    stale value_info entries that hard-fail onnxruntime's loader, and needed the island
-    list protected from recomputation — three patch layers this pass makes unnecessary
-    by only ever creating casts at true island/IO boundaries.
+    Not built on onnxconverter-common: blocking the island nodes there puts round-trip
+    casts around each of them and leaves stale ``value_info`` that onnxruntime's loader
+    rejects.
 
     Raises:
-        NotImplementedError: For graphs with control-flow subgraphs.
-        ValueError: For a graph below opset 19 that has conv-side Q/DQ to retype.
-        ValueError: For an island boundary tensor whose element type the graph does not
-            settle (typically a custom-domain producer without ``value_info``).
+        NotImplementedError: For a graph with control flow.
+        ValueError: For conv-side Q/DQ below opset 19, a Q/DQ scale that underflows in
+            fp16, or an island edge of unknown type.
     """
 
     model = onnx.load(str(onnx_path))
@@ -243,7 +208,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             "recurse into subgraph bodies first."
         )
     _assign_missing_node_names(graph)
-    # Element types before any rewrite: the boundary decisions below are per edge.
+    # Before any rewrite: the boundary decisions need the original types.
     types = tensor_types(model)
     island = set(_quantized_island_names(graph))
     sea_standard_qdq = [
@@ -282,7 +247,6 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
     def in_island(node) -> bool:
         return node.name in island
 
-    # (node name, input index) pairs a plugin needs in FP32 although the node is sea.
     pinned_fp32_slots: set[tuple[str, int]] = set()
     pinned_fp32_names: set[str] = set()
     for node in graph.node:
@@ -298,9 +262,8 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             if value == name
         )
 
-    # --- 1. Initializers: island consumers keep FP32; sea consumers get FP16 (a split
-    # copy when an initializer feeds both worlds). A plugin's FP32-pinned slot counts as
-    # an island consumer of its initializer.
+    # --- 1. Initializers: fp16 for the sea, fp32 for islands and pinned plugin slots, and a
+    # copy of each when both read one.
     fp16_twin: dict[str, str] = {}
     new_initializers = []
     qdq_scale_names = {
@@ -313,13 +276,12 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         sea_users = [n for n in users if not in_island(n) and not reads_fp32_pinned(n, init.name)]
         island_users = [n for n in users if in_island(n) or reads_fp32_pinned(n, init.name)]
         if not sea_users:
-            continue  # island-only (or unused): keep FP32
+            continue
         values = numpy_helper.to_array(init)
         half_values = values.astype("float16")
         if init.name in qdq_scale_names and bool(((values > 0) & (half_values == 0)).any()):
-            # A per-channel scale below fp16's smallest subnormal (~6e-8, amax < ~7.5e-6:
-            # a dead channel after the BN fold) flushes to zero and turns its Q/DQ into a
-            # division by zero. The calibration, not the cast, has to deal with it.
+            # A scale under fp16's smallest subnormal (~6e-8: amax < ~7.5e-6, a channel dead
+            # after the BN fold) flushes to zero; that is for the calibration to fix.
             raise ValueError(
                 f"Q/DQ scale {init.name!r} has {int(((values > 0) & (half_values == 0)).sum())} "
                 "positive entries that underflow to zero in fp16 (min "
@@ -341,8 +303,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             init.CopyFrom(half)
     graph.initializer.extend(new_initializers)
 
-    # --- 2. Sea nodes' float tensor attributes (Constant, ConstantOfShape, ...) go FP16;
-    # island Constants (Q/DQ scales) keep their exact FP32 bytes.
+    # --- 2. Float tensor attributes of sea nodes (Constant, ConstantOfShape) go fp16.
     for node in graph.node:
         if in_island(node):
             continue
@@ -355,7 +316,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     )
                 )
 
-    # New casts are appended with an anchor to splice after (None = graph front).
+    # (anchor, cast): step 7 splices each cast after its anchor node, or first if None.
     inserted: list[tuple] = []
 
     def make_cast(source: str, target: str, to, anchor_name) -> None:
@@ -363,8 +324,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             (anchor_name, helper.make_node("Cast", [source], [target], to=to, name=target))
         )
 
-    # --- 3. Pre-existing sea casts to FLOAT (int64 -> float glue) now target FLOAT16;
-    # ones feeding an island float slot keep producing FP32 for it.
+    # --- 3. Sea casts to FLOAT now target fp16, except those feeding an island float slot.
     island_float_inputs = set()
     for node in graph.node:
         if not in_island(node):
@@ -374,8 +334,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             if slots is None or index in slots:
                 island_float_inputs.add(name)
     island_float_inputs |= pinned_fp32_names
-    # Sea tensors that are already FP32 *for the island's sake*: step 5 must not cast them
-    # again (it would insert an FP32 -> FP32 no-op on the island's own input edge).
+    # Outputs of the sea casts kept fp32 for an island; step 5 must not cast them again.
     island_fp32_sources: set[str] = set()
     for node in list(graph.node):
         if in_island(node) or node.op_type != "Cast":
@@ -391,11 +350,9 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         island_fp32_sources.add(produced)
         sea_users = [n for n in consumers_of.get(produced, []) if not in_island(n)]
         if not sea_users:
-            continue  # island-only consumer: the cast keeps producing FP32
-        # Amphibious glue cast: the island slot needs its FP32 and the sea needs FP16, so
-        # the cast splits the way an amphibious initializer does in step 1. Casting the
-        # int64 source twice (rather than chaining int64 -> FP32 -> FP16) keeps the sea
-        # copy exact for the same reason the FP32 copy is exact.
+            continue
+        # Read by both: the sea gets an fp16 twin cast of the same source, not one chained
+        # off the fp32 cast, which would round twice.
         twin_name = produced + "__fp16"
         if twin_name in node_by_name:
             raise ValueError(
@@ -408,8 +365,7 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                 if name == produced:
                     user.input[index] = twin_name
 
-    # --- 4. FP32 graph inputs feed sea consumers through one FP16 cast (island
-    # consumers keep reading the FP32 input directly).
+    # --- 4. fp32 graph inputs reach the sea through one fp16 cast.
     for graph_input in graph.input:
         if graph_input.type.tensor_type.elem_type != TensorProto.FLOAT:
             continue
@@ -424,10 +380,9 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     node.input[index] = cast_name
 
     graph_input_names = {i.name for i in graph.input}
-    # Names step 6 re-homes: an FP32 graph output produced by a sea node. Its public name
-    # will belong to a boundary cast spliced *after* the casts made here, so an island
-    # reading it must read the producer's internal FP16 tensor instead — otherwise the
-    # node order stops being topological and the ONNX loader rejects the graph.
+    # fp32 graph outputs of sea nodes. Step 6 hands their names to casts spliced after the
+    # casts of step 5, so an island cast reads the internal fp16 tensor instead, keeping the
+    # node order topological.
     resited_sea_outputs = {
         output.name
         for output in graph.output
@@ -436,9 +391,8 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
         and not in_island(producer_of[output.name])
     }
 
-    # --- 5. Island boundaries: a float edge entering an island from the sea gets one
-    # FP32 cast; a float island output consumed by the sea gets one FP16 cast. Integer
-    # and boolean edges pass through untouched in both directions.
+    # --- 5. Island boundaries: one fp32 cast per float edge in, one fp16 cast per float
+    # edge out.
     for node in list(graph.node):
         if not in_island(node):
             continue
@@ -447,21 +401,21 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             if not name:
                 continue  # omitted optional input
             if slots is not None and index not in slots:
-                continue  # integer slot by spec (a Q/DQ zero-point, a Reshape shape...)
+                continue
             dtype = types.get(name)
             if dtype is None and slots is None:
                 settled_type(name, node, f"input {index}")
             if dtype is not None and not is_float(dtype):
-                continue  # integer / bool edge: casting it to FLOAT would break the graph
+                continue
             if name in island_fp32_sources:
-                continue  # a sea cast kept FP32 precisely to feed this slot
+                continue
             source = producer_of.get(name)
             if source is not None and in_island(source):
-                continue  # island-internal edge: castless by construction
+                continue
             if source is None and name not in graph_input_names:
-                continue  # initializer: island copies stayed FP32
+                continue  # initializer, kept fp32 in step 1
             if source is None and name in graph_input_names:
-                continue  # FP32 graph input read directly
+                continue
             cast_source = name + "__fp16" if name in resited_sea_outputs else name
             cast_name = name + "__fp32"
             if cast_name not in node_by_name:
@@ -475,8 +429,6 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
             if not sea_users:
                 continue
             if settled_type(out, node, "output") != TensorProto.FLOAT:
-                # A Q's int8, a Shape's int64, MaxPool's indices: the sea reads them as
-                # they are. (So does an output the graph already holds in FP16.)
                 continue
             cast_name = out + "__fp16"
             make_cast(out, cast_name, TensorProto.FLOAT16, node.name)
@@ -485,14 +437,13 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     if name == out:
                         user.input[index] = cast_name
 
-    # --- 5b. A plugin's FP32-pinned slot fed by a sea node (or a resited graph output)
-    # gets one FP32 cast, like an island input edge.
+    # --- 5b. Pinned plugin slots fed by the sea get one fp32 cast, like island inputs.
     for node in list(graph.node):
         for index in _plugin_fp32_slots(node):
             name = node.input[index]
             source = producer_of.get(name)
             if source is None or in_island(source) or name in island_fp32_sources:
-                continue  # initializer kept FP32 in step 1 / island output / FP32 glue cast
+                continue  # already fp32: an initializer, island output or glue cast
             dtype = types.get(name)
             if dtype is not None and not is_float(dtype):
                 continue
@@ -503,9 +454,9 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                 node_by_name[cast_name] = True
             node.input[index] = cast_name
 
-    # --- 6. FP32 graph outputs produced by sea nodes: the producer emits FP16 under an
-    # internal name, a boundary cast owns the output name, and internal consumers read
-    # the FP16 tensor (PTv3's encoder re-consumes its own per-stage outputs).
+    # --- 6. A sea node's fp32 graph output: the node writes an internal fp16 tensor, which
+    # internal consumers read (PTv3's encoder re-reads its per-stage outputs), and a cast
+    # owns the output name.
     for graph_output in graph.output:
         if graph_output.type.tensor_type.elem_type != TensorProto.FLOAT:
             continue
@@ -522,9 +473,8 @@ def cast_graph_to_fp16(onnx_path: Path) -> None:
                     node.input[index] = internal
         make_cast(internal, graph_output.name, TensorProto.FLOAT, producer.name)
 
-    # --- 7. Splice the new casts in (after their producer; graph-input casts up front)
-    # and drop the value_info hints: backends re-infer, and a stale FLOAT entry is a
-    # hard type error in onnxruntime's loader.
+    # --- 7. Splice in the casts and drop value_info: a stale FLOAT entry is a type error in
+    # onnxruntime's loader.
     front = [cast for anchor, cast in inserted if anchor is None]
     after: dict[str, list] = {}
     for anchor, cast in inserted:

@@ -13,23 +13,13 @@
 # limitations under the License.
 
 
-"""Element types of an ONNX graph's tensors, for passes that rewrite dtypes.
-
-A precision pass reasons per tensor edge — ONNX legality is defined there, not per
-node — so before it inserts a single Cast it needs to know what every boundary tensor
-holds. :func:`tensor_types` answers that from the graph's own declarations plus ONNX
-shape inference, seeded through the quantize/dequantize ops (whose custom-domain FP8
-spellings have no schema inference could use).
-"""
+"""Element types of an ONNX graph's tensors, for passes that rewrite dtypes."""
 
 from __future__ import annotations
 
 import onnx
 from onnx import TensorProto, helper, shape_inference
 
-#: Quantize/dequantize node spellings. INT8 exports as standard ONNX Q/DQ; FP8 exports
-#: as modelopt's TRT-domain custom ops (its E4M3 symbolic bypasses standard
-#: ``QuantizeLinear``, whose float8 form it never emits).
 from autoware_ml.deployment.onnx.inspect import DEQUANTIZE_OPS, QDQ_OPS, QUANTIZE_OPS  # noqa: E402
 
 __all__ = ["DEQUANTIZE_OPS", "QDQ_OPS", "QUANTIZE_OPS", "is_float", "tensor_types"]
@@ -38,21 +28,18 @@ _FLOAT_TYPES = (TensorProto.FLOAT, TensorProto.FLOAT16)
 
 
 def is_float(elem_type: int | None) -> bool:
-    """Whether an element type is one of the two precisions the FP16 passes trade between."""
+    """Whether ``elem_type`` is fp32 or fp16; other float types do not count."""
     return elem_type in _FLOAT_TYPES
 
 
 def tensor_types(model: onnx.ModelProto) -> dict[str, int]:
-    """Element type of every tensor the graph settles, by name.
+    """Element type of every tensor whose type the graph settles, by name.
 
-    Sources, in order: graph inputs/outputs and existing ``value_info``; initializers;
-    ``Constant`` node values; the quantize/dequantize outputs (a Q produces its
-    zero-point's type, a DQ its scale's — the same rule for the standard and the
-    TRT-domain FP8 spellings); then ONNX shape inference carries those through every
-    standard op. Custom-domain ops other than Q/DQ contribute nothing themselves — an
-    exported graph declares their outputs (the exporter records the traced dtype), a
-    hand-built one has to say so in ``value_info``. Absent from the result means "the
-    graph does not settle this tensor's type"; callers decide whether that is an error.
+    Q/DQ outputs are typed here (a Q from its zero point, a DQ from its scale) because shape
+    inference has no schema for modelopt's FP8 Q/DQ, which are TRT-domain ops. Inference
+    then carries the types through the standard ops. Other custom ops' outputs are typed
+    only by ``value_info``, which the exporter writes. A missing name means the type is not
+    settled; callers decide whether that is an error.
     """
     graph = model.graph
     types: dict[str, int] = {}

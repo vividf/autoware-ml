@@ -13,30 +13,12 @@
 # limitations under the License.
 
 
-"""Readable quantization parameters on every exported Q/DQ node.
+"""Q/DQ scales and zero points as initializers instead of constant helper chains.
 
-modelopt's ONNX symbolics spell a quantizer's scale and zero point as little constant
-sub-graphs rather than as tensors: ``Constant`` for the scale and ``Constant -> Cast``
-for the zero point (``modelopt/torch/quantization/export_onnx.py`` builds the zero point
-in the quantizer's compute dtype, then casts it to int8/uint8). The framework exports
-with ``do_constant_folding: false`` -- the traced graphs carry ops whose folding the
-tracer gets wrong -- so those helper nodes survive into the artifact, and the values that
-*are* the quantization become unreadable where it matters:
-
-- Netron inlines a ``Constant`` into its consumer only when the constant's output feeds
-  exactly one node input (``onnx.js``, ``Graph.push``). A Q/DQ pair shares one scale
-  constant, so the scale renders as a separate ``Constant`` box instead of a value on the
-  node, and the zero point -- one ``Cast`` hop away -- cannot be inlined at all. The Q/DQ
-  node panel shows ``y_scale``/``y_zero_point`` as plain edges, with no value or dtype.
-- Graph passes that need a Q/DQ's parameter types have to walk the chain themselves
-  (:func:`~autoware_ml.deployment.onnx.dtypes.tensor_types` cannot seed a quantize
-  output's type from a zero point it can only see through a ``Cast``).
-
-:func:`fold_qdq_params` evaluates those chains once, after the export, and writes the
-results back as graph initializers under the same tensor names -- the spelling a
-hand-written Q/DQ graph uses, and the one AWML's exports happen to have for the scale.
-The graph keeps identical numerics (the ``Cast`` is applied, not dropped) and loses the
-helper nodes.
+modelopt's symbolics emit a quantizer's scale as a ``Constant`` and its zero point as
+``Constant -> Cast``, and with ``do_constant_folding: false`` (the tracer folds some of the
+exported ops wrongly) the chains reach the artifact. Netron inlines a ``Constant`` only
+into a single consumer input, so neither value shows on the Q/DQ nodes.
 """
 
 from __future__ import annotations
@@ -52,22 +34,18 @@ from autoware_ml.deployment.onnx.inspect import QDQ_OPS
 
 logger = logging.getLogger(__name__)
 
-#: Helper ops a quantization parameter may travel through, and the only ones this pass
-#: ever evaluates or deletes. ``Constant`` is the leaf, ``Cast`` retypes the zero point,
-#: ``Identity`` is the tracer's occasional pass-through.
+#: The only ops the pass evaluates or deletes; the tracer occasionally adds an ``Identity``.
 _FOLDABLE_OPS = frozenset({"Constant", "Cast", "Identity"})
 
-#: Chain-length guard: a quantization parameter is a constant two or three hops deep.
-#: Anything longer is not the pattern this pass recognizes, so it is left alone.
+#: Parameter chains are two or three ops deep; longer ones are left alone.
 _MAX_CHAIN_DEPTH = 8
 
-#: Scale and zero point, by input position -- identical for the standard ops and for
-#: modelopt's TRT-domain FP8 spellings (which carry the scale only).
+#: Scale and zero point; modelopt's TRT-domain FP8 Q/DQ have the scale only.
 _PARAM_SLOTS = slice(1, 3)
 
 
 def _constant_value(node: onnx.NodeProto) -> np.ndarray | None:
-    """The value a ``Constant`` node holds, or ``None`` for a spelling we do not read."""
+    """Value of a ``Constant`` node, or ``None`` for a form not read here."""
     for attribute in node.attribute:
         if attribute.name == "value":
             return numpy_helper.to_array(attribute.t)
@@ -79,7 +57,7 @@ def _constant_value(node: onnx.NodeProto) -> np.ndarray | None:
             return np.array(attribute.i, dtype=np.int64)
         if attribute.name == "value_ints":
             return np.array(list(attribute.ints), dtype=np.int64)
-    return None  # sparse_value, or a Constant of a shape/dtype-only form
+    return None
 
 
 def _evaluate(
@@ -87,12 +65,7 @@ def _evaluate(
     producer_of: dict[str, onnx.NodeProto],
     depth: int = 0,
 ) -> np.ndarray | None:
-    """Evaluate a constant helper chain, or ``None`` when the tensor is not one.
-
-    ``None`` is the "leave it alone" answer for everything this pass must not touch: a
-    genuinely computed scale, a chain through an op outside :data:`_FOLDABLE_OPS`, or a
-    cast whose target dtype numpy cannot express.
-    """
+    """Evaluate the helper chain producing ``name``, or return ``None`` to leave it alone."""
     node = producer_of.get(name)
     if node is None or depth > _MAX_CHAIN_DEPTH or node.op_type not in _FOLDABLE_OPS:
         return None
@@ -110,20 +83,14 @@ def _evaluate(
     try:
         return value.astype(helper.tensor_dtype_to_np_dtype(target))
     except (KeyError, TypeError, ValueError):
-        return None  # an FP8/BFLOAT16 cast without a numpy dtype behind it
+        return None  # FP8 / bfloat16 have no numpy dtype
 
 
 def fold_qdq_params(onnx_path: Path) -> None:
-    """Rewrite every Q/DQ node's constant scale and zero point as graph initializers.
+    """Rewrite the constant scales and zero points of Q/DQ nodes as initializers, in place.
 
-    In-place and idempotent: a parameter that is already an initializer, a graph input or
-    a graph output is left as it is, and so is one this pass cannot evaluate exactly (see
-    :func:`_evaluate`). Helper nodes are deleted only once nothing reads them, so a
-    ``Constant`` shared with a non-Q/DQ consumer survives.
-
-    The numbers do not change -- a ``Cast`` in the chain is applied rather than dropped --
-    so the pass is safe to run on a calibrated graph: Q/DQ values stay bit-identical to
-    what the checkpoint calibrated, only their spelling changes.
+    Idempotent. The values stay bit-identical (a ``Cast`` in a chain is applied), and a
+    helper node that another node still reads is kept.
     """
     model = onnx.load(str(onnx_path), load_external_data=False)
     graph = model.graph
@@ -131,10 +98,9 @@ def fold_qdq_params(onnx_path: Path) -> None:
         return
 
     producer_of = {out: node for node in graph.node for out in node.output}
-    # Names the pass must not claim: an initializer or graph input already *is* a tensor,
-    # and a graph output has to stay a produced tensor.
     reserved = {init.name for init in graph.initializer}
     reserved |= {value.name for value in graph.input}
+    # A graph output must stay a node output.
     protected = {value.name for value in graph.output}
 
     folded: dict[str, np.ndarray] = {}
@@ -151,9 +117,8 @@ def fold_qdq_params(onnx_path: Path) -> None:
         return
 
     graph.initializer.extend(numpy_helper.from_array(value, name) for name, value in folded.items())
-    # The folded tensors are initializers now, so their producers must go (two
-    # definitions of one tensor name is an invalid graph), and then every helper node
-    # left without a consumer goes with them.
+    # Drop the producers of the folded tensors (a name cannot be defined twice), then every
+    # helper left unread.
     kept = [node for node in graph.node if not (node.output and set(node.output) <= folded.keys())]
     while True:
         read = {name for node in kept for name in node.input} | protected
