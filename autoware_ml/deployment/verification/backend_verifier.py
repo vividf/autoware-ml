@@ -12,13 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scenario-driven cross-backend verification.
+"""Cross-backend verification of the raw model outputs.
 
-Each scenario names a reference and a test backend (with devices); the verifier
-runs both pipelines on the same preprocessed batches and compares the raw model
-outputs element-wise: floats against an absolute tolerance (the verifier default or
-the scenario's ``tolerance``), integers by the share that differ. No ground truth is
-involved: this is numerical parity, a peer of — not a form of — evaluation.
+Each scenario runs a reference and a test pipeline on the same batches. Float outputs must
+agree within an absolute tolerance, integer outputs by the share that differ.
 """
 
 from __future__ import annotations
@@ -43,11 +40,10 @@ class VerificationScenario:
 
     Attributes:
         ref_backend: Reference backend.
-        ref_device: Device string for the reference pipeline (e.g. ``cuda`` / ``cpu``).
-        test_backend: Test backend.
-        test_device: Device string for the test pipeline.
-        tolerance: Optional per-scenario absolute tolerance overriding the
-            verifier default (e.g. relaxed for int8, tight for fp32-vs-onnx).
+        ref_device: Device of the reference pipeline.
+        test_backend: Tested backend.
+        test_device: Device of the tested pipeline.
+        tolerance: Absolute tolerance replacing the verifier default, or ``None``.
     """
 
     ref_backend: Backend
@@ -58,11 +54,8 @@ class VerificationScenario:
 
     def __post_init__(self) -> None:
         if (self.ref_backend, self.ref_device) == (self.test_backend, self.test_device):
-            # The pipeline cache is keyed by (backend, device), so both sides would be the
-            # *same* pipeline — and the TensorRT runner reuses its output buffers between
-            # calls, so the test run would overwrite the tensors the reference run
-            # returned. The comparison then reads one buffer twice and passes
-            # unconditionally: a silent green light, which is worse than no verification.
+            # Both sides would get the same cached pipeline, and the TensorRT runner reuses
+            # its output buffers, so the comparison would read one buffer twice and always pass.
             raise ValueError(
                 f"Verification scenario compares {self.ref_backend}({self.ref_device}) with "
                 "itself. A scenario must name two different (backend, device) pairs — "
@@ -71,11 +64,7 @@ class VerificationScenario:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> VerificationScenario:
-        """Build a scenario from a ``{ref: {backend, device}, test: {backend, device}}`` mapping.
-
-        An optional top-level ``tolerance`` key overrides the verifier default
-        for this scenario only.
-        """
+        """Parse ``{ref: {backend, device}, test: {backend, device}, tolerance}``."""
         try:
             raw_tolerance = raw.get("tolerance")
             return cls(
@@ -99,13 +88,11 @@ class VerificationScenario:
 
 
 class BackendVerifier:
-    """Run verification scenarios over a set of preprocessed batches.
+    """Run verification scenarios over preprocessed batches.
 
     Args:
-        pipelines: Shared pipeline cache (one pipeline per backend/device, reused by
-            evaluation).
-        tolerance: Default absolute element-wise tolerance on raw graph outputs;
-            a scenario's own ``tolerance`` overrides it for that scenario.
+        pipelines: Pipeline cache shared with evaluation.
+        tolerance: Absolute tolerance of the scenarios that set none.
     """
 
     def __init__(self, pipelines: PipelineCache, tolerance: float) -> None:
@@ -118,23 +105,16 @@ class BackendVerifier:
         scenarios: Sequence[VerificationScenario],
         available_backends: set[Backend],
     ) -> bool:
-        """Run every applicable scenario; log a per-scenario report.
-
-        Args:
-            batches: Preprocessed sample batches shared by all scenarios.
-            scenarios: Configured reference-vs-test comparisons.
-            available_backends: Backends whose artifacts exist for this run.
-                Scenarios touching an unavailable backend are skipped with a warning.
+        """Run the scenarios whose backends are available and log a report per scenario.
 
         Returns:
-            True when every executed scenario passed on every batch.
+            Whether every executed scenario passed on every batch.
 
         Raises:
-            ValueError: If no scenario was configured, or none was executable.
+            ValueError: If no scenario is configured or none can run, so that verification
+                never passes without comparing anything.
         """
         if not scenarios:
-            # Silence here would mean "verification enabled" reports green while nothing
-            # was compared — the same false confidence the executed==0 raise below guards.
             raise ValueError(
                 "deploy.verification.enabled=true but deploy.verification.scenarios is empty; "
                 "list the reference-vs-test comparisons to run, or disable verification."

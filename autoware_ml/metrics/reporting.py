@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Feed metric suites and collect their results — shared by Lightning and deployment.
-
-The Lightning lifecycle (:class:`~autoware_ml.metrics.eval_mixin.MetricEvalMixin`) and
-per-backend deployment evaluation score the same suites; the required-key check and the
-result collection live here so the two paths cannot drift.
-"""
+"""Metric suite helpers shared by the Lightning lifecycle and deployment evaluation."""
 
 from __future__ import annotations
 
@@ -30,13 +25,7 @@ from autoware_ml.metrics.base import EvalStage, MetricSuite
 def check_required_keys(
     suites: Iterable[MetricSuite], eval_out: Mapping[str, Any], producer: str
 ) -> None:
-    """Raise when a suite needs an ``eval_out`` key the model did not produce.
-
-    Args:
-        suites: Metric suites about to consume ``eval_out``.
-        eval_out: The flat dict the model's eval-output hook returned.
-        producer: ``Model.hook`` that produced ``eval_out``, for the error message.
-    """
+    """Raise when a suite needs a key missing from ``eval_out``; the error names ``producer``."""
     for suite in suites:
         missing = [key for key in suite.required_keys() if key not in eval_out]
         if missing:

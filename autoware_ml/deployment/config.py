@@ -12,24 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Typed view of the post-export sections of the Hydra ``deploy`` config.
+"""Typed ``deploy.verification`` and ``deploy.evaluation`` config sections.
 
-Export itself (``deploy.onnx``, ``deploy.tensorrt``, ``deploy.onnx.modules.<module>``) is
-read by ``DeploymentExport`` as before. The two sections parsed here run *after* export
-and only for models that declare a stage graph:
-
-.. code-block:: yaml
-
-    deploy:
-      verification: { enabled, tolerance, num_verify_batches, scenarios }
-      evaluation:   { enabled, split, num_samples, num_warmup, batch_size, cpu_threads,
-                      backends: { <backend>: { enabled, device } } }
-
-Every mapping rejects unknown keys: a misspelled option would otherwise silently fall
-back to a default (``tolerence`` would leave the gate at its default and pass).
+Both run after export, for models that declare a stage graph. Unknown keys are rejected: a
+misspelled ``tolerance`` would otherwise leave the gate at its default.
 """
-
-# cspell:ignore tolerence
 
 from __future__ import annotations
 
@@ -52,11 +39,11 @@ def _mapping(raw: Any, where: str) -> Mapping[str, Any]:
 
 @dataclass(frozen=True)
 class VerificationConfig:
-    """Cross-backend parity stage (``deploy.verification``)."""
+    """``deploy.verification``: cross-backend parity of the raw model outputs."""
 
     enabled: bool = False
-    #: Default absolute tolerance on raw graph outputs. Lossy backends (fp16 / int8)
-    #: set an explicit per-scenario ``tolerance`` instead of loosening this.
+    #: Absolute tolerance on the raw outputs; scenarios of lossy backends (fp16, int8) set
+    #: their own.
     tolerance: float = 0.01
     num_verify_batches: int = 1
     scenarios: tuple[VerificationScenario, ...] = ()
@@ -96,30 +83,24 @@ class BackendEvaluationConfig:
 
 @dataclass(frozen=True)
 class EvaluationConfig:
-    """Per-backend ground-truth evaluation stage (``deploy.evaluation``)."""
+    """``deploy.evaluation``: ground-truth metrics and latency of every backend."""
 
     enabled: bool = False
-    #: Split the backends are scored on: ``test`` (default) or ``val`` — for when the
-    #: test split is unavailable or held back. Metric keys carry the split.
+    #: ``test``, or ``val`` when the test split is unavailable or held back.
     split: str = "test"
-    #: Samples per backend; -1 = the whole split.
+    #: Samples per backend; -1 for the whole split.
     num_samples: int = -1
-    #: Extra re-runs of the first batch that prime the GPU / TensorRT (discarded).
+    #: Discarded re-runs of the first batch that warm up the GPU and TensorRT.
     num_warmup: int = 2
-    #: Frames per batch the split is scored with. The split's own dataloader setting is
-    #: the training-time one; the deployed graphs are single-frame by contract (a model's
-    #: glue rejects a larger batch) and the latency is per batch, so evaluation builds
-    #: the loader itself: 1 = per-frame latency, what the runtime sees.
+    #: Replaces the split's training-time batch size: the deployed graphs are single-frame
+    #: (a model's glue may reject a larger batch) and the latency is per batch.
     batch_size: int = 1
-    #: CPU worker threads the process may use while a backend is evaluated: PyTorch's
-    #: intra-op pool and the BLAS / OpenMP pools threadpoolctl knows (numpy's OpenBLAS).
-    #: 0 keeps the process defaults. The graph latency of a TensorRT engine with
-    #: data-dependent shapes (sparse convolutions) is host-sensitive: its shape-sync points
-    #: wait on the host thread, and the ~30 OpenBLAS workers a preceding numpy op
-    #: (preprocessing, metrics) leaves busy-waiting double the measured engine time
-    #: (BEVFusion j6gen2, 2026-09-24: 10-13 ms with the defaults vs 5.5 ms with one
-    #: thread, the standalone engine figure). One thread makes CPU metrics slower and
-    #: the latency numbers right.
+    #: Thread cap of PyTorch's intra-op pool and the BLAS / OpenMP pools threadpoolctl finds;
+    #: 0 keeps the process defaults. A TensorRT engine with data-dependent shapes (sparse
+    #: convolutions) waits on the host thread at its shape syncs, and the ~30 OpenBLAS
+    #: workers a numpy op leaves busy-waiting doubled the measured time (BEVFusion j6gen2:
+    #: 10-13 ms vs 5.5 ms with one thread, the standalone engine figure). One thread slows
+    #: the CPU metrics down but keeps the latency right.
     cpu_threads: int = 1
     backends: Mapping[Backend, BackendEvaluationConfig] = field(default_factory=dict)
 

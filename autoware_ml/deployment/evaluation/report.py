@@ -12,17 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Metric-key convention of deployment evaluation.
+"""Metric keys of deployment evaluation.
 
-Lightning's validation / test lifecycle logs ``{stage}/{prefix}/{metric}`` and is left
-alone. Deployment evaluation scores several backends on the same split, so its keys carry
-the backend as well:
-
-    ``{split}/{backend}/{suite_prefix}/{metric}``   e.g. ``test/tensorrt/det3d/mAP_0m_121m``
-
-Latency lives under its own root so it never collides with a metric:
-
-    ``latency/{backend}/{stage}``                     e.g. ``latency/tensorrt/pts_backbone_neck_head_centerpoint_mean_ms``
+Lightning logs ``{stage}/{prefix}/{metric}``; deployment evaluation scores several backends
+on one split, so its keys add the backend: ``{split}/{backend}/{prefix}/{metric}``. Latency
+goes under ``latency/{backend}/{stage}`` so it never collides with a metric.
 """
 
 from __future__ import annotations
@@ -34,31 +28,24 @@ from autoware_ml.types.backend import Backend
 
 LATENCY_ROOT = "latency"
 
-# Suites append the range window to a metric name (``mAP_0m_121m``, ``mIoU_50m_inf``);
-# a headline declared as ``mAP`` covers those and nothing else (not ``mAP_car``).
+# Range window that suites append to a metric name: ``mAP_0m_121m``, ``mIoU_50m_inf``.
 _RANGE_SUFFIX = re.compile(r"_\d[0-9p]*m_(\d[0-9p]*m|inf)$")
 
 
 def metric_key(split: str, backend: Backend, prefix: str, name: str) -> str:
-    """Build the canonical metric key ``{split}/{backend}/{prefix}/{name}``.
-
-    Lightning logs the same suite under ``{split}/{prefix}/{name}``; the backend segment
-    is the only difference (every attached suite has a prefix).
-    """
+    """Return the metric key ``{split}/{backend}/{prefix}/{name}``."""
     return f"{split}/{backend}/{prefix}/{name}"
 
 
 def latency_key(backend: Backend, stage: str) -> str:
-    """Build the canonical latency key ``latency/{backend}/{stage}``."""
+    """Return the latency key ``latency/{backend}/{stage}``."""
     return f"{LATENCY_ROOT}/{backend}/{stage}"
 
 
 def is_headline(key: str, headline_metrics: Iterable[str]) -> bool:
-    """Whether a metric key names one of the declared headline metrics.
+    """Whether a metric key names one of ``headline_metrics``, with or without a range suffix.
 
-    The comparison is on the unqualified metric name (the last ``/`` component), exact
-    up to the suite's range suffix: ``mAP`` selects ``mAP`` and ``mAP_0m_121m``, not the
-    per-class ``mAP_car`` and not the sibling ``mAPH``.
+    ``mAP`` matches ``mAP`` and ``mAP_0m_121m``, not ``mAP_car`` or ``mAPH``.
     """
     tail = key.rsplit("/", 1)[-1]
     for name in headline_metrics:
