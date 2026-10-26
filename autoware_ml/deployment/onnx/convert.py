@@ -13,21 +13,13 @@
 # limitations under the License.
 
 
-"""Precision conversion of an exported graph, chosen from the graph itself.
+"""Precision conversion of an exported graph, with the fp16 path chosen from the graph.
 
-Two fp16 paths:
-
-- A graph carrying quantize/dequantize nodes or custom-domain plugin ops takes the
-  island-aware whole-graph cast (:func:`autoware_ml.deployment.onnx.precision.cast_graph_to_fp16`):
-  the generic converter has no rule keeping a calibrated Q/DQ pair exact and cannot type a
-  plugin op. Conv-family Q/DQ go fp16 with the graph; Q/DQ feeding a Gemm/MatMul stay
-  fp32-typed islands; the graph I/O stays fp32. (Un-quantized plugin graphs share the
-  in-house cast too: its plugin slot rules are what keep an INT8 plugin node's scales fp32.)
-- Every other graph takes the onnxconverter-common path of
-  :func:`autoware_ml.utils.onnx_precision.convert_onnx_precision`, unchanged.
-
-Deployment-only: the deployment package reads the graph inspection and the cast, and
-``autoware_ml.utils`` stays free of deployment imports.
+Graphs with Q/DQ nodes or plugin ops take
+:func:`~autoware_ml.deployment.onnx.precision.cast_graph_to_fp16`: onnxconverter-common
+cannot keep a calibrated Q/DQ pair exact, type a plugin op or keep an INT8 plugin's scale
+inputs fp32. Other graphs take :func:`autoware_ml.utils.onnx_precision.convert_onnx_precision`.
+The dispatch lives here to keep ``autoware_ml.utils`` free of deployment imports.
 """
 
 from __future__ import annotations
@@ -44,18 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def convert_onnx_precision(onnx_path: str | Path, precision: OnnxPrecision) -> Path:
-    """Convert an exported ONNX to ``precision`` in place and return its path.
-
-    Args:
-        onnx_path: The exported graph, rewritten in place.
-        precision: The explicit precision the shipped graph carries.
-
-    Returns:
-        The path of the converted graph.
-
-    Raises:
-        ValueError: If no conversion is implemented for ``precision``.
-    """
+    """Convert an exported ONNX to ``precision`` in place and return its path."""
     if precision != OnnxPrecision.FP16:
         raise ValueError(f"No conversion implemented for precision '{precision}'.")
     onnx_path = Path(onnx_path)

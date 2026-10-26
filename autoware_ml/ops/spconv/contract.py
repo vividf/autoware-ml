@@ -54,8 +54,8 @@ ACT_RELU = 1
 PRECISION_FP = 0
 PRECISION_INT8 = 1
 
-#: The INT8 form (``precision = 1``) has seven inputs: slot 5 ``channel_scale`` and slot 6
-#: ``bias_scaled``, both read by the plugin as ``float*``. A precision cast must leave
-#: them fp32 whatever it does to the rest of the graph.
+#: The INT8 form (``precision = 1``) has seven inputs. The plugin reads slot 5
+#: ``channel_scale`` and slot 6 ``bias_scaled`` as ``float*``, so a precision cast must
+#: leave them fp32.
 IMPLICIT_GEMM_INT8_INPUTS = 7
 IMPLICIT_GEMM_FP32_INPUT_SLOTS: dict[int, tuple[int, ...]] = {IMPLICIT_GEMM_INT8_INPUTS: (5, 6)}

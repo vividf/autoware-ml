@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""The fp16 conversion routes quantized and plugin graphs to the island-aware cast."""
+"""Unit tests for the fp16 conversion dispatch."""
 
 import numpy as np
 import onnx
@@ -24,7 +24,6 @@ from autoware_ml.utils.onnx_precision import OnnxPrecision
 
 
 def _qdq_gemm_model() -> onnx.ModelProto:
-    """A Q/DQ pair feeding a Gemm: the linear island the converter must keep fp32."""
     scale = helper.make_tensor("s", TensorProto.FLOAT, [], [np.float32(1e-4)])
     zero_point = helper.make_tensor("zp", TensorProto.INT8, [], [0])
     weight = numpy_helper.from_array(np.eye(4, dtype=np.float32), name="w")
@@ -44,7 +43,6 @@ def _qdq_gemm_model() -> onnx.ModelProto:
 
 
 def test_fp16_conversion_routes_quantized_graphs_to_the_island_cast(tmp_path) -> None:
-    """A Q/DQ graph keeps its calibrated linear island fp32; a plain graph takes the old path."""
     onnx_path = tmp_path / "qdq.onnx"
     onnx.save(_qdq_gemm_model(), onnx_path.as_posix())
 
@@ -56,7 +54,7 @@ def test_fp16_conversion_routes_quantized_graphs_to_the_island_cast(tmp_path) ->
     assert numpy_helper.to_array(inits["s"]) == np.float32(1e-4)
     assert inits["w"].data_type == TensorProto.FLOAT
     nodes = {n.name: n for n in model.graph.node}
-    assert nodes["gemm"].input[0] == nodes["dq"].output[0]  # castless island edge
+    assert nodes["gemm"].input[0] == nodes["dq"].output[0]
     for value_info in list(model.graph.input) + list(model.graph.output):
         assert value_info.type.tensor_type.elem_type == TensorProto.FLOAT
     onnx.checker.check_model(model, full_check=True)
