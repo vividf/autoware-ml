@@ -316,16 +316,13 @@ class TransFusionHead(nn.Module):
                 (shared block, dense heatmap head, prediction branches).
             use_bf16_cross_attention: Whether export emits fusion-ready attention and uses bf16 for
                 the long cross-attention core. Requires ``deploy.onnx.precision=fp16``.
-            fuse_export_attention: Whether export emits fusion-ready attention (no
-                max-subtraction before softmax) in the trace dtype. The max-sub pattern
-                blocks TensorRT's Myelin MHA fusion (measured on the j6gen2 dense graph:
-                fused 0.25 ms vs unfused 0.68 ms); the fused kernel handles the softmax
-                numerics internally. Training is untouched (export copy only). Off by
-                default: the max-subtraction is the numerical safety net for the case
-                where Myelin does *not* match the pattern (a TensorRT upgrade, a changed
-                graph shape), where unfused fp16 attention could overflow. A config that
-                turns it on relies on the deploy verification / evaluation to catch that.
-                Implied by ``use_bf16_cross_attention``.
+            fuse_export_attention: Whether export emits attention without the max-subtraction
+                before softmax, in the trace dtype, so TensorRT's Myelin fuses it into one MHA
+                kernel that keeps the softmax stable itself (0.68 -> 0.25 ms on the j6gen2
+                graph). Off by default: where Myelin does not match the pattern (another
+                TensorRT version or graph shape), unfused fp16 attention can overflow, so a
+                config that enables it relies on the deploy evaluation to catch that. Implied
+                by ``use_bf16_cross_attention``.
 
         Raises:
             ValueError: If ``common_heads`` misses a regression branch or holds an unknown one,
@@ -379,10 +376,8 @@ class TransFusionHead(nn.Module):
         self.dense_heatmap_pooling_class_ids = self._resolve_class_ids(
             dense_heatmap_pooling_class_names
         )
-        # Scatter-free channel bookkeeping for _suppress_dense_heatmaps: the suppressed
-        # map is rebuilt as concat([pooled classes, excluded classes]) gathered back into
-        # class order — constant indices instead of a ScatterND (whose ONNX form drags a
-        # whole index-construction subgraph into every export).
+        # Constant channel indices for _suppress_dense_heatmaps, which rebuilds the map as
+        # concat(pooled classes, excluded classes) gathered back into class order.
         pooling_ids = list(self.dense_heatmap_pooling_class_ids)
         excluded_ids = [c for c in range(self.num_classes) if c not in pooling_ids]
         concat_order = pooling_ids + excluded_ids
@@ -566,13 +561,10 @@ class TransFusionHead(nn.Module):
         if not self.dense_heatmap_pooling_class_ids:
             return heatmaps
 
-        # Semantics (unchanged): pooling classes take the 3x3 max over fully-interior
-        # windows, their border ring keeps the raw value (border peaks survive), and
-        # excluded classes stay unsuppressed. Built scatter-free — pad + mask + maximum
-        # for the border ring, concat + constant-index gather for the channel merge —
-        # because the slice-assignment form exports as ScatterND plus a Shape/Expand/
-        # Concat index-construction subgraph (~40 nodes) that TensorRT tolerates but
-        # ONNX Runtime and any later graph surgery pay for.
+        # Pooled classes take the 3x3 max over fully interior windows, their border ring keeps
+        # the raw value, and excluded classes are left as is. A slice assignment would export
+        # as ScatterND plus a ~40-node index subgraph that TensorRT tolerates but ONNX Runtime
+        # and graph surgery pay for, hence pad + mask + maximum and a constant-index gather.
         padding = self.nms_kernel_size // 2
         selected_heatmap = heatmaps[:, self.dense_heatmap_pooling_class_ids, :, :]
         pooled = F.max_pool2d(
@@ -595,8 +587,8 @@ class TransFusionHead(nn.Module):
                 [padding] * 4,
                 value=0.0,
             )
-            # Interior: max(pooled, 0) = pooled (sigmoid scores are positive).
-            # Border:   max(0, raw)    = raw — identical to the old slice assignment.
+            # Sigmoid scores are positive, so the maximum keeps pooled in the interior and the
+            # raw value on the border ring.
             pooled = torch.maximum(
                 F.pad(pooled, [padding] * 4, value=0.0),
                 selected_heatmap * (1.0 - interior),
