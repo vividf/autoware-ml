@@ -14,6 +14,8 @@
 
 """Post-export config: typo guard and defaults for the verification / evaluation sections."""
 
+# cspell:ignore tolerence devcie
+
 from __future__ import annotations
 
 import pytest
@@ -89,7 +91,7 @@ def test_evaluation_thread_count_defaults_to_one_and_parses() -> None:
 
 def test_unknown_evaluation_backend_and_split_are_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown backend"):
-        PostExportConfig.from_deploy_cfg({"evaluation": {"backends": {"tflite": {}}}})
+        PostExportConfig.from_deploy_cfg({"evaluation": {"backends": {"tensorflow": {}}}})
     with pytest.raises(ValueError, match="evaluation.split"):
         PostExportConfig.from_deploy_cfg({"evaluation": {"split": "train"}})
     assert (

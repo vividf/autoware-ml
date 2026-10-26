@@ -29,6 +29,8 @@ Every mapping rejects unknown keys: a misspelled option would otherwise silently
 back to a default (``tolerence`` would leave the gate at its default and pass).
 """
 
+# cspell:ignore tolerence
+
 from __future__ import annotations
 
 from collections.abc import Mapping
