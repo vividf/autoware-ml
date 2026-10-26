@@ -5,17 +5,13 @@
 #   autoware-ml deploy   --config-name segmentation3d/ptv3/t4dataset/voxel012_tiny_b16_50e_t4dataset_122m_j6gen2_semaseg_int8 --weights <ptq.ckpt>
 #
 # The checkpoint describes its own quantization, so deploy / test read nothing from the
-# `quantization` section. Engines build strongly typed: the quantized Linear layers come
-# from the Q/DQ (or FP8 trt-domain) nodes in the exported ONNX, quantized cpe sparse
-# convolutions deploy as INT8 plugin nodes carrying their scales, everything else runs
-# fp16, and the graph I/O stays fp32.
+# `quantization` section. Engines build strongly typed: INT8 linears from the Q/DQ nodes,
+# fp16 elsewhere and fp32 graph I/O.
 defaults:
   - voxel012_tiny_b16_50e_t4dataset_122m_j6gen2_semaseg
-  # The `quantization` section (off by default) lives with the quantized variants only.
   - /defaults/modules/quantization
   - _self_
 
-# A run of its own next to the FP experiment's runs.
 experiment_name: voxel012_tiny_b16_50e_t4dataset_122m_int8
 
 deploy:
@@ -27,14 +23,12 @@ deploy:
     enabled: true
   verification:
     enabled: true
-    # Quantized raw softmax diffs between the fp32 fake-quant reference and the engine are
-    # larger than the fp16 gate of base.yaml while mIoU stays equal. Measured 2026-09-24
-    # (INT8 linears, SmoothQuant): pytorch vs tensorrt pred_probs max_diff 0.186
-    # (mean 4.5e-4, 0.34 % of the labels flipped at near-ties). The v0.1.1 10 Hz checkpoint
-    # (2026-10-26, one PTQ checkpoint, the same frame) measured 0.35-0.52 over five engine
-    # builds, 0.49-0.50 with the INT8 cpe convolutions (mean 7e-4, 0.4 % of the labels
-    # flipped, mIoU equal): the max moves with the tactics TensorRT picks. The gate is the
-    # largest observed value x1.25 (whole-list override: Hydra lists replace).
+    # The fp32 fake-quant reference and the engine differ by more than base.yaml's fp16 gate
+    # while mIoU stays equal. pytorch vs tensorrt pred_probs max_diff on the v0.1.1 10 Hz
+    # checkpoint (2026-10-26, one PTQ checkpoint, same frame): 0.35-0.52 over five engine
+    # builds as TensorRT's tactics vary, 0.49-0.50 with INT8 cpe convolutions (mean 7e-4,
+    # 0.4 % of labels flipped); 0.186 on another checkpoint (2026-09-24, mean 4.5e-4, 0.34 %
+    # flipped at near-ties). The gate is the largest value x1.25. Hydra replaces the whole list.
     scenarios:
       - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.65 }
   evaluation:
@@ -44,8 +38,8 @@ quantization:
   enabled: true
   mode: ptq
   default_precision: int8
-  # Linears only: `cpe.0` is the one sparse convolution of every block's conditional
-  # positional encoding, kept fp16 here (the `_int8_sparse` variant quantizes it too).
+  # `cpe.0` is the sparse convolution of each block's conditional positional encoding;
+  # `_int8_sparse` quantizes it too.
   skip_quantize:
     - "*cpe.0"
   # SmoothQuant migrates the activation outliers of the attention / FFN linears into

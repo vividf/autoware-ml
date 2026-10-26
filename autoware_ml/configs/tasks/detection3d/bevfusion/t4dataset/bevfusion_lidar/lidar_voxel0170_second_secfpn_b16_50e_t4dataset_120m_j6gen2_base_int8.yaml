@@ -5,17 +5,13 @@
 #   autoware-ml deploy   --config-name detection3d/bevfusion/t4dataset/bevfusion_lidar/lidar_voxel0170_second_secfpn_b16_50e_t4dataset_120m_j6gen2_base_int8 --weights <ptq.ckpt>
 #
 # The checkpoint describes its own quantization, so deploy / test read nothing from the
-# `quantization` section. Engines build strongly typed: dense INT8 comes from the Q/DQ
-# nodes in the exported ONNX, the un-quantized dense layers run fp16, the sparse plugin
-# nodes run fp16 unless calibrated (see the `_int8_sparse` variant), and the graph I/O
-# stays fp32.
+# `quantization` section. Engines build strongly typed: INT8 from the Q/DQ nodes, fp16
+# elsewhere (the sparse plugin nodes too, see `_int8_sparse`) and fp32 graph I/O.
 defaults:
   - lidar_voxel0170_second_secfpn_b16_50e_t4dataset_120m_j6gen2_base
-  # The `quantization` section (off by default) lives with the quantized variants only.
   - /defaults/modules/quantization
   - _self_
 
-# A run of its own next to the FP experiment's runs.
 experiment_name: lidar_voxel0170_second_secfpn_b16_50e_t4dataset_120m_int8
 
 deploy:
@@ -32,10 +28,9 @@ quantization:
   enabled: true
   mode: ptq
   default_precision: int8
-  # Dense towers only: the sparse encoder stays fp16 here (the `_int8_sparse` variant
-  # quantizes its late stages), the decoder's attention projections are structurally out
-  # of reach at calibration time (packed nn.MultiheadAttention weights), and the first
-  # backbone / neck stages cost accuracy in INT8.
+  # The sparse encoder stays fp16 (`_int8_sparse` quantizes its late stages), calibration
+  # cannot reach the decoder's packed nn.MultiheadAttention projections, and the first
+  # backbone / neck blocks cost accuracy in INT8.
   skip_quantize:
     - lidar_network.pts_middle_encoder
     - bbox_head.decoder

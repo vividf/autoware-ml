@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Writing calibrated sparse scales into the exported ImplicitGemm nodes."""
+"""Unit tests for writing calibrated sparse scales into ImplicitGemm nodes."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def test_calibrated_node_takes_the_plugin_int8_contract():
     attributes = _attributes(node)
     assert attributes["precision"] == PRECISION_INT8
     assert attributes["input_scale"] == pytest.approx(layer.input_scale)
-    # The activation the export fusion folded in must survive the rewrite.
+    # The fused activation must survive the rewrite.
     assert attributes["act_type"] == 1
     initializers = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
     channel_scale = initializers[node.input[5]]
@@ -111,13 +111,7 @@ def test_calibrated_node_takes_the_plugin_int8_contract():
 
 
 def test_output_scale_cancels_out_of_the_plugin_arithmetic():
-    """``output_scale`` is inert, which is why the graph pins it to 1.
-
-    The plugin recovers the weight scale as ``channel_scale * output_scale / input_scale``
-    and then folds ``output_scale`` back into the GEMM's scale and bias. Whatever value it
-    carries, the dequantized result is the same — so the exported graph does not need an
-    activation-chain output scale, and this test is what says so.
-    """
+    """``output_scale`` cancels in the plugin, which is why the graph pins it to 1."""
     layer = _scales()
     accumulator = np.array([100.0, -50.0, 25.0], dtype=np.float32)  # INT32 GEMM output
     bias = np.array([1.0, 2.0, 3.0], dtype=np.float32)

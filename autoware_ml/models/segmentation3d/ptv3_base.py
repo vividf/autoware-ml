@@ -879,9 +879,9 @@ def build_encoder_stage(model: PTv3BaseModel) -> GraphStage:
         # The cpe sparse convolutions are autoware:: plugin ops: TensorRT runs them through the
         # autoware TensorRT plugin library, ONNX Runtime cannot.
         torch_fallback_backends=(Backend.ONNX,),
-        # The cpe convolutions have a bias; the plugin applies it itself. A plugin node
-        # cannot absorb Q/DQ: a calibrated cpe convolution carries its scales as node
-        # attributes / inputs instead, a no-op for an un-quantized encoder.
+        # The cpe convolutions have a bias, which the plugin applies itself. Calibrated cpe
+        # convolutions carry their scales on the plugin nodes, not as Q/DQ; a no-op for an
+        # unquantized encoder.
         onnx_transforms=(
             fuse_sparse_graph,
             partial(sparse_int8_transform, module=model.encoder),

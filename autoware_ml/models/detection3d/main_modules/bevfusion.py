@@ -239,19 +239,16 @@ class _BEVFusionExportWrapper(_BEVFusionExportWrapperBase):
         return export_detection3d_outputs(self.model.bbox_head, outputs)
 
 
-#: BEVFusion's quantization declaration (dotted paths of the module tree). The dense
-#: towers of the lidar branch quantize with Q/DQ; the sparse middle encoder quantizes as
-#: the ``spconv`` kind — its layers deploy as ``autoware::ImplicitGemm`` plugin nodes
-#: carrying per-layer INT8 scales rather than Q/DQ (the plugin has no FP8 path, so the
-#: kind is pinned INT8 rather than following ``default_precision``). The pillar encoder
-#: has no weights to quantize.
+#: The sparse middle encoder deploys as ``autoware::ImplicitGemm`` plugin nodes carrying
+#: INT8 scales instead of Q/DQ; the plugin has no FP8 path, so ``spconv`` is pinned to INT8.
+#: The voxel encoder has no weights.
 BEVFUSION_LIDAR_QUANT_RULES = QuantRules(
     quantize_submodules={
         "lidar_network.pts_middle_encoder": {"spconv": "int8"},
         "lidar_network.pts_backbone": ("conv",),
         "lidar_network.pts_neck": ("conv",),
-        # The head's shared conv and heatmap head (Conv2d); its decoder is skipped by every
-        # shipped config and its Conv1d prediction heads are not a replaceable kind.
+        # Reaches the shared conv and the heatmap head: the prediction heads are Conv1d, not
+        # a replaceable kind, and the configs skip the decoder.
         "bbox_head": ("conv",),
     },
 )

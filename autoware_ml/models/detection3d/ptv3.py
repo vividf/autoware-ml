@@ -386,7 +386,6 @@ def build_det3d_head_stage(
     )
 
 
-#: PTv3 detection quantization declaration: the encoder's GEMM-bearing layers.
 PTV3_DET_QUANT_RULES = QuantRules(
     quantize_submodules={"encoder": {"linear": None, "spconv": "int8"}},
 )
