@@ -12,16 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The exported sparse graph's contract with the runtime plugin.
+"""Unit tests for the attributes the sparse export symbolics emit for the runtime plugin.
 
-Every attribute here is read by ``libautoware_tensorrt_plugins.so`` at engine-build
-time, and the plugin's tolerance for a missing one is temporary: it logs a "legacy
-ONNX ... will be removed later" warning and assumes a default. A silent regression on
-either side therefore surfaces as a vehicle-side failure, so the emitted attribute
-names are pinned here rather than left to be noticed in a TensorRT log.
-
-Tracks spconv 2.3.6 (``spconv-cu120`` in pyproject) and the plugin sources in
-autoware_universe ``perception/autoware_tensorrt_plugins``.
+The plugin still accepts a graph without one of them (it warns about legacy ONNX and
+assumes a default), so a dropped attribute would otherwise only show in a TensorRT log.
 """
 
 from __future__ import annotations
@@ -47,7 +41,6 @@ def _emitted_attributes(symbolic) -> set[str]:
 
 
 def test_get_indice_pairs_implicit_gemm_emits_the_plugin_field_set() -> None:
-    """The 12-field form; without ``do_sort`` the plugin takes its deprecated path."""
     expected = {
         "batch_size",
         "spatial_shape",
@@ -66,12 +59,10 @@ def test_get_indice_pairs_implicit_gemm_emits_the_plugin_field_set() -> None:
 
 
 def test_implicit_gemm_emits_the_plugin_field_set() -> None:
-    """The attribute set the exporter emits: the plugin's seven declared fields plus
-    ``fp32_accum``, which the plugin does not declare and the parser drops (kept for the
-    spconv-side reference implementation); ``act_type`` is what the ReLU fusion sets."""
     expected = {
         "is_train",
         "is_subm",
+        # Not a plugin field: the plugin's parser drops it.
         "fp32_accum",
         "act_alpha",
         "act_beta",

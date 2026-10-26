@@ -165,7 +165,6 @@ def test_stamp_rejects_reserved_metainfo_keys(tmp_path) -> None:
 
 
 def test_stamp_keeps_metadata_written_by_earlier_passes(tmp_path) -> None:
-    """A stage transform's runtime contract must survive the identity stamp that follows it."""
     path = tmp_path / "stage.onnx"
     graph = onnx.helper.make_graph(
         [onnx.helper.make_node("Identity", ["x"], ["y"])],

@@ -53,10 +53,9 @@ class ExportSpec:
             the input and output names. The model declares them here, not in its config.
             The TorchScript exporter (``dynamo=False``) takes them as its ``dynamic_axes``;
             ``torch.export`` (``dynamo=True``) gets one ``Dim`` per name over the inputs.
-        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
-            after the export and before any config-driven graph modifier or precision
-            cast (each takes the path and returns the path it wrote). A stage graph
-            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`.
+        onnx_transforms: Rewrites of the exported ``.onnx``, run in order before any
+            config-driven graph modifier or precision cast; each takes the path and
+            returns the path it wrote.
     """
 
     module: torch.nn.Module
@@ -95,16 +94,7 @@ class ExportSpec:
 
 
 def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
-    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
-
-    Args:
-        onnx_path: The freshly exported ``.onnx``.
-        transforms: Callables taking the current path and returning the path they wrote
-            (usually the same file, rewritten in place).
-
-    Returns:
-        The path the last transform returned (``onnx_path`` when there is none).
-    """
+    """Run ``transforms`` over the exported file in order and return the resulting path."""
     for transform in transforms:
         name = getattr(transform, "__name__", None) or getattr(
             getattr(transform, "func", None), "__name__", type(transform).__name__
