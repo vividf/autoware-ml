@@ -14,16 +14,12 @@
 
 """Quantization entrypoint: FP checkpoint in, self-describing quantized checkpoint out.
 
-``quantization.mode: ptq`` rebuilds the quantized module tree through the model's own
-plan (BN fold + Q/DQ insertion), calibrates on the validation split through the clean
-test-time pipeline, and saves ``ptq.ckpt``. The checkpoint embeds its
-:class:`~autoware_ml.quantization.QuantizationDescription` (config + placement record)
-next to the ``state_dict``, so ``deploy`` and ``test`` rebuild the identical tree from
-the checkpoint alone — no ``quantization`` section, no sidecar files.
+``quantization.mode: ptq`` folds BatchNorm and inserts Q/DQ through the model's quantization
+plan, calibrates on the validation split and saves ``ptq.ckpt``. The checkpoint embeds its
+:class:`~autoware_ml.quantization.QuantizationDescription` (config and placement record), so
+``deploy`` and ``test`` rebuild the same quantized tree from the checkpoint alone.
 
-``quantization.dry_run: true`` builds the model on CPU, prepares the tree and logs the
-placement table (which module gets which transform and why), then exits: the way to
-inspect precision placement before spending GPU time.
+``quantization.dry_run: true`` only logs the placement table, on CPU without weights or data.
 """
 
 from __future__ import annotations
@@ -91,12 +87,10 @@ _MAX_CALIB_WORKERS = 4
 def build_calibration_dataloader(
     datamodule: L.LightningDataModule, batch_size: int, seed: int | None, shuffle: bool
 ) -> DataLoader:
-    """Calibration batches from the *validation* split through the test-time pipeline.
+    """Build calibration batches from the validation split, through the test-time pipeline.
 
     The test split stays out of every model-producing step, and train augmentation
-    (rotation / flip / paste) would feed the histograms degenerate inputs. The
-    datamodule's own validation loader supplies the dataset and collation; only the batch
-    size, worker count and sampling order are the recipe's.
+    (rotation / flip / paste) would skew the calibration histograms.
     """
     datamodule.prepare_data()
     datamodule.setup("validate")
@@ -127,10 +121,9 @@ def run_ptq(
     datamodule: L.LightningDataModule,
     checkpoints_dir: Path,
 ) -> Path:
-    """Prepare the quantized tree, calibrate, and save the self-describing checkpoint.
+    """Prepare the quantized tree, calibrate it and save the self-describing checkpoint.
 
-    ``model`` carries the FP weights already (a normal, un-fused training checkpoint):
-    ``prepare`` folds BN and inserts Q/DQ on top of them.
+    ``model`` holds the un-fused FP training weights; ``prepare`` folds BN into them.
     """
     ptq = quantization_config.ptq
     if ptq is None:
@@ -139,9 +132,8 @@ def run_ptq(
     plan = QuantizationPlan.for_model(model, quantization_config)
     plan.prepare(model)
     model.eval()
-    # Expand skip_quantize AFTER prepare — prepare mutates the tree (e.g. Pooling ->
-    # .pool/.quantizer), so a glob can resolve differently before and after; the loader
-    # expands after prepare too.
+    # After prepare, like the loader: prepare adds the quantizer submodules, so a glob can
+    # match differently before and after.
     skip_layers = expand_skip_quantize(model, quantization_config.skip_quantize)
 
     calibrate_batches = math.ceil(ptq.calibrate_samples / ptq.batch_size)
@@ -165,8 +157,8 @@ def run_ptq(
     )
 
     disable_quantizers_in(model, skip_layers)
-    # Validate AFTER disabling skip_quantize quantizers (the validator skips disabled ones):
-    # a failed calibration must not produce a checkpoint that only explodes at deploy.
+    # Runs after the skipped quantizers are disabled, which it ignores; a failed calibration
+    # must fail here and not at deploy.
     validate_quantizer_amax(model)
     print_quantizer_status(model)
 
@@ -271,7 +263,6 @@ def run_quantize(cfg: DictConfig) -> None:
         log_placement_dry_run(model.eval(), quantization_config)
         return
 
-    # Configure weights and checkpoint paths
     weight_paths, checkpoint_path = build_weight_checkpoint_paths(cfg)
 
     # Nest the quantize run under the source training run, when there is exactly one
@@ -343,9 +334,7 @@ def _quantize(
 
     datamodule = build_datamodule(cfg)
     data_preprocessor = build_data_preprocessor(cfg)
-    # The FP input must be a normal (un-fused) training checkpoint: weights load into the
-    # plain model first, then the plan folds BN and inserts Q/DQ. A quantized checkpoint
-    # is refused here (it would be quantized twice).
+    # A quantized checkpoint is refused: it would be quantized twice.
     model = build_model(
         cfg,
         data_preprocessor=data_preprocessor,

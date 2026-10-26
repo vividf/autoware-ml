@@ -456,15 +456,13 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
         )
 
     def build_quantization_rules(self) -> QuantRules | None:
-        """Declare which submodules carry which quantizable module kinds, or ``None``.
+        """Declare the module kinds the quantize stage may replace in each submodule.
 
-        A :class:`~autoware_ml.quantization.rules.QuantRules` object stating, per
-        submodule (a dotted path of the module tree), the module kinds (``conv`` /
-        ``linear`` / ``spconv``) the quantize stage may replace. It is an architecture
-        fact and lives in code; the ``quantization`` config only subtracts from it
-        (``skip_quantize``). ``None`` means the model does not support quantization.
-        Every stage binds it to a config through
-        :meth:`~autoware_ml.quantization.plan.QuantizationPlan.for_model`.
+        The rules are architecture facts, so they live in code; the ``quantization`` config
+        can only exclude modules from them (``skip_quantize``).
+
+        Returns:
+            The rules, or ``None`` when the model does not support quantization.
         """
         return None
 

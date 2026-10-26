@@ -12,21 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module replacement — the ReplaceModule transform, on modelopt's ``QuantModuleRegistry``.
+"""Q/DQ insertion through modelopt's ``QuantModuleRegistry``.
 
-Model-agnostic Q/DQ insertion: every ``nn.Conv2d`` / ``nn.ConvTranspose2d`` / ``nn.Linear``
-of the requested kinds is converted **in place** into its modelopt quantized counterpart
-(``QuantModuleRegistry.convert`` patches the instance's class — no rebuild, no weight copy,
-no ``__dict__`` transplant), then its ``input_quantizer`` / ``weight_quantizer`` take the
-framework's descriptors from :mod:`.descriptors`. The converted module keeps its type
-identity (``isinstance(m, nn.Conv2d)`` stays true) and gains ``input_quantizer``,
-``weight_quantizer`` and a disabled ``output_quantizer``.
-
-Which submodules get which kinds is a model's
-:class:`~autoware_ml.quantization.rules.QuantRules` declaration (e.g. CenterPoint's in
-``models/detection3d/centerpoint.py``). The ``conv`` kind covers ``Conv2d`` /
-``ConvTranspose2d``; ``Conv1d`` heads (TransFusion's prediction branches) stay
-un-quantized until a deployment asks for them.
+``QuantModuleRegistry.convert`` swaps a module's class in place: the module keeps its weights,
+still passes ``isinstance(m, nn.Conv2d)``, and gains ``input_quantizer``, ``weight_quantizer``
+and a disabled ``output_quantizer``, set up from :mod:`.descriptors`. The ``conv`` kind covers
+``Conv2d`` and ``ConvTranspose2d`` only; ``Conv1d`` heads (TransFusion's prediction branches)
+stay un-quantized.
 """
 
 from __future__ import annotations
@@ -44,10 +36,8 @@ from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.quantization.config import Precision
 
 if IS_SPCONV_AVAILABLE:
-    # spconv is the framework's one genuinely optional dependency, so its imports carry the
-    # availability guard rather than sitting inside a function. Importing
-    # ``autoware_ml.quantization.core.spconv`` is what registers the quantized sparse
-    # convolution in modelopt's registry — the side effect *is* the registration.
+    # Guarded at the top rather than imported inside a function: spconv is the one optional
+    # dependency. Importing core.spconv registers the quantized sparse convolution with modelopt.
     from spconv.pytorch.conv import SparseConvolution
 
     from autoware_ml.quantization.core import spconv as _spconv_quant_registration  # noqa: F401
@@ -66,21 +56,12 @@ logger = logging.getLogger(__name__)
 def match_skip_quantize_roots(
     model: nn.Module, patterns: Iterable[str], *, log: bool = True
 ) -> list[tuple[str, str]]:
-    """Match ``skip_quantize`` glob patterns against the model — the single matching step.
+    """Return ``(pattern, module name)`` for each module a ``skip_quantize`` glob matches.
 
-    Each pattern is matched with :func:`fnmatch.fnmatch` against ``model.named_modules()``;
-    a bare name (no glob metacharacters) matches that module exactly. Per-pattern match
-    counts are logged and a pattern that matches **nothing** is an error — this fixes
-    modelopt's silent no-match pitfall and catches typos in ``skip_quantize`` immediately.
-
-    Args:
-        model: The model whose ``named_modules()`` the patterns are resolved against.
-        patterns: ``skip_quantize`` glob patterns (dotted module names, ``fnmatch`` syntax).
-        log: Emit per-pattern match-count info (default True).
-
-    Returns:
-        ``(pattern, matched_module_name)`` pairs, in pattern order then model order —
-        the *roots* only; subtree expansion is :func:`expand_skip_quantize`'s job.
+    A pattern that matches nothing raises: unlike modelopt, which ignores such a pattern, a
+    typo must not silently quantize the layers it meant to exclude. ``log=False`` skips the
+    logging and this check, for patterns already checked. Only the matched modules are
+    returned; :func:`expand_skip_quantize` adds their subtrees.
     """
     all_names = [name for name, _ in model.named_modules() if name]
     matches: list[tuple[str, str]] = []
@@ -104,23 +85,11 @@ def match_skip_quantize_roots(
 def expand_skip_quantize(
     model: nn.Module, patterns: Iterable[str], *, log: bool = True
 ) -> set[str]:
-    """Resolve ``skip_quantize`` glob patterns into the concrete set of module names left un-quantized.
+    """Return the names of the modules ``patterns`` match, plus all their descendants.
 
-    This is the single place ``skip_quantize`` subtree semantics live (matching itself lives in
-    :func:`match_skip_quantize_roots`). The result is the **subtree**: every matched module **plus
-    all its descendants**. Materializing descendants is what lets a subtree-root entry (e.g.
-    ``"pts_voxel_encoder"``) actually skip the subtree even though the engine walks each submodule
-    *from its root* and only tests descendant names by exact match.
-
-    Args:
-        model: The model whose ``named_modules()`` the patterns are resolved against.
-        patterns: ``skip_quantize`` glob patterns (dotted module names, ``fnmatch`` syntax).
-        log: Emit per-pattern match-count info (default True).
-
-    Returns:
-        The set of dotted module names (matched modules and all their descendants) to exclude
-        from quantization (their runtime precision follows the deploy ONNX precision).
-        Suitable as ``skip_names`` for the replace/attach helpers and for the disable loops.
+    The descendants are listed because the replace walker starts below each declared
+    submodule and tests names by exact match: a pattern naming a declared submodule, such as
+    ``"pts_voxel_encoder"``, takes effect only through its descendants' names.
     """
     all_names = [name for name, _ in model.named_modules() if name]
     skip: set[str] = set()
@@ -131,13 +100,10 @@ def expand_skip_quantize(
     return skip
 
 
-#: A weight-descriptor chooser: ``fn(precision) -> QuantizerAttributeConfig``.
 WeightDesc = Callable[[Precision], QuantizerAttributeConfig]
 
-# The kind table: everything the ReplaceModule transform can convert, as
-# (source class, weight descriptor) rules. A module is converted by the FIRST rule whose
-# source class it is an instance of. The quantized class itself comes from modelopt's
-# registry (``nn.Conv2d`` -> ``QuantConv2d`` etc.); only the descriptors are ours.
+# Module kind -> (source class, weight descriptor) rules; the first rule a module is an
+# instance of converts it. The quantized class comes from modelopt's registry.
 _REPLACEMENT_KINDS: dict[str, tuple[tuple[type[nn.Module], WeightDesc], ...]] = {
     "conv": (
         (nn.Conv2d, conv2d_weight_desc),
@@ -147,17 +113,12 @@ _REPLACEMENT_KINDS: dict[str, tuple[tuple[type[nn.Module], WeightDesc], ...]] = 
 }
 
 if IS_SPCONV_AVAILABLE:
-    #: Every spconv layer subclasses ``SparseConvolution`` (``SubMConv3d``, ``SparseConv3d``),
-    #: so the one rule covers the whole sparse tower.
     _REPLACEMENT_KINDS["spconv"] = ((SparseConvolution, spconv_weight_desc),)
 
-#: Module types the walker must never convert, whatever the kind rules say.
-#: ``nn.MultiheadAttention.out_proj`` is a ``NonDynamicallyQuantizableLinear`` whose
-#: forward the attention fast path bypasses (``F.multi_head_attention_forward`` reads
-#: ``.weight`` directly), so a quantizer planted there never sees a calibration batch
-#: and silently vanishes from any export that rebuilds the attention module — a
-#: calibrated-looking checkpoint that quantizes nothing. (modelopt's registry would
-#: happily convert it: it shares ``nn.Linear.forward``.)
+#: Never converted, whatever the kinds say. ``nn.MultiheadAttention`` reads the weight of its
+#: ``out_proj`` (a ``NonDynamicallyQuantizableLinear``) in ``F.multi_head_attention_forward``
+#: without calling its forward, so a quantizer there never sees a calibration batch and is
+#: lost on export. modelopt's registry would convert it like any ``nn.Linear``.
 _NEVER_REPLACE: tuple = (nn.modules.linear.NonDynamicallyQuantizableLinear,)
 
 
@@ -167,18 +128,7 @@ def convert_to_quant_module(
     precision: Precision,
     calibrator: str,
 ) -> QuantModule:
-    """Convert one leaf module in place and apply the framework's descriptors.
-
-    Args:
-        module: An ``nn.Conv2d`` / ``nn.ConvTranspose2d`` / ``nn.Linear`` (registered in
-            modelopt's ``QuantModuleRegistry``).
-        weight_desc: Weight-descriptor chooser for this module kind.
-        precision: Target precision; selects both descriptors.
-        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``).
-
-    Returns:
-        ``module`` itself, now a ``QuantModule`` subclass instance.
-    """
+    """Convert ``module`` in place to its modelopt quantized class and set up its quantizers."""
     quant = QuantModuleRegistry.convert(module)
     quant.input_quantizer.set_from_attribute_config(input_desc(precision, calibrator))
     quant.weight_quantizer.set_from_attribute_config(weight_desc(precision))
@@ -195,29 +145,11 @@ def replace_quantizable_modules(
     precision: Precision,
     calibrator: str = "histogram",
 ) -> None:
-    """Recursively convert every module of the requested kinds into its quantized counterpart.
+    """Convert every module of ``kinds`` under ``model`` in place, bottom-up.
 
-    The one ReplaceModule walker: it traverses the tree bottom-up and converts each
-    matching leaf via the kind table (:data:`_REPLACEMENT_KINDS`), except modules whose
-    full dotted names are in ``skip_names`` — a skipped name skips its **whole subtree**
-    (which is what lets ``expand_skip_quantize`` container entries like
-    ``'pts_backbone.blocks.0'`` exclude a whole block).
-
-    Args:
-        model: (Sub)model to modify in place. ``None`` / non-modules are ignored.
-        kinds: Module kinds to convert — keys of the kind table (``"conv"``, ``"linear"``).
-        skip_names: Full dotted module names (from the model root) to leave untouched.
-        prefix: Dotted name of ``model`` itself, so reported names are root-relative.
-        on_replace: Optional callback ``(full_name, original_class_name, module)`` invoked
-            after each conversion — the placement recording hook.
-        precision: Target precision; selects the descriptors of every inserted quantizer.
-        calibrator: Activation calibrator kind (``"histogram"`` / ``"max"``), from
-            :attr:`CalibrationConfig.activation_calibrator`.
-
-    Raises:
-        KeyError: On an unknown kind name (kind vocabulary lives in the table).
-        RuntimeError: When ``"spconv"`` is requested in an environment without spconv —
-            the quantized tree would silently come out un-quantized otherwise.
+    Names are dotted from the model root, ``prefix`` being the name of ``model``. A name in
+    ``skip_names`` skips its whole subtree. ``on_replace(name, original_class_name, module)``
+    is called after each conversion.
     """
     missing = [kind for kind in kinds if kind not in _REPLACEMENT_KINDS]
     if missing == ["spconv"]:
@@ -246,7 +178,6 @@ def _replace_walk(
     for name, submodule in list(model._modules.items()):
         full_name = f"{prefix}.{name}" if prefix else name
 
-        # Skip entire subtree if this module name is in the skip list.
         if full_name in skip_names or submodule is None:
             continue
 

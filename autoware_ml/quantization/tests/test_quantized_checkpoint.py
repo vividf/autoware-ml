@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Self-describing quantized checkpoints: embed, detect, round-trip, verify."""
+"""Unit tests for self-describing quantized checkpoints."""
 
 from __future__ import annotations
 

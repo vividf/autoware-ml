@@ -12,16 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PTQ calibration: feed data, collect activation statistics, compute amax.
-
-A thin layer over modelopt's calibration primitives: statistics collection is modelopt's
-``enable_stats_collection`` (calibrators on, fake-quant off) around a forward loop the
-framework owns (progress bar, fail-loud batches, the ``torch.histc`` determinism guard);
-``amax`` is then loaded per quantizer with the configured method
-(:class:`~autoware_ml.quantization.config.CalibrationConfig`). SmoothQuant delegates to
-modelopt's ``smoothquant`` (max calibration + per-channel activation-to-weight migration
-for every INT8 quantized Linear).
-"""
+"""PTQ calibration: modelopt's calibrators driven by the framework's own forward loop."""
 
 from __future__ import annotations
 
@@ -44,15 +35,11 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def _allow_nondeterministic_algorithms():
-    """Temporarily lift ``torch.use_deterministic_algorithms`` around the calibration forward pass.
+    """Lift ``torch.use_deterministic_algorithms`` for the calibration loop.
 
-    Under QAT the training config's ``randomness = dict(..., deterministic=True)`` makes mmengine
-    call ``torch.use_deterministic_algorithms(True)``, but the backend's
-    ``HistogramCalibrator.collect`` uses ``torch.histc``, which has no deterministic CUDA kernel —
-    every calibration batch would raise ``RuntimeError: _histc_cuda ... does not have a
-    deterministic implementation`` and calibration would end with ``amax=None`` on every quantizer.
-    Statistics collection has no bearing on training reproducibility, so the flag is lifted only
-    for the collection loop and restored exactly (including ``warn_only``) afterwards.
+    ``HistogramCalibrator.collect`` uses ``torch.histc``, which has no deterministic CUDA
+    kernel and raises when a deterministic training run turned the flag on. Statistics
+    collection does not affect reproducibility.
     """
     enabled = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
@@ -64,17 +51,7 @@ def _allow_nondeterministic_algorithms():
 
 
 class Calibrator:
-    """PTQ calibration for a quantized model (model-agnostic).
-
-    Args:
-        model: Model whose tree the quantization plan already prepared.
-
-    Example:
-        >>> QuantizationPlan.for_model(model, config).prepare(model)  # Insert Q/DQ nodes
-        >>> Calibrator(model).calibrate(dataloader, num_batches=100,
-        ...                             calibration=config.calibration,
-        ...                             forward_fn=default_calib_forward)
-    """
+    """PTQ calibration of a model whose tree the quantization plan has prepared."""
 
     def __init__(self, model: nn.Module):
         self.model = model
@@ -89,14 +66,12 @@ class Calibrator:
     ) -> Callable[[nn.Module], None]:
         """Build the ``forward_loop(model)`` callable modelopt's calibrators expect.
 
-        A failing batch raises immediately: silently skipping batches would shrink the
-        calibration statistics without any visible signal (the resulting amax would still
-        validate, just on less data than the recipe asked for).
+        A failing batch raises: skipping it would silently calibrate on less data than
+        configured, and the resulting amax would still pass validation.
         """
 
         def forward_loop(model: nn.Module) -> None:
             model.eval()
-            # histc-based histogram collection is non-deterministic on CUDA; see the context manager.
             with torch.no_grad(), _allow_nondeterministic_algorithms():
                 for i, batch in tqdm(enumerate(dataloader), total=num_batches, desc="Calibrating"):
                     if i >= num_batches:
@@ -111,24 +86,12 @@ class Calibrator:
         num_batches: int,
         forward_fn: Callable[[nn.Module, Any], None],
     ) -> None:
-        """Collect activation statistics (calibrators on, fake-quant off) — no amax yet.
-
-        Args:
-            dataloader: DataLoader providing calibration samples.
-            num_batches: Number of batches to feed.
-            forward_fn: ``forward_fn(model, batch)`` — owns device transfer and any
-                runtime preprocessing (e.g. ``default_calib_forward``).
-        """
+        """Collect activation statistics with the calibrators on and fake-quant off; no amax yet."""
         enable_stats_collection(self.model)
         self._forward_loop(dataloader, num_batches, forward_fn)(self.model)
 
     def compute_amax(self, calibration: CalibrationConfig) -> None:
-        """Load ``amax`` from every enabled quantizer's calibrator and switch fake-quant back on.
-
-        Histogram calibrators take the configured method (``mse`` / ``entropy`` /
-        ``percentile``); max calibrators (all weights, FP8 activations, and INT8
-        activations under ``method: max``) have exactly one answer.
-        """
+        """Load ``amax`` from every enabled quantizer's calibrator and switch fake-quant back on."""
         for quantizer in self._quantizers():
             if quantizer._calibrator is None:
                 continue
@@ -152,20 +115,13 @@ class Calibrator:
         *,
         forward_fn: Callable[[nn.Module, Any], None],
     ) -> None:
-        """Run the full calibration pipeline for ``calibration.method``.
+        """Calibrate on ``num_batches`` batches with ``calibration.method``.
 
-        Args:
-            dataloader: DataLoader providing calibration samples.
-            num_batches: Number of batches to feed.
-            calibration: The ``quantization.calibration`` block.
-            forward_fn: ``forward_fn(model, batch)`` — owns device transfer and any
-                runtime preprocessing.
+        ``forward_fn(model, batch)`` moves the batch to the model's device and preprocesses it.
         """
         logger.info("Starting calibration with %d batches, %s", num_batches, calibration.describe())
         if calibration.method == "smoothquant":
-            # modelopt: max-calibrate everything (per-channel on the Linear inputs), then
-            # migrate each INT8 Linear's activation outliers into its weight
-            # (input_quantizer.pre_quant_scale, weight rescaled in place).
+            # modelopt rescales the INT8 Linear weights in place (input_quantizer.pre_quant_scale).
             smoothquant(
                 self.model,
                 self._forward_loop(dataloader, num_batches, forward_fn),
@@ -180,13 +136,7 @@ class Calibrator:
 
 
 def default_calib_forward(model: nn.Module, batch: Any) -> None:
-    """Default calibration forward for a :class:`~autoware_ml.models.module_base_model.ModuleBaseModel`.
-
-    The batch goes through ``on_after_batch_transfer`` (the one place preprocessing
-    runs) and the forward receives the model inputs it produces, exactly like
-    Lightning's steps. No loss, no logging — statistics collection only needs the
-    activations. Shared by PTQ and the QAT callback.
-    """
+    """Run ``on_after_batch_transfer`` and the forward like Lightning's steps, without the loss."""
     device = next(model.parameters()).device
     batch_inputs = model.on_after_batch_transfer(batch.to_device(device), dataloader_idx=0)
     model(batch_inputs)

@@ -14,16 +14,11 @@
 
 """Self-describing quantized checkpoints.
 
-A quantized checkpoint carries, next to its ``state_dict``, a ``quantization`` entry
-holding the :class:`~autoware_ml.quantization.config.QuantizationConfig` that built
-its tree and the :class:`~autoware_ml.quantization.plan.PlacementRecord` the
-build recorded. That is everything a later ``build_model`` needs to rebuild the
-identical quantized tree and verify it — so ``deploy`` and ``test`` never read a
-``quantization`` config section, and PTQ and QAT checkpoints (a Lightning
-checkpoint with the same entry) load through one path.
-
-There are no sidecar files: the calibrated ``_amax`` buffers live in the
-``state_dict`` like any other buffer.
+Next to the ``state_dict``, which holds the calibrated ``_amax`` buffers, a quantized
+checkpoint carries a ``quantization`` entry: the config that built its tree and the placement
+record of that build. ``build_model`` needs nothing else to rebuild and verify the tree, so
+``deploy`` and ``test`` read no ``quantization`` config section, and PTQ and QAT (Lightning)
+checkpoints load the same way.
 """
 
 from __future__ import annotations
@@ -43,25 +38,19 @@ logger = logging.getLogger(__name__)
 
 #: Top-level checkpoint key holding the quantization description.
 QUANTIZATION_KEY = "quantization"
-#: Version of the embedded payload. Bump when ``to_payload`` changes shape or meaning;
-#: the loader refuses a checkpoint of another version instead of mis-reading it.
+#: Version of the embedded payload; bump it when ``to_payload`` changes shape or meaning. A
+#: checkpoint of another version is refused rather than migrated: ``autoware-ml quantize``
+#: reproduces it.
 FORMAT_VERSION = 1
 
-#: ``config`` keys an earlier payload may carry that no longer exist: ``fuse_bn`` was a
-#: flag whose only accepted value was ``true`` (BN is always folded before calibration),
-#: so dropping it changes nothing the payload describes.
+#: ``config`` keys of older payloads that no longer exist. ``fuse_bn`` only ever accepted
+#: ``true`` (BN is always folded), so ignoring it changes nothing.
 _DROPPED_CONFIG_KEYS = frozenset({"fuse_bn"})
 
 
 @dataclass(frozen=True)
 class QuantizationDescription:
-    """What a quantized checkpoint says about itself.
-
-    The payload carries :data:`FORMAT_VERSION`; a checkpoint of another version is
-    refused with a pointer to re-run ``autoware-ml quantize`` (checkpoints are
-    reproducible artifacts). Inside one version, ``QuantizationConfig.from_dict``
-    rejects unknown keys and a missing key raises here.
-    """
+    """What a quantized checkpoint says about itself: its config and placement record."""
 
     config: QuantizationConfig
     placement_record: PlacementRecord
@@ -76,21 +65,13 @@ class QuantizationDescription:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> QuantizationDescription:
-        """Deserialize an embedded payload.
-
-        Raises:
-            KeyError: When the payload does not have this build's layout — the
-                checkpoint predates a format change; re-produce it with
-                ``autoware-ml quantize``.
-        """
+        """Deserialize an embedded payload, refusing one of another format version."""
         version = payload.get("format")
         if version != FORMAT_VERSION:
             raise ValueError(
                 f"Quantized checkpoint payload format {version!r} is not the supported "
                 f"{FORMAT_VERSION}; re-produce it with `autoware-ml quantize`."
             )
-        # Keys a payload could carry before the option was removed (always at the only
-        # value the plan accepted) read as the current behaviour.
         config = {k: v for k, v in payload["config"].items() if k not in _DROPPED_CONFIG_KEYS}
         return cls(
             config=QuantizationConfig.from_dict(config),
@@ -99,18 +80,14 @@ class QuantizationDescription:
 
 
 def attach_quantization(checkpoint: dict[str, Any], description: QuantizationDescription) -> None:
-    """Embed ``description`` into a checkpoint dict in place (used by ``on_save_checkpoint``)."""
+    """Embed ``description`` into a checkpoint dict in place, e.g. in ``on_save_checkpoint``."""
     checkpoint[QUANTIZATION_KEY] = description.to_payload()
 
 
 def save_quantized_checkpoint(
     model: torch.nn.Module, path: str | Path, description: QuantizationDescription
 ) -> Path:
-    """Write ``{"state_dict", "quantization"}`` — the PTQ producer's output.
-
-    The layout is a subset of a Lightning checkpoint, so PTQ and QAT checkpoints read
-    identically.
-    """
+    """Write ``{"state_dict", "quantization"}``, a subset of a Lightning checkpoint's layout."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint: dict[str, Any] = {"state_dict": model.state_dict()}
@@ -148,15 +125,10 @@ def read_quantization_from_file(path: str | Path) -> QuantizationDescription | N
 def find_quantization(
     weight_paths: Sequence[str | Path],
 ) -> tuple[Path, QuantizationDescription] | None:
-    """Find the one quantized checkpoint among ``weight_paths``.
+    """Return ``(path, description)`` of the one quantized checkpoint, or ``None`` if all are FP.
 
-    Returns:
-        ``(path, description)`` of the quantized checkpoint, or ``None`` when every
-        checkpoint is a plain FP one.
-
-    Raises:
-        ValueError: When more than one checkpoint is quantized — a quantized tree is a
-            whole-model construction; merging two of them is not defined.
+    More than one quantized checkpoint is an error: a quantized tree is built for the whole
+    model, and merging two is not defined.
     """
     found = [
         (Path(path), description)

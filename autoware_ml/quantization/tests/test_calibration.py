@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Calibrator on a tiny model: every ``calibration.method`` yields usable amax, SmoothQuant
-produces a ``pre_quant_scale`` that survives save/load and ONNX export."""
+"""Unit tests for quantizer calibration."""
 
 from __future__ import annotations
 
@@ -98,8 +97,7 @@ def test_smoothquant_migrates_outliers_and_round_trips(tmp_path):
     weight_before = net.linear.weight.detach().clone()
     Calibrator(net).calibrate(_batches(), 4, calibration, forward_fn=_forward)
     validate_quantizer_amax(net)
-    # The INT8 Linear got a per-input-channel pre_quant_scale and a rescaled weight; the
-    # conv (not a Linear) is plain max-calibrated.
+    # SmoothQuant only applies to Linear layers; the conv is plain max-calibrated.
     scale = net.linear.input_quantizer.pre_quant_scale
     assert scale is not None and scale.shape == (4,)
     assert not torch.equal(net.linear.weight, weight_before)
@@ -108,7 +106,7 @@ def test_smoothquant_migrates_outliers_and_round_trips(tmp_path):
     keys = [k for k in net.state_dict() if "pre_quant_scale" in k]
     assert keys == ["linear.input_quantizer._pre_quant_scale"]
 
-    # Loads into a fresh tree (the lazy-buffer patch covers pre_quant_scale too) ...
+    # The patched TensorQuantizer._load_from_state_dict creates pre_quant_scale on load too.
     fresh = _prepared(calibration)
     result = fresh.load_state_dict(net.state_dict(), strict=False)
     assert result.missing_keys == [] and result.unexpected_keys == []
@@ -116,7 +114,7 @@ def test_smoothquant_migrates_outliers_and_round_trips(tmp_path):
     with torch.no_grad():
         assert torch.equal(fresh(x), net(x))
 
-    # ... and exports: the scale becomes a Mul feeding the Q/DQ pair.
+    # The scale exports as a Mul in front of the Q/DQ pair.
     onnx = pytest.importorskip("onnx")
     path = tmp_path / "sq.onnx"
     torch.onnx.export(net, x, str(path), opset_version=17, dynamo=False)
