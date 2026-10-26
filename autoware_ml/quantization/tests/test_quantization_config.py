@@ -14,6 +14,8 @@
 
 """Tests for the typed quantization config (typo guard, mode lies, defaults)."""
 
+# cspell:ignore methd
+
 from __future__ import annotations
 
 import pytest
