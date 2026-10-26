@@ -51,10 +51,9 @@ class ExportSpec:
         output_names: Names of the exported output tensors, in order.
         dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
             the export arguments. Used only when exporting with ``dynamo=False``.
-        onnx_transforms: Rewrites applied to the exported ``.onnx``, in order, right
-            after the export and before any config-driven graph modifier or precision
-            cast (each takes the path and returns the path it wrote). A stage graph
-            declares them on its :class:`~autoware_ml.deployment.stages.GraphStage`.
+        onnx_transforms: Rewrites of the exported ``.onnx``, run in order before any
+            config-driven graph modifier or precision cast; each takes the path and
+            returns the path it wrote.
     """
 
     module: torch.nn.Module
@@ -66,16 +65,7 @@ class ExportSpec:
 
 
 def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
-    """Run a spec's ``onnx_transforms`` over the exported graph, in order.
-
-    Args:
-        onnx_path: The freshly exported ``.onnx``.
-        transforms: Callables taking the current path and returning the path they wrote
-            (usually the same file, rewritten in place).
-
-    Returns:
-        The path the last transform returned (``onnx_path`` when there is none).
-    """
+    """Run ``transforms`` over the exported file in order and return the resulting path."""
     for transform in transforms:
         name = getattr(transform, "__name__", None) or getattr(
             getattr(transform, "func", None), "__name__", type(transform).__name__

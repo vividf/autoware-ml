@@ -633,15 +633,13 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         # Dynamic axes come from deploy.onnx.modules.bevfusion_lidar, not the declaration.
         self.assertFalse(graph.onnx_dynamic_axes)
         self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
-        # The sparse plugin nodes absorb their bias and activation after export.
         self.assertEqual(graph.onnx_transforms, (fuse_sparse_graph,))
 
     @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
     def test_stage_graph_exports_the_sparse_encoder_with_folded_batchnorm(self) -> None:
         """
-        Test that the lidar graph's export copy carries the sparse encoder's BatchNorm layers
-        folded into convolutions that became plugin wrappers with the folded bias, while the
-        model itself keeps its BatchNorm layers.
+        Test that the lidar graph exports the sparse encoder with BatchNorm folded into biased
+        wrappers, while the model keeps its BatchNorm layers.
         """
         lidar_network = self._build_lidar_network()
         lidar_network.pts_middle_encoder = SparseEncoder(

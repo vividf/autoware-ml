@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Folding sparse bias adds and ReLUs into the ImplicitGemm plugin node."""
+"""Unit tests for folding the bias add and ReLU into the ImplicitGemm plugin node."""
 
 from __future__ import annotations
 
@@ -71,8 +71,6 @@ def test_bias_and_relu_fold_into_the_plugin_node() -> None:
     assert (fused_biases, fused_activations) == (1, 1)
     assert [node.op_type for node in model.graph.node] == ["ImplicitGemm"]
     gemm = model.graph.node[0]
-    # The bias arrives as the plugin's optional sixth input, and the node takes over the
-    # chain's output name so downstream readers are unaffected.
     assert list(gemm.input) == ["features", "w", "p", "m", "a", "bias"]
     assert list(gemm.output) == ["activated"]
     assert _attribute(gemm, "act_type") == ACT_RELU
@@ -95,8 +93,6 @@ def test_bias_folds_without_an_activation() -> None:
 
 
 def test_a_relu_is_not_folded_without_the_bias_add() -> None:
-    """The plugin activates after its bias add, so folding a ReLU across a separate
-    bias add would change the result: relu(x) + b != relu(x + b)."""
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
         helper.make_node("Relu", ["gemm_out"], ["activated"], name="relu"),
@@ -112,7 +108,6 @@ def test_a_relu_is_not_folded_without_the_bias_add() -> None:
 
 
 def test_a_shared_intermediate_is_left_alone() -> None:
-    """A bias add read by a second consumer cannot be folded away."""
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
         helper.make_node("Add", ["gemm_out", "bias"], ["biased"], name="add"),
@@ -129,14 +124,7 @@ def test_a_shared_intermediate_is_left_alone() -> None:
 
 
 def test_an_unfoldable_plugin_node_is_reported(tmp_path, caplog) -> None:
-    """Fusion that quietly stops matching costs latency with no other symptom.
-
-    The graph stays correct — the bias Add and the ReLU are ordinary ONNX ops TensorRT
-    builds — so nothing fails. An exporter change that broke every fold would look
-    exactly like a slow engine, which is why the pass says how many it left behind.
-    """
-
-    # The Add consumes two non-initializer tensors, so the bias fold cannot apply.
+    # No initializer feeds the Add, so there is no bias to fold.
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
         helper.make_node("Add", ["gemm_out", "features"], ["biased"], name="add"),
@@ -153,15 +141,9 @@ def test_an_unfoldable_plugin_node_is_reported(tmp_path, caplog) -> None:
 
 
 def test_structurally_identical_nodes_are_removed_by_identity(tmp_path) -> None:
-    """Two folded chains that serialize identically must not delete each other.
-
-    ``node in removed`` compares protobuf messages by value; nodes that differ only in
-    what they are attached to would match, and removing one would drop both.
-    """
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_a_out", "gemm_a"),
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_b_out", "gemm_b"),
-        # Same op, same bias initializer, no name: identical once serialized.
         helper.make_node("Add", ["gemm_a_out", "bias"], ["a_biased"]),
         helper.make_node("Add", ["gemm_b_out", "bias"], ["b_biased"]),
         helper.make_node("Mul", ["a_biased", "b_biased"], ["out"], name="join"),

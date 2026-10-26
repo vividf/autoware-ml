@@ -297,11 +297,10 @@ class TestOutputLayout:
         self, tmp_path: Path
     ) -> None:
         """
-        Input: a spec declaring an ``onnx_transforms`` rewrite that moves the graph to another
-            file, and no graph modifier.
-        Expected: the rewrite runs on the freshly exported file; its result is stamped and
-            shipped as the module's artifact.
-        Check: the paths the transform saw and the reported outputs.
+        Input: a spec whose ``onnx_transforms`` rewrite moves the graph to another file.
+        Expected: the rewrite sees the freshly exported file, and its result is stamped and
+            shipped under the module's artifact name.
+        Check: the paths the transform saw, the outputs and the stamped module name.
         """
         seen: list[Path] = []
 

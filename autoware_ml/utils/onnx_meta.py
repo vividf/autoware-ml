@@ -140,8 +140,7 @@ def stamp_onnx_meta(
     model.model_version = release_to_model_version(release)
     model.doc_string = f"{module} {release or UNVERSIONED}"
 
-    # Keep what earlier export passes recorded (a stage transform's runtime contract, say);
-    # only the identity / provenance keys below are owned here.
+    # Keep the metadata earlier export passes wrote; only the keys below are owned here.
     props = {prop.key: prop.value for prop in model.metadata_props}
     props.update(
         {
