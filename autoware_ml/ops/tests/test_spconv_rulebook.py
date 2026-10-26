@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Precomputed down-sampling rulebooks: geometry, graph-input contract, and equivalence."""
+"""Unit tests for the precomputed down-sampling rulebooks."""
 
 from __future__ import annotations
 
@@ -43,14 +43,12 @@ if IS_SPCONV_AVAILABLE:
 
 
 def _encoder() -> SparseEncoder:
-    """Three stride-2 stages plus conv_out — the deployed encoder's shape, at toy size.
+    """The deployed encoder's layout at toy size: three stride-2 stages plus ``conv_out``.
 
-    z starts at 32 so that three stride-2 stages (32 -> 16 -> 8 -> 4) leave conv_out's
-    (1, 1, 3) / stride-2 kernel a valid output extent; spconv rejects a zero-sized one.
+    The third stage pads z by 0 like the deployed encoder, so z goes 32 -> 16 -> 8 -> 3 and
+    ``conv_out``'s ``(1, 1, 3)`` stride-2 kernel leaves 1. A smaller z would reach a zero-sized
+    extent, which spconv rejects.
     """
-    # Per stage: basic blocks at the stage width, then a stride-2 block into the next width
-    # (the deployed encoder's plan, 16/32/64/128, at toy widths). Stage 3 pads z by 0 like the
-    # deployed one, so z goes 32 -> 16 -> 8 -> 3, and conv_out's (1, 1, 3) kernel leaves 1.
     return SparseEncoder(
         in_channels=4,
         sparse_shape=(64, 64, 32),
@@ -92,9 +90,8 @@ def test_downsample_stages_cascade_the_spatial_shape_in_forward_order():
         (64, 64, 32),
         (32, 32, 16),
         (16, 16, 8),
-        (8, 8, 3),  # stage 3 pads z by 0: (8 - 3) // 2 + 1
+        (8, 8, 3),
     ]
-    # conv_out strides only along z, with a (1, 1, 3) kernel: (3 - 3) // 2 + 1 = 1.
     assert stages[-1].kernel_size == (1, 1, 3) and stages[-1].kernel_volume == 3
     assert stages[-1].out_spatial_shape == (8, 8, 1)
 
@@ -147,19 +144,12 @@ def test_metadata_carries_the_geometry_and_the_coordinate_order(tmp_path):
         "dilation": [1, 1, 1],
         "spatial_shape": [64, 64, 32],
     }
-    # coors is [z, y, x]; the convolutions run on [y, x, z].
     assert json.loads(props[COORS_PERMUTATION_METADATA_KEY]) == [1, 2, 0]
     assert json.loads(props[DO_SORT_METADATA_KEY]) is True
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="spconv kernels need CUDA")
 def test_precomputed_rulebooks_reproduce_the_in_graph_result():
-    """Seeding the export encoder with precomputed rulebooks changes nothing but the graph.
-
-    This is the whole correctness argument for removing the down-sampling
-    GetIndicePairsImplicitGemm nodes: the layers consume the tensors the precompute made
-    instead of generating their own, and the BEV map must be identical.
-    """
     encoder = _encoder().cuda()
     exported = encoder.prepare_for_export()
     features, coords = _voxels(encoder, 3000, "cuda")

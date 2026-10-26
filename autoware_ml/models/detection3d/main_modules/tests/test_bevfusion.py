@@ -681,9 +681,8 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self,
     ) -> None:
         """
-        Test that a sparse encoder opting into the rulebook precompute inserts the glue stage
-        between the voxel fetch and the graph, that the graph takes the glue's outputs as
-        extra inputs with dynamic axes, and that the metadata transform closes the transforms.
+        Test that opting into the rulebook precompute adds the glue stage, its outputs as graph
+        inputs with dynamic axes, and the metadata transform last.
         """
         model = self._build_rulebook_precompute_model()
 
@@ -703,7 +702,6 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(
             graph.onnx_transforms[-1].keywords["stages"], export_encoder.downsample_stages()
         )
-        # The default stays the plain two-stage graph without declared axes.
         plain = validate_stages(self.model.eval().build_stages())
         self.assertEqual([stage.name for stage in plain], ["fetch_voxels", "bevfusion_lidar"])
         self.assertEqual(dict(plain[1].onnx_dynamic_axes), {})
@@ -712,25 +710,27 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         IS_SPCONV_AVAILABLE and torch.cuda.is_available(), "spconv kernels need CUDA"
     )
     def test_precomputed_rulebooks_leave_the_graph_outputs_unchanged(self) -> None:
-        """Test that feeding the graph precomputed rulebooks yields the packed outputs of the
-        plain graph on the same frame: the precompute moves work, not arithmetic."""
+        """Test that precomputed rulebooks leave the packed outputs bit-identical."""
         model = self._build_rulebook_precompute_model()
         batch_inputs = self._build_single_sample_batch_inputs()
 
-        with_rulebooks = run_stages_in_torch(model.build_stages(), batch_inputs, self.device)
+        with_rulebooks = StagedPipeline(model.build_stages(), Backend.PYTORCH, self.device).trace(
+            batch_inputs
+        )
         model.lidar_network.pts_middle_encoder.export_precompute_rulebooks = False
-        plain = run_stages_in_torch(model.build_stages(), batch_inputs, self.device)
+        plain = StagedPipeline(model.build_stages(), Backend.PYTORCH, self.device).trace(
+            batch_inputs
+        )
 
         for key in ("bbox_pred", "score", "label_pred"):
             torch.testing.assert_close(with_rulebooks[key], plain[key], rtol=0, atol=0)
 
     def _build_rulebook_precompute_model(self) -> BEVFusionDetection3DModel:
-        """A lidar-only model whose sparse encoder opts into the rulebook precompute.
+        """Build a lidar-only model whose sparse encoder precomputes rulebooks.
 
-        One submanifold stage, so the only down-sampling layer is ``conv_out``, whose
-        ``(1, 1, 3)`` / stride-2 kernel takes the three z cells to one: the BEV map keeps
-        the 16x16 grid the backbone and head are built for (the scene's voxels all sit at
-        z = 0, within the three cells).
+        One submanifold stage, so ``conv_out`` is the only down-sampling layer; its
+        ``(1, 1, 3)`` kernel collapses the three z cells and keeps the 16x16 BEV grid the
+        backbone and head are built for.
         """
         lidar_network = self._build_lidar_network()
         lidar_network.pts_middle_encoder = SparseEncoder(

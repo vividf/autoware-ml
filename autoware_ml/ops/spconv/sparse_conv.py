@@ -72,11 +72,7 @@ def resolve_output_spatial_shape(
     dilation: list[int],
     output_padding: list[int],
 ) -> list[int]:
-    """Resolve the sparse spatial shape produced by a convolution layer.
-
-    Public because the rulebook precompute (:mod:`autoware_ml.ops.spconv.rulebook`) has to
-    cascade the same rule over an encoder's down-sampling layers outside the graph.
-    """
+    """Resolve the sparse spatial shape produced by a convolution layer."""
     if subm:
         return spatial_shape
     if transposed:
@@ -199,9 +195,8 @@ class SparseConvolution(SparseConvolutionBase):
     ) -> None:
         """Reject a precomputed rulebook that was not generated for this layer's geometry.
 
-        Mirrors spconv's ``_check_subm_reuse_valid``: a rulebook is a function of the input
-        coordinates *and* the layer's kernel geometry, so every parameter that shaped it has
-        to match, or the pairs index the wrong neighbours without any error surfacing.
+        Mirrors spconv's ``_check_subm_reuse_valid``: with another geometry the pairs would
+        silently index the wrong neighbours.
         """
         del input_tensor  # the geometry below is what identifies the rulebook
         if data.is_subm:
@@ -392,12 +387,10 @@ class SparseConvolution(SparseConvolutionBase):
             )
 
         if self.indice_key is not None and data is not None:
-            # A submanifold layer reuses the rulebook of the layer that shares its indice key
-            # (spconv's own rule). A down-sampling layer never generates a rulebook that
-            # another layer could reuse, so cached data under its key can only be a rulebook
-            # precomputed outside the graph (autoware_ml.ops.spconv.rulebook): consuming it
-            # here is what removes the layer's GetIndicePairsImplicitGemm node — and with it
-            # the data-dependent output shape TensorRT would otherwise synchronize on.
+            # A submanifold layer reuses the rulebook of the layer sharing its indice key. A
+            # down-sampling layer only finds one precomputed outside the graph
+            # (autoware_ml.ops.spconv.rulebook); reusing it drops the layer's
+            # GetIndicePairsImplicitGemm node and its data-dependent output shape.
             if self.subm:
                 self._check_subm_reuse_valid(input_tensor, spatial_shape, data)
             else:

@@ -14,26 +14,15 @@
 
 """Precomputed rulebooks for the down-sampling sparse convolutions of a deployed graph.
 
-A sparse convolution runs in two steps: ``GetIndicePairsImplicitGemm`` builds the *rulebook*
-(which input voxel feeds which output voxel, per kernel offset), then ``ImplicitGemm`` does
-the arithmetic. For a submanifold layer the output voxels are the input voxels, so the
-rulebook's shape is known before it runs. For a down-sampling layer the output voxel set is
-new, and its size is only known once the kernel has run — a data-dependent shape. TensorRT
-handles that by copying the size back to the host and waiting for it before it can schedule
-what follows: the ``[trainStation]`` regions in an engine's layer list, measured at 0.83 ms of
-pure stall per frame on BEVFusion's four down-sampling layers (23% of its sparse engine).
+A down-sampling layer's rulebook (which input voxel feeds which output voxel, per kernel
+offset) has a data-dependent size, and TensorRT stalls on the host until it is known (the
+``[trainStation]`` regions of an engine): 0.83 ms per frame on BEVFusion's four down-sampling
+layers, 23% of its sparse engine. The rulebooks depend only on the voxel coordinates, so a
+Torch stage computes them and the graph takes them as inputs. Submanifold layers keep their
+in-graph rulebooks: their output voxels are their input voxels, so the shape is static.
 
-The rulebook chain is a pure function of the voxel coordinates: nothing in it depends on
-features, weights or precision. So it is computed here, outside the graph, in the Torch stage
-that already produces the graph's ``coors`` input, and handed to the graph as inputs. The
-down-sampling layers find it under their indice key and reuse it
-(:meth:`~autoware_ml.ops.spconv.sparse_conv.SparseConvolution._resolve_implicit_gemm_plan`),
-so the exported graph carries no ``GetIndicePairsImplicitGemm`` node for them and no
-data-dependent shape. The submanifold layers keep generating their own rulebooks in-graph:
-they have no dynamic shape to remove, and moving them would only relocate the work.
-
-The graph-input contract (``rulebook/<indice_key>/<slot>`` names, the ``rulebook_stages``
-metadata) is what ``autoware_bevfusion``'s runtime binds against; keep the two in step.
+``autoware_bevfusion``'s runtime binds the ``rulebook/<indice_key>/<slot>`` inputs and reads
+the ``rulebook_stages`` metadata; keep the two in step.
 """
 
 from __future__ import annotations
@@ -59,15 +48,12 @@ logger = logging.getLogger(__name__)
 
 #: The four tensors of one rulebook, in the order ``GetIndicePairsImplicitGemm`` emits them.
 RULEBOOK_SLOTS = ("out_indices", "pair_fwd", "pair_mask", "mask_argsort")
-#: Graph-input namespace; Netron groups the inputs of one stage under it.
 INPUT_NAMESPACE = "rulebook"
-#: ONNX ``metadata_props`` key carrying the stage geometry the runtime recomputes from.
+# metadata_props keys the runtime reads: the stage geometry it regenerates the rulebooks
+# from, the coors -> convolution column order, and whether the pair masks are argsorted
+# (its rulebooks must be generated the same way).
 STAGES_METADATA_KEY = "rulebook_stages"
-#: ONNX ``metadata_props`` key carrying the ``coors`` -> convolution-coordinate column order.
 COORS_PERMUTATION_METADATA_KEY = "rulebook_coors_permutation"
-#: ONNX ``metadata_props`` key: whether the pair masks were argsorted (``export_do_sort``);
-#: the runtime's rulebooks must be generated the same way or the pairs feed the graph in
-#: another order.
 DO_SORT_METADATA_KEY = "rulebook_do_sort"
 
 
@@ -76,17 +62,11 @@ class DownsampleStage:
     """One down-sampling sparse convolution whose rulebook is precomputed.
 
     Attributes:
-        indice_key: The layer's spconv indice key — the name the layer looks its rulebook
-            up under, and the stage's identity in the graph-input names.
-        algo: Convolution algorithm the layer runs; a rulebook is only reusable by a layer
-            with the same one.
-        kernel_size: Kernel size per spatial axis.
-        stride: Stride per spatial axis.
-        padding: Padding per spatial axis.
-        dilation: Dilation per spatial axis.
-        output_padding: Transposed-convolution output padding (zeros for a forward layer).
-        spatial_shape: Sparse spatial shape the layer's *input* lives in.
-        out_spatial_shape: Sparse spatial shape the layer produces.
+        indice_key: The key the layer looks its rulebook up under; also names the stage's
+            graph inputs.
+        algo: The layer's convolution algorithm, which the rulebook layout depends on.
+        spatial_shape: Spatial shape of the layer's input.
+        out_spatial_shape: Spatial shape of the layer's output.
     """
 
     indice_key: str
@@ -101,7 +81,7 @@ class DownsampleStage:
 
     @property
     def kernel_volume(self) -> int:
-        """Number of kernel offsets — the leading dimension of ``pair_fwd``."""
+        """Number of kernel offsets, the leading dimension of ``pair_fwd``."""
         volume = 1
         for size in self.kernel_size:
             volume *= size
@@ -124,11 +104,7 @@ class DownsampleStage:
         return tuple(self.input_name(slot) for slot in RULEBOOK_SLOTS)
 
     def metadata(self) -> dict[str, object]:
-        """The stage as the runtime reads it from ``rulebook_stages`` (spconv's key names).
-
-        ``algo`` is spconv's ``ConvAlgo`` value: the rulebook layout depends on it, so the
-        runtime must generate with the same one.
-        """
+        """The stage's ``rulebook_stages`` entry, with spconv's key names."""
         return {
             "onnx_base": self.onnx_base,
             "algo": int(self.algo.value),
@@ -145,17 +121,12 @@ def downsample_stages(
 ) -> tuple[DownsampleStage, ...]:
     """Describe the down-sampling layers of a sparse encoder, with their input shapes.
 
-    Args:
-        layers: The encoder's sparse convolutions **in forward order** — the spatial shape
-            cascades through them, so the order is part of the answer.
-        sparse_shape: Spatial shape of the encoder's input sparse tensor.
-
-    Returns:
-        One stage per non-submanifold layer, in forward order.
+    ``layers`` are all of the encoder's sparse convolutions in forward order, since the spatial
+    shape cascades through them; ``sparse_shape`` is the encoder's input shape.
 
     Raises:
-        ValueError: On a layer without an indice key (nothing to look its rulebook up by), a
-            transposed layer (not a down-sampling), or two down-sampling layers sharing a key.
+        ValueError: On a down-sampling layer without an indice key or sharing one, or on a
+            transposed layer.
     """
     stages: list[DownsampleStage] = []
     spatial_shape = [int(size) for size in sparse_shape]
@@ -226,22 +197,17 @@ def precompute_rulebooks(
 ) -> dict[str, torch.Tensor]:
     """Generate the rulebook of every stage, cascading each stage's output voxels into the next.
 
-    Runs the same ``GetIndicePairsImplicitGemm`` the layer would have run in the graph, with
-    the same arguments, so the tensors are the ones the graph's ``ImplicitGemm`` nodes were
-    exported against. The output voxels come in the order spconv's thrust-based generation
-    produces (:func:`~autoware_ml.ops.spconv.sparse_functional.get_indice_pairs_implicit_gemm`
-    runs without the direct table); a runtime that generates with the direct table lists the
-    same voxels in another order. That is fine: a rulebook is a graph *input*, the graph only
-    needs its four tensors to agree with each other, and the dense BEV map it scatters into
-    does not depend on the voxel order.
+    Makes the same ``GetIndicePairsImplicitGemm`` call as the layer in the graph. The output
+    voxels come in the order of spconv's thrust-based generation; a runtime using the direct
+    table lists them in another order, which is fine: the graph only needs the four tensors of
+    a rulebook to agree, and the dense BEV scatter does not depend on the voxel order.
 
     Args:
-        coords: ``[N, 1 + ndim]`` int32 ``[batch, *spatial]`` coordinates **in the column
-            order the encoder's convolutions use** (for the BEVFusion encoder,
-            :meth:`~autoware_ml.models.detection3d.encoders.sparse.sparse_encoder.SparseEncoder.conv_coords`).
+        coords: ``[N, 1 + ndim]`` ``[batch, *spatial]`` coordinates in the convolutions' column
+            order (``SparseEncoder.conv_coords``).
         batch_size: Number of samples in ``coords``.
-        stages: From :func:`downsample_stages`, in forward order.
-        do_sort: The encoder's ``export_do_sort`` — must match the graph the rulebooks feed.
+        stages: From :func:`downsample_stages`.
+        do_sort: The encoder's ``export_do_sort``; must match the graph the rulebooks feed.
 
     Returns:
         Graph-input name -> int32 tensor, for every stage and slot.
@@ -251,8 +217,8 @@ def precompute_rulebooks(
     current = coords.int().contiguous()
     with torch.no_grad():
         for stage in stages:
-            # Same call the exportable layer makes (SparseConvolution._resolve_implicit_gemm_plan):
-            # is_train is `not subm`, the allocator is the fresh tensor's (None).
+            # Same arguments as SparseConvolution._resolve_implicit_gemm_plan: subm and
+            # transposed False, is_train = not subm, no allocator on a fresh tensor.
             out_indices, pair_fwd, pair_mask, mask_argsort, _ = get_indice_pairs_implicit_gemm(
                 current,
                 batch_size,
@@ -281,16 +247,10 @@ def precompute_rulebooks(
 def rulebook_indice_data(
     stage: DownsampleStage, tensors: Mapping[str, torch.Tensor]
 ) -> ImplicitGemmIndiceData:
-    """Wrap one stage's tensors as the cached indice data its layer reuses.
+    """Wrap one stage's tensors as the indice data its layer finds under ``stage.indice_key``.
 
-    Args:
-        stage: The stage the tensors belong to.
-        tensors: Graph-input name -> tensor (the whole rulebook mapping is accepted).
-
-    Returns:
-        The object to store under ``stage.indice_key`` in the input tensor's ``indice_dict``.
-        ``indices`` (the layer's *input* coordinates) is not carried: the graph inputs hold
-        the layer's outputs, and the layer validates geometry instead.
+    ``tensors`` may hold every stage's rulebook. The layer's input ``indices`` are not
+    carried; the layer validates the geometry instead.
     """
     out_indices = tensors[stage.input_name("out_indices")]
     return ImplicitGemmIndiceData(
@@ -322,23 +282,12 @@ def embed_rulebook_metadata(
     coors_permutation: Iterable[int],
     do_sort: bool,
 ) -> Path:
-    """Stage transform: record the rulebook geometry in the exported graph's metadata.
+    """Stage transform: record what the runtime needs to regenerate the rulebooks.
 
-    The deployed runtime has to regenerate the same rulebooks (the same pairs; the order of
-    the output voxels may differ, see :func:`precompute_rulebooks`) from the frame's voxel
-    coordinates, so the graph carries what it needs: every stage's kernel geometry and input
-    spatial shape, and the column order that turns the graph's ``coors`` input into the
-    coordinates the convolutions were exported with.
-
-    Args:
-        onnx_path: The exported sparse graph, rewritten in place.
-        stages: From :func:`downsample_stages`.
-        coors_permutation: For each convolution spatial column, the ``coors`` column it comes
-            from — ``(1, 2, 0)`` maps ``coors = [z, y, x]`` onto ``[y, x, z]``.
-        do_sort: The encoder's ``export_do_sort`` the graph was exported with.
-
-    Returns:
-        The same path.
+    Stores every stage's kernel geometry and input spatial shape, ``do_sort``, and
+    ``coors_permutation``: for each convolution spatial column, the column of the graph's
+    ``coors`` it comes from (``(1, 2, 0)`` maps ``[z, y, x]`` onto ``[y, x, z]``). Rewrites
+    the file in place and returns its path.
     """
     onnx_path = Path(onnx_path)
     model = onnx.load(str(onnx_path))
