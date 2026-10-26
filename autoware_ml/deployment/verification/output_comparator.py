@@ -255,7 +255,7 @@ class OutputComparator:
 
     @staticmethod
     def _merge_summaries(results: Iterable[OutputDiffSummary]) -> OutputDiffSummary:
-        """Combine child :class:`OutputDiffSummary` values into one rollup."""
+        """Combine child :class:`OutputDiffSummary` values into one summary."""
         max_diff = 0.0
         total_diff = 0.0
         total_elements = 0
