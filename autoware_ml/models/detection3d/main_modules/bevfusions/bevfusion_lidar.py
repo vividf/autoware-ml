@@ -91,9 +91,8 @@ class BEVFusionLidar(nn.Module):
                 encoder consumes them.
             batch_size: Explicit batch size.
             other_bev_features: Optional bev features from other modalities.
-            precomputed_rulebooks: Rulebooks of the middle encoder's down-sampling layers
-                generated outside the graph (deployment only; see
-                :mod:`autoware_ml.ops.spconv.rulebook`). Passed through untouched.
+            precomputed_rulebooks: Middle-encoder rulebooks precomputed for deployment, by
+                indice key.
 
         Returns:
             BEV feature maps from lidar if fusion is disable, otherwise, BEV feature maps fused
@@ -107,7 +106,7 @@ class BEVFusionLidar(nn.Module):
             num_points=num_points,
             coords=coords,
         )
-        # Only the sparse encoder takes rulebooks; other middle encoders never see the kwarg.
+        # Only the sparse encoder accepts precomputed_rulebooks.
         middle_encoder_kwargs = (
             {}
             if precomputed_rulebooks is None

@@ -317,20 +317,17 @@ class SparseEncoder(BEVMiddleEncoder):
 
     @property
     def coors_permutation(self) -> tuple[int, ...]:
-        """For each convolution spatial column, the graph ``coors`` (``[z, y, x]``) column it is.
+        """For each convolution spatial column, its column in the graph's ``[z, y, x]`` ``coors``.
 
-        The deployed runtime rebuilds the convolution coordinates from the graph's batch-less
-        ``coors`` input with this, so it is derived from :attr:`CONV_COORDS_PERMUTATION`
-        rather than declared a second time.
+        The runtime rebuilds the convolution coordinates from ``coors`` with it.
         """
         return tuple(column - 1 for column in self.CONV_COORDS_PERMUTATION[1:])
 
     def downsample_stages(self) -> tuple[DownsampleStage, ...]:
         """Describe the down-sampling layers whose rulebooks deployment precomputes.
 
-        ``modules()`` yields the convolutions in registration order, which is this encoder's
-        forward order (``conv_input`` -> ``encoder_layers`` stage by stage -> ``conv_out``):
-        the cascade of spatial shapes depends on it.
+        The spatial shapes cascade in forward order, which is the registration order
+        ``modules()`` yields for this encoder.
         """
         layers = [module for module in self.modules() if isinstance(module, SparseConvolution)]
         return downsample_stages(layers, self.sparse_shape)
@@ -350,11 +347,9 @@ class SparseEncoder(BEVMiddleEncoder):
             coords: Voxel coordinates of shape in `[batch_idx, z, y, x]`. coords must be in this
                 order to align with autoware.
             batch_size: Number of samples in the batch.
-            precomputed_rulebooks: Indice key -> rulebook of a down-sampling layer, generated
-                outside the graph (:mod:`autoware_ml.ops.spconv.rulebook`). Seeded into the
-                input tensor's indice cache so those layers reuse it instead of generating
-                their own: deployment's way of keeping data-dependent shapes out of the
-                exported graph. ``None`` (training, plain inference) generates everything.
+            precomputed_rulebooks: Down-sampling rulebooks by indice key, generated outside
+                the graph (:mod:`autoware_ml.ops.spconv.rulebook`). Seeded into the indice
+                cache so those layers reuse them instead of generating their own.
 
         Returns:
             Dense BEV feature map of shape
