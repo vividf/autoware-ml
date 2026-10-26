@@ -14,15 +14,9 @@
 
 """Run a model's stage graph on one backend.
 
-:class:`StagedPipeline` is the generic executor of a :mod:`~autoware_ml.deployment.stages`
-declaration. Glue stages always run their PyTorch callable; exportable stages run either
-their module (``pytorch`` backend) or the runner of their exported artifact
-(``onnx`` / ``tensorrt``). Every backend therefore consumes and produces exactly the
-same named tensors, so cross-backend differences are pure backend differences.
-
-Preprocessing (the model's ``on_after_batch_transfer``) and decoding / metrics stay
-outside the pipeline: it starts from a preprocessed batch and ends at the model's raw
-graph outputs plus a per-stage latency breakdown.
+Graph stages run their module or their exported artifact; glue stages run in PyTorch on every
+backend, so backends differ only in the graphs. A run starts from a preprocessed batch and
+ends at the model outputs, with a per-stage latency breakdown.
 """
 
 from __future__ import annotations
@@ -59,15 +53,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PipelineResult:
-    """Raw outputs of one pipeline run.
+    """Raw outputs and latency of one pipeline run.
 
     Attributes:
-        outputs: The model's output tensors (``model_output_names``) keyed by their ONNX
-            output name.
-        output_names: Output names in the declared (frozen ABI) order.
-        stage_times_ms: Per-stage latency in milliseconds.
-        graph_stage_names: Names of the exportable stages; :attr:`model_ms` sums these
-            (pure GPU time for TensorRT).
+        outputs: Model outputs keyed by ONNX output name.
+        output_names: Model output names in declaration order.
+        stage_times_ms: Latency per stage name.
+        graph_stage_names: The stages :attr:`model_ms` sums.
     """
 
     outputs: dict[str, torch.Tensor]
@@ -77,11 +69,11 @@ class PipelineResult:
 
     @property
     def model_ms(self) -> float:
-        """Summed latency of the exportable stages."""
+        """Summed latency of the graph stages (pure GPU time on TensorRT)."""
         return sum(self.stage_times_ms.get(name, 0.0) for name in self.graph_stage_names)
 
     def ordered_outputs(self) -> list[torch.Tensor]:
-        """Return the outputs in the frozen ABI order."""
+        """Return the outputs in ``output_names`` order."""
         return [self.outputs[name] for name in self.output_names]
 
 
@@ -121,11 +113,10 @@ class _ModuleRunner:
 
 
 def normalize_device(device: str | torch.device) -> torch.device:
-    """``torch.device`` with an explicit CUDA index, so ``cuda`` and ``cuda:0`` compare equal.
+    """Return ``device`` with an explicit CUDA index, so ``cuda`` and ``cuda:0`` compare equal.
 
-    Module parameters always report an indexed device; a bare ``cuda`` from a config would
-    otherwise look like "another device" and make the pytorch backend deep-copy every stage
-    module (and the pipeline cache build two pipelines for one device).
+    Parameters report an indexed device: a bare ``cuda`` would make the pytorch backend
+    deep-copy every stage module and the cache build a second pipeline for the same device.
     """
     device = torch.device(device)
     if device.type == "cuda" and device.index is None:
@@ -146,7 +137,7 @@ def _artifact_runner(
     if backend is Backend.ONNX and onnx_paths and stage.name in onnx_paths:
         path = Path(onnx_paths[stage.name])  # the graph the export loop actually shipped
     if backend is Backend.ONNX:
-        # Imported here so that building a pytorch pipeline never imports onnxruntime.
+        # Lazy imports: a pytorch pipeline needs neither onnxruntime nor tensorrt.
         from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
 
         return OnnxModuleRunner(path, device)
@@ -161,11 +152,11 @@ class StagedPipeline:
     """Execute a stage graph on one backend.
 
     Args:
-        stages: The model's stage declaration (``model.build_stages()``).
-        backend: Backend that runs the exportable stages.
-        device: Device the exportable stages execute on; glue stages hand their results
-            over on this device.
-        artifacts_dir: Directory holding ``<stage>.onnx`` / ``.engine`` (non-pytorch backends).
+        stages: The model's ``build_stages()``.
+        backend: Backend that runs the graph stages.
+        device: Device the graph stages run on.
+        artifacts_dir: Directory of the ``<stage>.onnx`` / ``<stage>.engine`` artifacts,
+            required by the ``onnx`` and ``tensorrt`` backends.
     """
 
     def __init__(
@@ -186,9 +177,8 @@ class StagedPipeline:
         self.graph_stage_names = tuple(stage.name for stage in graph_stages(self.stages))
 
         self._runners: dict[str, Any] = {}
-        #: Graph stages that run their PyTorch module on this (non-pytorch) backend
-        #: because they declare it as a fallback — reports must say so, or a backend
-        #: column can silently be the pytorch numbers under another name.
+        #: Graph stages that fall back to PyTorch on this backend. Reports must name them, or
+        #: a backend's numbers could silently be PyTorch's.
         self.fallback_stage_names: tuple[str, ...] = tuple(
             stage.name
             for stage in graph_stages(self.stages)
@@ -210,12 +200,7 @@ class StagedPipeline:
                 )
 
     def run(self, batch: Any) -> tuple[PipelineResult, RunState]:
-        """Run every stage and return the result together with the full run state.
-
-        The run state holds every named tensor produced along the way, for a caller that
-        inspects the intermediate tensors; export traces its graph stages through
-        :func:`~autoware_ml.deployment.stages.run_stages_in_torch` instead.
-        """
+        """Run every stage; return the result and the run state holding every named tensor."""
         state = RunState(batch=batch, device=self.device)
         times: dict[str, float] = {}
         with torch.no_grad():
@@ -245,21 +230,21 @@ class StagedPipeline:
     def assemble(
         self, result: PipelineResult, device: torch.device | None = None
     ) -> dict[str, torch.Tensor]:
-        """The model outputs of a result, as the model's ``build_deployed_eval_output`` takes
-        them: keyed by the model output names (``model_output_names``), owned copies.
+        """Return the model outputs as ``build_deployed_eval_output`` takes them.
+
+        The tensors are owned copies, floating-point ones widened to fp32.
 
         Args:
             result: Output of :meth:`infer`.
-            device: Optional device to move the tensors to first (e.g. the metrics device).
+            device: Device to move the outputs to, e.g. the metrics device.
         """
         fields: dict[str, torch.Tensor] = {}
         for name in self.output_names:
             tensor = result.outputs[name]
             if device is not None:
                 tensor = tensor.to(device)
-            # Own copy: artifact runners reuse their output buffers on the next run, and
-            # a metric suite may hold the tensor past that. Integer / bool outputs (labels,
-            # indices) keep their dtype — only floats are widened to fp32.
+            # Artifact runners reuse their output buffers on the next run, and a metric suite
+            # may hold the tensor past that.
             tensor = tensor.detach().clone()
             if tensor.is_floating_point():
                 tensor = tensor.float()
@@ -270,10 +255,7 @@ class StagedPipeline:
 class PipelineCache:
     """Build each ``(backend, device)`` pipeline once and share it across consumers.
 
-    Verification and evaluation both need pipelines for the same backends; loading an
-    ONNX session or deserializing a TensorRT engine twice per deploy run is waste. One
-    instance lives for one deploy run over one set of artifacts — there is no
-    invalidation: if an artifact on disk changes, use a fresh cache.
+    There is no invalidation: use a new cache when the artifacts on disk change.
     """
 
     def __init__(
@@ -286,8 +268,8 @@ class PipelineCache:
         self.stages = validate_stages(stages)
         self.artifacts_dir = Path(artifacts_dir)
         self.plugin_libraries = tuple(plugin_libraries)
-        #: Stage name -> the ``.onnx`` the export loop shipped, when a graph modifier wrote
-        #: it under another name than ``<stage>.onnx``.
+        #: Stage name -> the ``.onnx`` the export loop shipped, where a graph modifier wrote it
+        #: under a name other than ``<stage>.onnx``.
         self.onnx_paths = dict(onnx_paths or {})
         self._pipelines: dict[tuple[Backend, str], StagedPipeline] = {}
 
@@ -312,11 +294,10 @@ def available_backends(
     artifacts_dir: str | Path,
     onnx_paths: Mapping[str, Path] | None = None,
 ) -> set[Backend]:
-    """Backends whose artifacts exist for every exportable stage.
+    """Return the backends whose artifacts exist for every graph stage; PyTorch always counts.
 
-    PyTorch is always available. A ``.engine`` older than its sibling ``.onnx`` still
-    counts (artifact reuse is a feature) but is flagged loudly: its verification and
-    evaluation results may not reflect the current weights.
+    An engine older than its ONNX still counts, since artifacts may be reused, but is logged
+    as stale: it may not reflect the current weights.
     """
     artifacts_dir = Path(artifacts_dir)
     onnx_paths = dict(onnx_paths or {})

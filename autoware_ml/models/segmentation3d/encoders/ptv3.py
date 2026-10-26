@@ -270,9 +270,7 @@ class PointSequential(PointModule):
     :class:`Point`, a sparse-convolution tensor, or a dense tensor.
     """
 
-    #: ``forward`` applies the registered children one after another, in registration
-    #: order (like ``nn.Sequential``), so an adjacent Conv/Linear + BatchNorm pair is a
-    #: real dataflow pair the BN fold may take (``utils/bn_fusion.py``).
+    #: Lets ``utils/bn_fusion.py`` pair adjacent Conv/Linear and BatchNorm children.
     applies_children_in_order = True
 
     def __init__(self, *modules: nn.Module) -> None:

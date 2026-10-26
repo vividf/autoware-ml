@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorRT runner smoke (GPU): an engine built from a tiny graph agrees with ONNX Runtime,
-the runner reuses its output buffers across calls of the same shape, and it refuses inputs
-the engine would otherwise silently answer with the previous call's outputs."""
+"""Unit tests for the TensorRT runner (GPU)."""
 
 from __future__ import annotations
 
@@ -48,8 +46,6 @@ def test_engine_matches_onnxruntime_and_reuses_its_output_buffers(tmp_path) -> N
     assert elapsed_ms >= 0.0
     torch.testing.assert_close(outputs["y"].cpu(), expected["y"])
 
-    # Same shape again: the runner binds the same output buffer, so a consumer that keeps
-    # the tensor past the next call must copy it (StagedPipeline.assemble does).
     first_buffer = outputs["y"].data_ptr()
     outputs, _ = runner.run({"x": (x + 1).cuda()})
     assert outputs["y"].data_ptr() == first_buffer
@@ -68,11 +64,11 @@ def test_runner_rejects_wrong_input_names_and_shapes(tmp_path) -> None:
         runner.run({"z": x})
     with pytest.raises(ValueError, match=r"unexpected \['z'\]"):
         runner.run({"x": x, "z": x})
-    # The graph is static [2, 4]: TensorRT refuses [3, 4] and the runner must not execute.
+    # The graph is static [2, 4].
     with pytest.raises(RuntimeError, match=r"rejected shape \(3, 4\) for input 'x'"):
         runner.run({"x": torch.ones(3, 4, device="cuda")})
 
-    # The rejected shape is not recorded as bound: a valid call afterwards still works.
+    # The rejected shape is not recorded as bound, so a valid call still runs.
     outputs, _ = runner.run({"x": x})
     torch.testing.assert_close(outputs["y"], x)
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Facts about an exported ONNX graph that select how it is run and converted."""
+"""Inspect exported ONNX graphs."""
 
 from __future__ import annotations
 
