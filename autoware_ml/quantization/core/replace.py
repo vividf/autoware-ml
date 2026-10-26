@@ -71,7 +71,7 @@ def match_skip_quantize_roots(
     Each pattern is matched with :func:`fnmatch.fnmatch` against ``model.named_modules()``;
     a bare name (no glob metacharacters) matches that module exactly. Per-pattern match
     counts are logged and a pattern that matches **nothing** is an error — this fixes
-    modelopt's silent-no-match footgun and catches typos in ``skip_quantize`` immediately.
+    modelopt's silent no-match pitfall and catches typos in ``skip_quantize`` immediately.
 
     Args:
         model: The model whose ``named_modules()`` the patterns are resolved against.
