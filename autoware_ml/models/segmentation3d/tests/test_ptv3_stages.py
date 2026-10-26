@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PTv3 stage graphs: declaration validity, the export contract they derive (down to the
-ONNX files), and the eval seam that scores the head graphs' outputs."""
+"""Unit tests for the PTv3 stage graphs."""
 
 from __future__ import annotations
 
@@ -65,7 +64,7 @@ def test_seg3d_declaration_names_the_runtime_modules_and_is_name_covered() -> No
     stages = validate_stages(model.build_stages())
     assert [s.name for s in stages] == [SERIALIZE_STAGE, ENCODER_STAGE, SEG3D_HEAD_STAGE]
     assert isinstance(stages[0], TorchStage)
-    # validate_stages checked that every graph input is one of the glue's declared outputs.
+    # validate_stages() has checked that an earlier stage writes every graph input.
     assert stages[0].outputs == serialize_stage_output_names(len(model.encoder.stride))
     encoder = stages[1]
     assert encoder.inputs[:5] == ENCODER_EXPORT_INPUT_NAMES
@@ -85,7 +84,6 @@ def test_seg3d_export_specs_are_derived_and_keep_the_split_contract() -> None:
     assert "serialized_pooling_0_patch_order" in encoder_spec.input_names
     assert not any("_cluster" in name for name in encoder_spec.input_names)
     assert encoder_spec.dynamic_axes["voxels"] == {0: "num_voxels"}
-    # The derived specs go to ONNX and to TensorRT (whose build loads the plugin library).
     for spec in specs.values():
         assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
     with torch.no_grad():
@@ -99,14 +97,8 @@ def test_seg3d_export_specs_are_derived_and_keep_the_split_contract() -> None:
 
 @REQUIRES_SPARSE_CUDA
 def test_derived_specs_export_onnx_with_the_declared_io_contract(tmp_path: Path) -> None:
-    """The ONNX files the deploy script writes from the derived specs carry the declared
-    input / output names and dynamic axes — the contract the C++ node reads them by.
-
-    (``forward()`` is no numeric reference: it re-shuffles serialization orders and uses
-    adaptive attention windows, which the export copy deliberately pins. The numeric
-    anchor is the det3d_seg3d test that runs the seg and det graphs of the joint model against
-    the single-task models' graphs on the same weights.)
-    """
+    # forward() is no numeric reference: it reshuffles the serialization orders and adapts the
+    # attention windows, which the export copy pins.
     model = build_seg3d_model().cuda().eval()
     batch = build_inputs(device=torch.device("cuda"))
     stages = {stage.name: stage for stage in validate_stages(model.build_stages())}
@@ -127,8 +119,6 @@ def test_derived_specs_export_onnx_with_the_declared_io_contract(tmp_path: Path)
 
 @REQUIRES_SPARSE_CUDA
 def test_seg3d_head_stage_emits_the_head_graph_names() -> None:
-    """The seg head graph's outputs are fixed by the graph itself (argmax + softmax), not
-    configured: every model deploying it, single- or multi-head, gets the same two names."""
     model = build_seg3d_model().cuda().eval()
     stage = build_seg3d_head_stage(model, model.seg3d_head)
     assert stage.outputs == SEG3D_HEAD_OUTPUT_NAMES == ("pred_labels", "pred_probs")
@@ -136,10 +126,6 @@ def test_seg3d_head_stage_emits_the_head_graph_names() -> None:
 
 
 def test_deployed_eval_output_scores_the_graph_outputs_like_the_logits() -> None:
-    """The deployment backends hand ``build_deployed_eval_output`` the seg head graph's
-    ``pred_labels`` / ``pred_probs``; they must produce the same ``seg3d_frames`` as the
-    forward's logits (no second softmax, same gather of the current-frame points, same
-    frame split)."""
     torch.manual_seed(0)
     model = build_seg3d_model().eval()
     batch = build_inputs()
@@ -173,7 +159,6 @@ def test_det3d_declaration_specs_and_deployed_eval_output() -> None:
     assert list(specs) == ["ptv3_encoder", "ptv3_det3d_head"]
     assert specs["ptv3_det3d_head"].output_names == list(model.export_output_names)
 
-    # The det head graph's tensors rebuild the typed head outputs the metrics decode.
     state = run_stages_in_torch(stages, batch, torch.device("cuda"))
     outputs = {name: state[name] for name in model_output_names(stages)}
     rebuilt = TransFusionHeadOutputs.from_export_tensors(outputs)

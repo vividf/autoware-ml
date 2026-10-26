@@ -1,5 +1,4 @@
-"""Export-contract tests for combined PTv3 segmentation+detection export: the stage graph
-(shared encoder + one graph per head) and the eval seam that scores its outputs."""
+"""Export-contract tests for combined PTv3 segmentation+detection export."""
 
 from __future__ import annotations
 
@@ -232,9 +231,6 @@ def test_ptv3_det3d_seg3d_eval_output_scatters_segmentation3d_to_original_points
     assert len(eval_out["predictions"]) == 1
     assert len(eval_out["gt_boxes"]) == 1
 
-    # A backend hands build_deployed_eval_output the flat graph outputs: the seg head's
-    # argmax / softmax next to the det head's tensors. Same seg frames as the logits path,
-    # and the det tensors reach bbox_head.decode_outputs as the typed head outputs.
     det_names = ["dense_heatmap", "query_heatmap_score", "query_labels"]
     det_names += ["heatmap", "center", "height", "dim", "rot"]
     logits = outputs.segmentation3d().logits
@@ -299,10 +295,7 @@ def _build_det3d_seg3d_model() -> PTv3Det3DSeg3DModel:
 def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_encoder(
     tmp_path: Path,
 ) -> None:
-    """The det3d_seg3d declaration is serialize -> encoder -> seg head -> det head, both heads
-    are model outputs in the configured order, and — with the weights the single-task
-    models were built from — each head's graph produces exactly what that single-task
-    model's own stage graph does."""
+    """On the single-task models' weights, each head graph matches that model's own graph."""
     segmentation3d_checkpoint = _save_segmentation3d_checkpoint(tmp_path)
     detection3d_model = build_trans_model(freeze_encoder=True)
     apply_matching_weights(detection3d_model, (segmentation3d_checkpoint,))
@@ -333,7 +326,6 @@ def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_enc
     seg_stage, det_stage = stages[2], stages[3]
     assert isinstance(seg_stage, GraphStage) and seg_stage.outputs == ("pred_labels", "pred_probs")
     assert det_stage.outputs == tuple(JOINT_EXPORT_OUTPUT_NAMES[2:])
-    # The heads read the encoder and the glue, never each other.
     assert not set(det_stage.inputs) & set(seg_stage.outputs)
 
     batch = build_inputs(device=torch.device("cuda"))
@@ -349,7 +341,6 @@ def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_enc
     assert list(specs) == [ENCODER_STAGE, SEG3D_HEAD_STAGE, DET3D_HEAD_STAGE]
     assert specs[DET3D_HEAD_STAGE].output_names == JOINT_EXPORT_OUTPUT_NAMES[2:]
 
-    # The model outputs score through build_deployed_eval_output as the typed path does.
     deployed = model.build_deployed_eval_output(
         batch, {name: joint[name] for name in model_output_names(stages)}
     )
