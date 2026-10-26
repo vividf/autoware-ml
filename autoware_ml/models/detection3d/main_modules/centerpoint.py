@@ -146,8 +146,7 @@ class CenterPointDetection3DModel(ModuleBaseModel):
             optimizer: Optimizer factory.
             scheduler: Scheduler factory.
             metrics: Detection metrics accumulated during validation and test.
-            scheduler_config: Lightning scheduler metadata (``interval``, ``monitor`` ...),
-                see :class:`~autoware_ml.models.module_base_model.ModuleBaseModel`.
+            scheduler_config: Lightning scheduler metadata.
         """
         super().__init__(
             data_preprocessor=data_preprocessor,

@@ -174,25 +174,19 @@ def run_ptq(
 
 
 def apply_qat_trainer_overrides(cfg: DictConfig, quantization_config: QuantizationConfig) -> None:
-    """Turn the training config into the short QAT fine-tune schedule, in place.
+    """Turn the training config into the QAT fine-tune schedule, in place.
 
-    From config (``quantization.qat``): ``epochs``, ``lr`` + ``schedule`` (the fine-tune lr
-    curve) and ``val_check_interval``. Enforced and deliberately not configurable (the
-    hard boundaries ``QATCallback`` fails loud on): ``devices=1`` (the callback mutates the
-    module tree; DDP buckets would desync), ``precision="32-true"`` (AMP interacts with
-    fake-quant), ``num_sanity_val_steps=0`` (sanity-val would run on enabled but not yet
-    calibrated quantizers) and ``check_val_every_n_epoch=1`` (a training config validating
-    every N epochs would never produce best.ckpt over a few QAT epochs). The experiments'
-    ``DynamicValidation`` callback is dropped for the same reason: it would restore the
-    training config's validation cadence at every epoch start and refuses a fractional
+    ``quantization.qat`` sets the epochs, lr, lr schedule and ``val_check_interval``. Fixed
+    on purpose: ``devices=1`` and ``precision="32-true"`` (what ``QATCallback`` requires),
+    ``num_sanity_val_steps=0`` (sanity validation would run on quantizers not calibrated
+    yet) and ``check_val_every_n_epoch=1`` (validating every N epochs could produce no
+    ``best.ckpt`` in a few QAT epochs). ``DynamicValidation`` is dropped for the same
+    reason: it restores the training cadence at every epoch start and refuses a fractional
     ``val_check_interval``.
 
-    Must run before anything instantiates from ``cfg``: Hydra binds the model's optimizer
-    and scheduler when the model is instantiated, so a later override would silently leave
-    QAT on the full-training lr and schedule.
-
-    Raises:
-        ValueError: If ``quantization.qat`` is missing.
+    Must run before anything is instantiated from ``cfg``: Hydra binds the optimizer and
+    scheduler when the model is built, so a later override would leave QAT on the training
+    lr and schedule.
     """
     qat = quantization_config.qat
     if qat is None:
@@ -206,15 +200,13 @@ def apply_qat_trainer_overrides(cfg: DictConfig, quantization_config: Quantizati
         cfg.trainer.val_check_interval = qat.val_check_interval
         if "callbacks" in cfg and "dynamic_validation" in cfg.callbacks:
             cfg.callbacks.dynamic_validation = None
-        # The experiment bases interpolate `model.optimizer` from the top-level `optimizer`
-        # node; resolve it to its own node first, or the lr override would replace the
-        # interpolation with a bare {lr} and lose the optimizer target.
+        # model.optimizer interpolates the top-level optimizer node; resolve it first, or the
+        # lr override would replace the interpolation with a bare {lr} and lose the target.
         optimizer = OmegaConf.to_container(cfg.model.optimizer, resolve=True)
         optimizer["lr"] = qat.lr
         cfg.model.optimizer = optimizer
-        # The full-training cyclic / warmup schedule makes no sense over a short fine-tune;
-        # the QAT schedule is stepped per iteration and the optimizer builder fills
-        # total_steps so it spans all QAT epochs.
+        # The QAT schedule steps per iteration; the optimizer builder fills in total_steps to
+        # span all QAT epochs.
         scheduler, scheduler_config = qat.schedule.build_lightning_scheduler(qat.lr)
         cfg.model.scheduler = scheduler
         cfg.model.scheduler_config = scheduler_config
@@ -239,12 +231,10 @@ def run_qat(
     run_context: MlflowRunContext | None,
     config_name: str,
 ) -> Path:
-    """Frozen-amax QAT fine-tuning; Lightning saves the self-describing checkpoints.
+    """Fine-tune the FP ``model`` with QAT and return the checkpoint to deploy.
 
-    ``cfg`` already carries the QAT schedule (:func:`apply_qat_trainer_overrides`, applied
-    before ``model`` was built). ``model`` carries the FP weights;
-    :class:`QATCallback` prepares the quantized tree in its ``setup`` and calibrates at
-    epoch 0 on the validation dataloader. The trainer is assembled like ``train`` does.
+    ``cfg`` must already carry the QAT schedule (:func:`apply_qat_trainer_overrides`). The
+    trainer is assembled like in ``train``, with :class:`QATCallback` added.
     """
     logger_enabled = run_context is not None
     callbacks = instantiate_callbacks(
@@ -266,8 +256,7 @@ def run_qat(
     model.train()
     trainer.fit(model, datamodule=datamodule)
 
-    # Prefer the best checkpoint (measured on the quantized model); any produced checkpoint
-    # stays valid deploy input.
+    # Prefer best.ckpt (scored on the quantized model); last.ckpt is a valid fallback.
     best_model_path = getattr(trainer.checkpoint_callback, "best_model_path", "") or ""
     best_path = Path(best_model_path) if best_model_path else None
     last_path = checkpoints_dir / "last.ckpt"
@@ -352,8 +341,7 @@ def run_quantize(cfg: DictConfig) -> None:
     restrict_console_logging_to_rank_zero()
     quantization_config = _parse_quantization_config(cfg)
     if quantization_config.mode == "qat":
-        # First, so the logged config, the run's params and the model all see the QAT
-        # schedule.
+        # Before the config is logged, recorded or instantiated.
         apply_qat_trainer_overrides(cfg, quantization_config)
 
     log_configuration(cfg)

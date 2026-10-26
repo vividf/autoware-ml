@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``quantize`` puts the QAT schedule into the config before the model is built: Hydra
-binds the optimizer and scheduler then, so a later override never reaches them."""
+"""Unit tests for the ``quantize`` entrypoint."""
 
 from __future__ import annotations
 
@@ -30,8 +29,8 @@ class _ModelBuilt(Exception):
 
 
 def test_the_model_is_built_from_the_qat_schedule(monkeypatch) -> None:
-    # The experiment config shape: the model's optimizer interpolates the top-level node and
-    # every experiment registers the dynamic validation callback.
+    # Shaped like the experiment configs: model.optimizer interpolates the top-level node,
+    # and the dynamic validation callback is registered.
     cfg = OmegaConf.create(
         {
             "quantization": {
@@ -76,4 +75,4 @@ def test_the_model_is_built_from_the_qat_schedule(monkeypatch) -> None:
     assert seen["model"]["scheduler_config"] is not None
     assert cfg.trainer.max_epochs == 2 and cfg.trainer.devices == 1
     assert cfg.callbacks.dynamic_validation is None
-    assert cfg.optimizer.lr == 1.0e-3  # the training node is left alone
+    assert cfg.optimizer.lr == 1.0e-3

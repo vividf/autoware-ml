@@ -12,29 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT training callback (Lightning) — the one home for the QAT training-loop logic.
-
-``QATCallback`` holds everything model-agnostic about QAT: plan-prepare before
-training, epoch-0 calibration, skip_quantize quantizer disable, embedding the
-quantization description into every saved checkpoint, and the end-of-training
-status log. The plan itself comes from the model's own
-``QuantizationPlan.for_model`` — the same plan every other stage builds, so the
-QAT tree is identical by construction.
-
-The QAT method is frozen-amax STE fine-tuning: calibrated scales stay fixed
-buffers and only the weights train — the production method in both
-CUDA-CenterPoint and modelopt. There is deliberately no learnable-amax
-machinery here.
-
-Hard boundaries (fail loud instead of training wrong):
-
-- **single device** — the tree mutation happens around the strategy wrap; multi-GPU
-  DDP reducer buckets would desynchronize.
-- **full precision** — AMP interacts with fake-quant; trainer precision must be
-  ``32-true``.
-- **no resume** — Lightning would restore optimizer/module state into a tree that
-  is rebuilt from config, not from the checkpoint's exact structure.
-"""
+"""Lightning callback for quantization-aware training."""
 
 from __future__ import annotations
 
@@ -62,11 +40,14 @@ logger = logging.getLogger(__name__)
 class QATCallback(L.Callback):
     """Turn a training run into frozen-amax QAT fine-tuning.
 
+    The calibrated scales stay fixed and only the weights train (STE), as in CUDA-CenterPoint
+    and modelopt; there is deliberately no learnable amax. The quantized tree comes from
+    ``QuantizationPlan.for_model``, as in every other stage.
+
     Args:
-        quantization_config: Parsed ``quantization`` config (mode must be ``qat``); its
-            ``calibration`` block drives the epoch-0 calibration.
-        calib_forward_fn: Optional ``fn(model, batch)`` overriding the default
-            calibration forward (``on_after_batch_transfer`` + ``forward``).
+        quantization_config: Parsed ``quantization`` config with ``mode: qat``.
+        calib_forward_fn: ``fn(model, batch)`` replacing the default calibration forward
+            (``on_after_batch_transfer`` + ``forward``).
     """
 
     def __init__(
@@ -83,13 +64,11 @@ class QATCallback(L.Callback):
         self.calib_forward_fn = calib_forward_fn
         self._quantized = False
         self._calibrated = False
-        #: Placement record of the prepared tree (recorded by ``plan.prepare`` in
-        #: :meth:`setup`). Embedded into every checkpoint Lightning saves so the
-        #: result is self-describing.
+        #: Set by :meth:`setup`; embedded in every checkpoint Lightning saves.
         self.placement_record = None
 
     def setup(self, trainer: L.Trainer, pl_module: L.LightningModule, stage: str) -> None:
-        """Fuse BN + insert Q/DQ via the model's shared plan before the strategy wrap."""
+        """Prepare the quantized tree before the strategy wraps the model."""
         if stage != "fit":
             return
         if trainer.num_devices > 1 or trainer.world_size > 1:
@@ -123,9 +102,8 @@ class QATCallback(L.Callback):
         pl_module.train()
         self._quantized = True
         logger.info("QATCallback: quantization modules inserted")
-        # Freeze here, before the strategy builds the optimizer: an optimizer reads
-        # requires_grad when it is constructed, so a freeze at epoch start relies on the
-        # optimizer skipping grad-less parameters (weight decay would still touch them).
+        # Freeze before the strategy builds the optimizer: frozen later, the parameters would
+        # still be in the optimizer, and weight decay could still move them.
         qat = self.config.qat
         skip_names = expand_skip_quantize(pl_module, self.config.skip_quantize, log=False)
         if qat.freeze_unquantized:
@@ -148,7 +126,7 @@ class QATCallback(L.Callback):
             )
 
     def on_train_epoch_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Calibrate quantizers at epoch 0."""
+        """Calibrate once, at the start of epoch 0, before any weight update."""
         if not self._quantized:
             logger.warning("QATCallback: model not quantized, skipping calibration")
             return
@@ -156,13 +134,10 @@ class QATCallback(L.Callback):
             return
 
         qat = self.config.qat
-        # Calibrate on the CLEAN (val, un-augmented) dataloader, not the augmented
-        # train loader: this is exactly what PTQ calibrates on, so the QAT amax
-        # matches the proven-good PTQ amax, and it avoids augmentation feeding
-        # degenerate inputs that can poison a histogram with Inf.
+        # The un-augmented val loader, as in PTQ: the amax then matches PTQ's, and train
+        # augmentation can feed degenerate inputs that poison a histogram with Inf.
         dataloader = self._calibration_dataloader(trainer)
-        # calibrate_samples counts SAMPLES (same unit as PTQ); the dataloader runs at
-        # its native batch size, so convert to the number of batches to feed.
+        # calibrate_samples counts samples, as in PTQ; the loader keeps its own batch size.
         batch_size = getattr(dataloader, "batch_size", None) or 1
         num_batches = math.ceil(qat.calibrate_samples / batch_size)
         logger.info(
@@ -178,7 +153,7 @@ class QATCallback(L.Callback):
             calibration=self.config.calibration,
             forward_fn=self.calib_forward_fn or default_calib_forward,
         )
-        # Calibration switches the module to eval; hand it back to the training loop hot.
+        # Calibration leaves the module in eval mode.
         pl_module.train()
 
         skip_names = expand_skip_quantize(pl_module, self.config.skip_quantize, log=False)
@@ -197,14 +172,12 @@ class QATCallback(L.Callback):
 
     @staticmethod
     def _warn_unmasked_trainables(pl_module: L.LightningModule) -> None:
-        """Name the parameters that are neither quantized nor frozen.
+        """Warn about trainable modules that are neither quantized nor frozen.
 
-        ``freeze_unquantized`` freezes the ``skip_quantize`` subtrees, which is where
-        un-quantized weights normally live. A module that appears in neither
-        ``quantize_submodules`` nor ``skip_quantize`` is un-quantized too, and just as
-        exposed to the drift the freeze exists to prevent — it simply has nothing telling
-        the callback about it. The current models leave that set empty; a new model
-        wiring up QAT should see it rather than discover it as a collapse.
+        A module in neither ``quantize_submodules`` nor ``skip_quantize`` escapes
+        ``freeze_unquantized``, and its weights can drift past the frozen amax downstream
+        just like those of the ``skip_quantize`` modules it freezes. The current models have
+        none.
         """
         quantized_parents = {
             name.rsplit(".", 1)[0]
@@ -233,14 +206,10 @@ class QATCallback(L.Callback):
             )
 
     def _calibration_dataloader(self, trainer: L.Trainer):
-        """Return the clean val dataloader for calibration.
+        """Return the val dataloader, or the train one when the trainer has no datamodule.
 
-        The train loader stands in only when the trainer has no datamodule at all — the
-        one case where "no validation data" is a matter of contract rather than a
-        failure. A datamodule whose ``val_dataloader()`` raises (missing manifest, broken
-        collate, unset validation split) propagates: calibrating on augmented training
-        data instead would let a real bug degrade the amax silently, and the comments
-        above are explicit that this loader is the one that has to match PTQ.
+        Errors from ``val_dataloader()`` propagate: falling back to augmented training data
+        would let a broken validation setup degrade the amax silently.
         """
         datamodule = trainer.datamodule
         if datamodule is None:

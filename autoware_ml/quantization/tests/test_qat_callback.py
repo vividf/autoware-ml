@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QATCallback hard-boundary tests (mode, devices, precision, resume)."""
+"""Unit tests for ``QATCallback``."""
 
 from __future__ import annotations
 
@@ -68,8 +68,6 @@ class TestQATCallbackBoundaries:
 
 
 class TestCalibrationDataloader:
-    """The clean val loader is the contract; only a missing datamodule falls back."""
-
     def test_a_broken_val_dataloader_propagates(self):
         class Broken:
             def val_dataloader(self):
