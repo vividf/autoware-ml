@@ -14,33 +14,25 @@
 
 """Switch exported ``autoware::ImplicitGemm`` nodes into the plugin's INT8 mode.
 
-A sparse convolution is not quantized the way the dense graph is. There are no Q/DQ nodes
-around a plugin op — TensorRT would not fuse them into it — so the calibrated scales travel
-as *plugin attributes and inputs* instead: the node keeps its op type and gains
+TensorRT does not fuse Q/DQ nodes into a plugin op, so the calibrated scales travel as
+plugin attributes and inputs instead. The node keeps its op type and gains
 
     precision = 1
     input_scale = input_amax / 127                      (attribute, per tensor)
     channel_scale = input_scale * weight_amax / 127     (6th input, per output channel)
     bias_scaled = the folded bias                       (7th input, per output channel)
 
-and the plugin quantizes features and weights itself on the way into a cumm INT8
-``implicit_gemm``, accumulating in INT32 and writing FP16 out. That contract is
-``ImplicitGemmPlugin::enqueueInt8`` in ``autoware_tensorrt_plugins``.
+and the plugin quantizes features and weights itself, accumulates in INT32 and writes FP16
+(``ImplicitGemmPlugin::enqueueInt8`` in ``autoware_tensorrt_plugins``).
 
-``output_scale`` stays 1.0 on purpose. The plugin folds it into the GEMM's scale and bias
-(``channel_scale * output_scale``, ``bias_scaled * output_scale``) *and* divides it back out
-when it recovers the weight scale (``w_scale = channel_scale * output_scale / input_scale``),
-so it cancels exactly: the epilogue is ``s8s8f16`` and never re-quantizes the result, which
-is what makes an activation-chain output scale — AWML's successor-stem walk and its terminal
-``_last_int8_conv_output_absmax`` buffer — unnecessary here. ``test_onnx_int8.py`` pins that
-cancellation.
+``output_scale`` stays 1.0: the plugin expects ``channel_scale`` and ``bias_scaled`` divided
+by it and multiplies them back, so its value cancels. The ``s8s8f16`` epilogue never
+re-quantizes the output, so unlike AWML no activation-chain output scale is calibrated.
 
-Which layers become INT8 is decided upstream, by whether the PyTorch module carries a
-calibrated quantizer: a layer left out through ``quantization.skip_quantize`` never gets one,
-so it stays an FP16 ``ImplicitGemm`` node here — byte-identical to the FP16 deployment. That
-single control point is what keeps calibration honest: an excluded layer is excluded during
-PTQ too, so its successor's ``input_scale`` is calibrated against the genuine FP
-distribution the engine will feed it.
+A node becomes INT8 only when its PyTorch module carries a calibrated quantizer. A layer in
+``quantization.skip_quantize`` has none and stays an FP16 node; it is skipped during PTQ as
+well, so the next layer's ``input_scale`` is calibrated on the FP activations the engine
+feeds it.
 """
 
 from __future__ import annotations
@@ -63,17 +55,14 @@ from autoware_ml.ops.spconv.contract import (
 from autoware_ml.ops.spconv.onnx_fusion import replace_attribute
 
 if IS_SPCONV_AVAILABLE:
-    # Guarded at the top: spconv is the framework's one optional dependency.
     from spconv.pytorch.conv import SparseConvolution
 
 logger = logging.getLogger(__name__)
 
-#: ``ImplicitGemmParameters::precision`` — floating point (FP16/FP32) vs INT8.
+#: Values of the plugin's ``ImplicitGemmParameters::precision``.
 PRECISION_FP = 0
 PRECISION_INT8 = 1
-#: Signed 8-bit symmetric quantization: amax maps to 127.
 _INT8_MAX = 127.0
-#: The five sparse tensors every ImplicitGemm node carries; a sixth is the folded bias.
 _SPARSE_INPUTS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 
 
@@ -91,7 +80,7 @@ class SparseLayerScales:
 
     @property
     def channel_scale(self) -> np.ndarray:
-        """The plugin's ``channel_scale`` input (``output_scale`` is 1, see module doc)."""
+        """The plugin's ``channel_scale`` input for an ``output_scale`` of 1."""
         return (self.input_scale * self.weight_scale).astype(np.float32)
 
 
@@ -113,18 +102,15 @@ def _amax_array(quantizer: nn.Module, what: str, stem: str) -> np.ndarray:
 
 
 def collect_sparse_layer_scales(module: nn.Module) -> dict[str, SparseLayerScales]:
-    """Read the calibrated INT8 scales off a quantized module tree with sparse convolutions.
+    """Read the calibrated INT8 scales of the quantized sparse convolutions in ``module``.
 
     Args:
-        module: The *training-form* module holding the sparse convolutions (BEVFusion's
-            ``pts_middle_encoder``, PTv3's encoder or decoder head), whose
-            quantized convolutions carry ``input_quantizer`` / ``weight_quantizer``. The
-            export copy does not — it is rebuilt from weights alone, which is what keeps
-            the exported sparse graph free of Q/DQ nodes.
+        module: The training-form module (BEVFusion's ``pts_middle_encoder``, PTv3's
+            encoder or decoder head). Its export copy is rebuilt from the weights alone and
+            has no quantizers, which keeps the exported graph free of Q/DQ nodes.
 
     Returns:
-        Module name (relative to ``module``) -> scales, for every quantized convolution.
-        Empty when nothing is quantized, which is the FP16 deployment.
+        Scales keyed by module name relative to ``module``; empty when nothing is quantized.
 
     Raises:
         ValueError: On a quantized layer whose calibration is missing or degenerate.
@@ -138,7 +124,7 @@ def collect_sparse_layer_scales(module: nn.Module) -> dict[str, SparseLayerScale
         input_quantizer = getattr(submodule, "input_quantizer", None)
         weight_quantizer = getattr(submodule, "weight_quantizer", None)
         if input_quantizer is None or weight_quantizer is None:
-            continue  # not quantized: skip_quantize, or an FP16 deployment
+            continue
         input_amax = _amax_array(input_quantizer, "input", name)
         if input_amax.size != 1:
             raise ValueError(
@@ -181,16 +167,15 @@ def quantize_implicit_gemm_nodes(
 ) -> tuple[int, int]:
     """Switch every calibrated ``ImplicitGemm`` node in ``model`` into INT8 mode, in place.
 
-    Args:
-        model: Exported sparse graph, already bias/activation-fused.
-        scales: Output of :func:`collect_sparse_layer_scales`.
+    Run it after the bias/activation fusion, if the stage has one: a folded bias becomes
+    ``bias_scaled``.
 
     Returns:
         ``(converted, kept_fp)`` node counts.
 
     Raises:
         ValueError: When a node's scales do not match its filter, or a calibrated layer has
-            no node in the graph (a silently un-quantized tower otherwise).
+            no node in the graph.
     """
     graph = model.graph
     initializers = {initializer.name: initializer for initializer in graph.initializer}
@@ -226,9 +211,8 @@ def quantize_implicit_gemm_nodes(
                 f"filter has {out_channels} output channels."
             )
 
-        # The bias was folded into the node's sixth input by the bias/activation fusion; the
-        # plugin adds it after the scaled accumulation, so it becomes bias_scaled unchanged
-        # (output_scale is 1). A node without a folded bias contributes zeros.
+        # The plugin adds bias_scaled after the scaled accumulation, so with an output_scale
+        # of 1 it is the folded bias as is.
         if len(node.input) > _SPARSE_INPUTS:
             bias_initializer = initializers.get(node.input[_SPARSE_INPUTS])
             if bias_initializer is None:
@@ -245,9 +229,8 @@ def quantize_implicit_gemm_nodes(
         else:
             bias = np.zeros(out_channels, dtype=np.float32)
 
-        # New FP32 initializers: the plugin reads both as float*. This transform runs before
-        # the precision cast (deploy.py applies stage transforms first); the cast keeps
-        # these slots fp32 by the contract's IMPLICIT_GEMM_FP32_INPUT_SLOTS.
+        # The plugin reads both as float*; the later fp16 cast keeps these slots fp32
+        # (IMPLICIT_GEMM_FP32_INPUT_SLOTS).
         channel_scale_name = f"{stem.replace('.', '_')}_channel_scale"
         bias_scaled_name = f"{stem.replace('.', '_')}_bias_scaled"
         graph.initializer.append(
@@ -281,15 +264,9 @@ def quantize_implicit_gemm_nodes(
 def sparse_int8_transform(onnx_path: str | Path, *, module: nn.Module) -> Path:
     """Stage transform: write the module's calibrated INT8 scales into its exported graph.
 
-    A no-op when the module carries no quantizers, so the same stage declaration serves the
-    FP16 and INT8 deployments.
-
-    Args:
-        onnx_path: The exported sparse graph, rewritten in place.
-        module: The training-form module tree holding the calibrated sparse convolutions.
-
-    Returns:
-        The same path.
+    ``module`` is the training-form module, not its export copy, and ``onnx_path`` is
+    rewritten in place. A no-op when the module carries no quantizers, so the same stage
+    declaration serves the FP16 and INT8 deployments.
     """
     onnx_path = Path(onnx_path)
     scales = collect_sparse_layer_scales(module)

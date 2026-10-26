@@ -211,8 +211,7 @@ class TestQuantizedExportCopy(unittest.TestCase):
         )
 
         conv = spconv.SubMConv3d(4, 8, kernel_size=3, indice_key="cpe", bias=True)
-        # A calibrated (modelopt) sparse conv carries its quantizers' amax buffers next to
-        # the weights; the float export copy has no slot for them.
+        # Stand-ins for the amax buffers modelopt's quantizers add to a calibrated conv.
         conv.input_quantizer = torch.nn.Module()
         conv.input_quantizer.register_buffer("_amax", torch.tensor(1.5))
         conv.weight_quantizer = torch.nn.Module()
