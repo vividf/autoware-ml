@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for VerificationScenario.from_dict parsing."""
+"""Unit tests for verification scenarios."""
 
 from __future__ import annotations
 
@@ -95,8 +95,6 @@ class TestVerificationScenarioFromDict:
 
 
 class TestDegenerateScenariosAreRejected:
-    """A scenario that verifies nothing must fail loudly, not report green."""
-
     def test_same_backend_and_device_is_refused(self):
         with pytest.raises(ValueError, match="with itself"):
             VerificationScenario.from_dict(

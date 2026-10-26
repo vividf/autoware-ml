@@ -12,31 +12,27 @@ deploy:
     workspace_size: 4294967296
     # Shared libraries of custom TensorRT plugins, for graphs with autoware::* ops.
     plugin_libraries: []
-  # Post-export steps. Both run only for models that declare a stage graph
-  # (ModuleBaseModel.build_stages) and are opt-in per model config.
-  # Cross-backend numerical parity of the raw model outputs (model_output_names).
+  # Post-export steps, opt-in, for models that declare build_stages(): verification
+  # compares the raw model outputs of two backends, evaluation scores and times every
+  # backend on ground truth.
   verification:
     enabled: false
-    # Default absolute tolerance for FP32-graph comparisons. Lossy backends (fp16
-    # engines, int8) set an explicit per-scenario `tolerance` instead of loosening this.
+    # Absolute, for fp32 graphs; lossy backends (fp16, int8) set a per-scenario tolerance.
     tolerance: 0.01
     num_verify_batches: 1
     # - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda } }
     scenarios: []
-  # Per-backend ground-truth metrics + latency on the test split. PyTorch is a backend
-  # like the others; keys land under {split}/{backend}/{prefix}/{metric}.
   evaluation:
     enabled: false
-    # test (default) or val — for when the test split is unavailable or held back.
+    # test, or val when the test split is unavailable or held back.
     split: test
     num_samples: -1
     num_warmup: 2
-    # Frames per evaluated batch (the latency is per batch); the split's own dataloader
-    # setting is the training-time one and the deployed graphs are single-frame.
+    # Replaces the split's training-time batch size: the deployed graphs are single-frame
+    # and the latency is per batch.
     batch_size: 1
-    # CPU worker threads (torch intra-op + BLAS / OpenMP pools) during evaluation; 0 keeps
-    # the process defaults. Kept at 1 so busy-waiting OpenBLAS workers from numpy
-    # preprocessing / metrics do not inflate the measured TensorRT time of graphs with
+    # Cap on the torch intra-op and BLAS / OpenMP threads; 0 keeps the defaults. At 1,
+    # busy-waiting OpenBLAS workers cannot inflate the TensorRT time of graphs with
     # data-dependent shapes (see EvaluationConfig.cpu_threads).
     cpu_threads: 1
     backends:

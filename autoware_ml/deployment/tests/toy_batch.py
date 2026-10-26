@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A dict batch with the typed batch's ``to_device``, for toy stage-graph models.
-
-The deployment code only moves the collated batch (``to_device``) and hands it to the
-model's ``on_after_batch_transfer``; the toy models here skip preprocessing and read the
-dict directly, so the framework tests need no dataset.
-"""
+"""Dict batch for the toy stage-graph models of the deployment tests."""
 
 from __future__ import annotations
 

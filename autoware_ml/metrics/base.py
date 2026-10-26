@@ -246,8 +246,8 @@ class MetricSuite(torchmetrics.Metric, ABC, Generic[StateT]):
 
     prefix: str = ""
     _required_keys: tuple[str, ...] = ()
-    #: Metric names a compact report leads with (``("mAP", "NDS")``), matched on the
-    #: unqualified name up to the range suffix. Empty means the suite has no headline.
+    #: Metric names a compact report leads with, spelled as the components report them;
+    #: ``mAP`` also matches ``mAP_0m_121m``.
     headline_metrics: tuple[str, ...] = ()
 
     full_state_update: bool = False

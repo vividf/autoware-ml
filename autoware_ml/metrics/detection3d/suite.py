@@ -59,7 +59,7 @@ class Detection3DMetricSuite(MetricSuite[Detection3DState]):
 
     prefix = "det3d"
     _required_keys = ("predictions", "gt_boxes", "gt_labels")
-    # Exactly the names the components report: Nds emits map_based_nds / mapH_based_nds.
+    # Nds reports map_based_nds, not NDS.
     headline_metrics = ("mAP", "map_based_nds")
 
     def __init__(

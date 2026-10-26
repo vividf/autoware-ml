@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for OutputComparator, focused on the shape-mismatch path."""
+"""Unit tests for OutputComparator."""
 
 from __future__ import annotations
 
@@ -46,8 +46,6 @@ class TestOutputComparator:
         assert "tolerance" in (summary.reason or "")
 
     def test_integer_outputs_report_the_mismatch_ratio_and_pass_under_the_gate(self):
-        # Class labels are decisions over the float outputs: a few flips at near-tie
-        # points must not fail the scenario, but the ratio is reported for the log.
         labels_ref = np.zeros((40,), dtype=np.int64)
         labels_test = labels_ref.copy()
         labels_test[0] = 15
@@ -63,7 +61,7 @@ class TestOutputComparator:
 
     def test_integer_outputs_fail_when_most_of_them_differ(self):
         labels_ref = np.arange(20, dtype=np.int64)
-        labels_test = (labels_ref + 1) % 20  # every label wrong: a wiring mistake
+        labels_test = (labels_ref + 1) % 20
         summary, _ = OutputComparator(("pred_labels",)).compare(
             [labels_ref], [labels_test], tolerance=1e-6
         )
@@ -76,7 +74,6 @@ class TestOutputComparator:
         summary, details = OutputComparator().compare(a, b, tolerance=1.0)
         assert not summary.passed
         assert "shape mismatch" in (summary.reason or "")
-        # The mismatched tensor is recorded with infinite diffs, not silently dropped.
         assert details and details[0].max_diff == float("inf")
 
     def test_length_mismatch_fails(self):

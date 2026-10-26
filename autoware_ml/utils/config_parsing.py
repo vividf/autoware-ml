@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Typo guard for typed config parsing.
-
-Every typed config section (``deploy``, ``quantization``) rejects unknown keys through
-this one helper, so a misspelled option fails loudly instead of silently falling back
-to a default.
-"""
+"""Typo guard for typed config sections: a misspelled key fails instead of using a default."""
 
 from __future__ import annotations
 
@@ -28,13 +23,9 @@ from typing import Any
 def reject_unknown_keys(
     raw: Mapping[str, Any], known: frozenset[str], where: str, hint: str = ""
 ) -> None:
-    """Raise when ``raw`` contains keys outside ``known``.
+    """Raise when ``raw`` has keys outside ``known``.
 
-    Args:
-        raw: The mapping being parsed.
-        known: The section's full key set.
-        where: Dotted config path for the error message (e.g. ``"deploy.onnx"``).
-        hint: Optional sentence appended to the error (why the typo would hurt).
+    The error names the section by ``where`` (``"deploy.evaluation"``) and ends with ``hint``.
     """
     unknown = set(raw) - known
     if unknown:

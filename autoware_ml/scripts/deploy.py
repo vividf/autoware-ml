@@ -90,8 +90,7 @@ def deploy(
             for an unversioned export.
         tracker: Active experiment tracker name recorded in the stamp, if any.
         run_id: Deploy run id recorded in the stamp, if any.
-        log_metric: Receives every post-export evaluation metric and mean latency
-            (``key``, ``value``), for the deploy run's tracker; ``None`` logs nothing.
+        log_metric: Called with ``(key, value)`` for every evaluation metric and mean latency.
     """
     deployment_exporter = DeploymentExport(
         deploy_cfg=deploy_cfg,
@@ -105,8 +104,7 @@ def deploy(
     )
     export_outputs = deployment_exporter.export()
 
-    # Post-export steps (opt-in, stage-graph models only): cross-backend verification
-    # of the exported artifacts and per-backend evaluation against ground truth.
+    # A no-op unless deploy.verification or deploy.evaluation is enabled.
     run_post_export(
         deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
         model=model,

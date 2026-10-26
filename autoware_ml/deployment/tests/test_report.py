@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Metric-key convention and headline selection of deployment evaluation."""
+"""Unit tests for the evaluation metric keys and headline reporting."""
 
 from __future__ import annotations
 
@@ -75,8 +75,7 @@ def _box(x: float) -> list[float]:
 
 
 def test_declared_headlines_are_keys_the_suites_report() -> None:
-    """A headline no component emits never reaches a report: ``NDS`` was declared while
-    the Nds metric reports ``map_based_nds``, so NDS was missing from every deploy log."""
+    # A declared "NDS" matched nothing: Nds reports map_based_nds.
     detection = Detection3DMetricSuite(components=[MeanAP(), Nds()], class_names=("car",))
     detection.update(
         {
@@ -145,7 +144,6 @@ def test_comparison_table_rows_come_from_the_shared_headlines(caplog) -> None:
 
 
 def test_fallback_stages_are_visible_in_report_and_comparison(caplog) -> None:
-    """A backend whose stages ran in torch must say so — never a silent pytorch copy."""
     starred = replace(_result(Backend.ONNX, ("mIoU",)), fallback_stages=("encoder", "head"))
     clean = _result(Backend.TENSORRT, ("mIoU",))
     with caplog.at_level(logging.INFO, logger="autoware_ml.deployment.evaluation.evaluator"):

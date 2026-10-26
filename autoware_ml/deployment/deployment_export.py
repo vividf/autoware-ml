@@ -52,8 +52,7 @@ class DeploymentExportOutputs(BaseModel):
 
     onnx_exported_paths: Sequence[Path]
     tensorrt_exported_paths: Sequence[Path]
-    #: The shipped ONNX of every exported module, keyed by module name: the file the
-    #: post-export steps run (a graph modifier may write under another name).
+    #: Final ONNX of every exported module; a graph modifier may write it under another name.
     onnx_paths_by_module: Mapping[str, Path]
 
 

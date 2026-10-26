@@ -12,15 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The evaluate loop: dataloader -> preprocess -> backend inference -> decode -> metrics.
+"""Ground-truth evaluation of one backend's pipeline.
 
-:func:`evaluate_backend` is the one loop. It is parameterized by a
-:class:`~autoware_ml.deployment.pipeline.StagedPipeline` (which already knows its
-backend), preprocesses through the model's ``on_after_batch_transfer`` (the one place
-preprocessing runs), hands the backend's model outputs (``model_output_names``) to the
-model's ``build_deployed_eval_output`` and scores with fresh clones of its own
-metric suites — so a full-split ``pytorch`` run reproduces ``trainer.test`` and a
-``tensorrt`` run differs from it only by the backend.
+Preprocessing, ``build_deployed_eval_output`` and the metric suites are the model's own, so a
+full-split ``pytorch`` run reproduces ``trainer.test`` and the backends differ only in the
+pipeline.
 """
 
 from __future__ import annotations
@@ -48,7 +44,6 @@ logger = logging.getLogger(__name__)
 PREPROCESS_STAGE = "preprocess"
 POSTPROCESS_STAGE = "decode_and_metrics"
 MODEL_STAGE = "model_graphs"
-# Written next to the artifacts by every evaluation run (see write_results_json).
 RESULTS_FILE_NAME = "evaluation.json"
 
 
@@ -57,18 +52,15 @@ class EvaluationResult:
     """Evaluation outcome of one backend.
 
     Attributes:
-        backend: Backend that ran the exportable stages.
-        device: Device string the exportable stages ran on.
-        split: Evaluated split (``test`` / ``val``).
-        metrics: Canonical-keyed metric report (``{split}/{backend}/{prefix}/{name}``).
-        latency: Per-stage latency stats; ``model_graphs`` sums the exportable stages
-            only (pure GPU time for TensorRT).
+        backend: Backend that ran the graph stages.
+        device: Device the graph stages ran on.
+        split: ``test`` or ``val``.
+        metrics: Metrics keyed ``{split}/{backend}/{prefix}/{name}``.
+        latency: Latency per stage; ``model_graphs`` sums the graph stages only.
         num_samples: Number of evaluated samples.
-        headline_metrics: Metric names the evaluated suites declare as their headline
-            ones (``MetricSuite.headline_metrics``) — the rows a report leads with.
-        fallback_stages: Graph stages that ran their PyTorch module on this backend
-            (declared ``torch_fallback_backends``) — reported, so a backend column is
-            never silently the pytorch numbers under another name.
+        headline_metrics: The suites' ``headline_metrics``, the rows a report leads with.
+        fallback_stages: Graph stages that ran their PyTorch module on this backend, which
+            the reports flag.
     """
 
     backend: Backend
@@ -96,21 +88,17 @@ def evaluate_backend(
     num_warmup: int = 2,
     stage: EvalStage = EvalStage.TEST,
 ) -> EvaluationResult:
-    """Score one backend against ground truth and collect its latency breakdown.
+    """Score one backend against ground truth and time each of its stages.
 
     Args:
         model: Model exposing ``on_after_batch_transfer``, ``build_deployed_eval_output``,
             ``clone_metrics`` and ``get_log_batch_size`` (:class:`ModuleBaseModel`).
-        dataloader: Batches of the split to evaluate, with ground truth.
-        pipeline: Backend pipeline built from the model's stages (carries its backend).
-        device: Preprocessing / ground-truth / metrics device.
-        num_samples: Samples to evaluate (-1 = all). Checked at batch granularity.
-        num_warmup: Extra re-runs of the first batch priming the GPU / TensorRT; their
-            results and timing are discarded, every dataloader batch still counts.
-        stage: Metric stage whose suites are cloned and whose name is the ``split`` key.
-
-    Returns:
-        The backend's metrics and latency.
+        dataloader: Batches of the split, with ground truth.
+        pipeline: The backend's pipeline over the model's stages.
+        device: Device of preprocessing and metrics.
+        num_samples: Samples to evaluate, -1 for all; checked per batch.
+        num_warmup: Discarded runs of the first batch before its scored run.
+        stage: Stage whose metric suites are cloned; its name is the split in the keys.
 
     Raises:
         ValueError: When zero samples were processed.
@@ -223,11 +211,7 @@ def log_backend_report(result: EvaluationResult) -> None:
 
 
 def log_comparison(results: Sequence[EvaluationResult]) -> None:
-    """Log a compact cross-backend table of the shared headline metrics and model latency.
-
-    Metric keys carry the backend, so rows are aligned on the key *minus* its backend
-    segment.
-    """
+    """Log the shared headline metrics and the model latency of the backends side by side."""
     if len(results) < 2:
         return
     by_backend = {result.backend: result for result in results}
@@ -273,7 +257,7 @@ def log_comparison(results: Sequence[EvaluationResult]) -> None:
 
 
 def flatten_results(results: Sequence[EvaluationResult]) -> dict[str, float]:
-    """Every result's metrics (canonical keys) plus mean latencies, as one flat mapping."""
+    """Return the metrics and mean latencies of every result in one mapping."""
     flat: dict[str, float] = {}
     for result in results:
         flat.update(result.metrics)
@@ -283,15 +267,11 @@ def flatten_results(results: Sequence[EvaluationResult]) -> dict[str, float]:
 
 
 def write_results_json(results: Sequence[EvaluationResult], path: str | Path) -> Path:
-    """Write every backend's full metric report and latency stats to ``path`` as JSON.
+    """Write every backend's metrics and latency stats to ``path`` as JSON.
 
-    The log leads with the headline rows only, and ``log_metric`` reaches a tracker only
-    when one is configured; this file keeps the per-class and per-range values of every
-    backend next to the artifacts either way. Non-finite values (a class without support,
-    say) are written as ``null`` so the file stays strict JSON.
-
-    Returns:
-        The written path.
+    The log shows the headline metrics only and a tracker may not be configured, so this file
+    keeps the full report. Non-finite values (a class without support) are written as
+    ``null`` to keep the file strict JSON.
     """
 
     def finite(value: float) -> float | None:

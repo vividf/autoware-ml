@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The evaluate loop on a toy stage-graph model with duck-typed metric suites."""
+"""Unit tests for the per-backend evaluation loop."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from autoware_ml.types.backend import Backend
 
 
 class _SumSuite:
-    """Duck-typed suite: accumulates ``sum(prediction - target)``; reports it once."""
+    """Duck-typed metric suite."""
 
     prefix = "toy"
     headline_metrics = ("error",)
@@ -84,7 +84,7 @@ class _Model(ModuleBaseModel):
         return {"y": self.scale(multi_task_batch_inputs["x"])}
 
     def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
-        return batch  # the toy batch is its own model input
+        return batch
 
     def compute_metrics(self, multi_task_batch_inputs, outputs):
         return {"loss": outputs["y"].sum()}
@@ -152,7 +152,7 @@ def test_num_samples_limits_at_batch_granularity_and_val_reports_under_val() -> 
     result = evaluate_backend(
         model, _loader(), pipeline, torch.device("cpu"), num_samples=4, stage=EvalStage.VAL
     )
-    assert result.num_samples == 6  # two batches of three: the limit is checked per batch
+    assert result.num_samples == 6  # the limit is checked per batch of three
     assert next(iter(result.metrics)).startswith("val/pytorch/")
 
 
