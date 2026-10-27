@@ -84,8 +84,6 @@ def test_seg3d_export_specs_are_derived_and_keep_the_split_contract() -> None:
     assert "serialized_pooling_0_patch_order" in encoder_spec.input_names
     assert not any("_cluster" in name for name in encoder_spec.input_names)
     assert encoder_spec.dynamic_axes["voxels"] == {0: "num_voxels"}
-    for spec in specs.values():
-        assert spec.supported_stages == frozenset({"onnx", "tensorrt"})
     with torch.no_grad():
         stage_feats = encoder_spec.module(*encoder_spec.args)
         pred_labels, pred_probs = specs["ptv3_seg3d_head"].module(*specs["ptv3_seg3d_head"].args)
