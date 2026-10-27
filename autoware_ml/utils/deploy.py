@@ -283,6 +283,8 @@ def export_to_onnx(
     dynamic_axes = None
     if not dynamo:
         dynamic_axes = dynamic_axes_override or build_dynamic_axes(onnx_cfg)
+    # TODO(vividf): Stop reading input_names / output_names from the config once every model
+    # declares build_stages(); the stage declarations name every graph input and output.
     input_names = list(onnx_cfg.get("input_names", input_param_names))
     output_names = list(output_names_override or onnx_cfg.get("output_names", ["output"]))
 
