@@ -50,7 +50,6 @@ class ExportSpec:
         output_names: Names of the exported output tensors, in order.
         dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
             the export arguments. Used only when exporting with ``dynamo=False``.
-        supported_stages: Export stages supported by this specification.
     """
 
     module: torch.nn.Module
@@ -58,7 +57,6 @@ class ExportSpec:
     input_names: list[str]
     output_names: list[str]
     dynamic_axes: dict[str, dict[int, str]] | None = None
-    supported_stages: frozenset[str] = frozenset({"onnx", "tensorrt"})
 
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed.
@@ -507,8 +505,3 @@ def should_export_stage(stage_cfg: DictConfig | None) -> bool:
     if stage_cfg is None:
         return False
     return bool(stage_cfg.get("enabled", True))
-
-
-def supports_export_stage(export_spec: ExportSpec, stage_name: str) -> bool:
-    """Return whether an export specification supports a stage."""
-    return stage_name in export_spec.supported_stages

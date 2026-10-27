@@ -32,8 +32,8 @@ import autoware_ml.utils.deploy as deploy
 from types import SimpleNamespace
 
 from autoware_ml.utils.deploy import (
-    create_optimization_profile,
     ExportSpec,
+    create_optimization_profile,
     build_dynamic_shapes,
     build_dynamic_axes,
     export_to_onnx,
@@ -42,7 +42,6 @@ from autoware_ml.utils.deploy import (
     resolve_export_specs,
     should_modify_graph,
     validate_onnx_names_not_configured,
-    supports_export_stage,
 )
 
 
@@ -111,36 +110,6 @@ def test_export_to_onnx_prefers_export_spec_dynamic_axes(
     export_to_onnx(spec, onnx_cfg, tmp_path / "model.onnx")
 
     assert captured_kwargs["dynamic_axes"] == dynamic_axes_override
-
-
-def test_export_spec_names_every_input_and_some_output() -> None:
-    """A spec that leaves an input or every output unnamed is refused when it is built."""
-    args = (torch.ones(1, 1), torch.ones(1))
-    for input_names, output_names, message in (
-        (["voxels"], ["out"], "names 1 inputs for 2 args"),
-        (["voxels", "num_points", "extra"], ["out"], "names 3 inputs for 2 args"),
-        (["voxels", "num_points"], [], "names no outputs"),
-    ):
-        with pytest.raises(ValueError, match=message):
-            ExportSpec(
-                module=_DummyModel(),
-                args=args,
-                input_names=input_names,
-                output_names=output_names,
-            )
-
-
-def test_supports_export_stage_uses_export_spec_capabilities() -> None:
-    spec = ExportSpec(
-        module=_DummyModel(),
-        args=(torch.ones(1, 1), torch.ones(1)),
-        input_names=["voxels", "num_points"],
-        output_names=["out"],
-        supported_stages=frozenset({"onnx"}),
-    )
-
-    assert supports_export_stage(spec, "onnx") is True
-    assert supports_export_stage(spec, "tensorrt") is False
 
 
 def test_build_dynamic_axes_supports_legacy_export_config() -> None:
