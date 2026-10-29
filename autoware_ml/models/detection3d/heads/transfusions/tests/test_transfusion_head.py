@@ -143,6 +143,7 @@ class TestTransFusionHead(unittest.TestCase):
         nms_group_configs: Sequence[NMSGroupConfig] | None = None,
         post_center_range: Sequence[float] | None = None,
         use_bf16_cross_attention: bool = False,
+        fuse_export_attention: bool = False,
         iou_loss: torch.nn.Module | None = None,
     ) -> TransFusionHead:
         """
@@ -201,6 +202,7 @@ class TestTransFusionHead(unittest.TestCase):
             nms_group_configs=nms_group_configs,
             use_velocity=use_velocity,
             use_bf16_cross_attention=use_bf16_cross_attention,
+            fuse_export_attention=fuse_export_attention,
             iou_loss=iou_loss,
         ).to(self.device)
 
@@ -817,6 +819,72 @@ class TestTransFusionHead(unittest.TestCase):
         self.assertAlmostEqual(float(suppressed[0, 1, 5, 6]), 0.4, places=5)
         # The setUp head names no pooling class, so nothing is suppressed at all.
         self.assertTrue(torch.equal(untouched, heatmaps))
+
+    def test_suppress_dense_heatmaps_matches_the_slice_assignment_reference(self) -> None:
+        """Test that the scatter-free suppression matches the slice-assignment reference."""
+        transfusion_head = self._build_transfusion_head(
+            dense_heatmap_pooling_class_names=["pedestrian"]
+        )
+        height, width = self.feature_map_size
+        heatmaps = torch.rand(
+            (2, self.num_classes, height, width), dtype=torch.float32, device=self.device
+        )
+        padding = transfusion_head.nms_kernel_size // 2
+        pooling_ids = transfusion_head.dense_heatmap_pooling_class_ids
+        local_max = heatmaps.clone()
+        local_max[:, pooling_ids, padding:-padding, padding:-padding] = (
+            torch.nn.functional.max_pool2d(
+                heatmaps[:, pooling_ids], kernel_size=transfusion_head.nms_kernel_size, stride=1
+            )
+        )
+        reference = heatmaps * (local_max == heatmaps)
+
+        self.assertTrue(torch.equal(transfusion_head._suppress_dense_heatmaps(heatmaps), reference))
+
+    def test_suppress_dense_heatmaps_exports_without_scatter(self) -> None:
+        """Test that the suppression exports as constant gathers, not as a ScatterND."""
+        transfusion_head = self._build_transfusion_head(dense_heatmap_pooling_class_names=["car"])
+        height, width = self.feature_map_size
+        heatmaps = torch.rand((1, self.num_classes, height, width), device=self.device)
+
+        class _Suppress(torch.nn.Module):
+            def forward(self, maps: torch.Tensor) -> torch.Tensor:
+                return transfusion_head._suppress_dense_heatmaps(maps)
+
+        with tempfile.TemporaryDirectory() as export_dir:
+            output_path = Path(export_dir) / "suppress.onnx"
+            torch.onnx.export(
+                _Suppress().eval(),
+                (heatmaps,),
+                output_path,
+                input_names=["heatmaps"],
+                output_names=["suppressed"],
+                opset_version=17,
+                dynamo=False,
+            )
+            model = onnx.load(output_path)
+        self.assertFalse(any(node.op_type == "ScatterND" for node in model.graph.node))
+
+    def test_fused_export_attention_drops_the_max_subtraction_without_bf16(self) -> None:
+        """Test that ``fuse_export_attention`` drops the max-subtraction and adds no bf16 casts."""
+        transfusion_head = self._build_transfusion_head(
+            fuse_export_attention=True
+        ).prepare_for_export()
+        self_attention = transfusion_head.decoder[0].self_attn
+        cross_attention = transfusion_head.decoder[0].cross_attn
+
+        self.assertIsNone(transfusion_head.required_onnx_precision)
+        self.assertTrue(self_attention.fuse_attention)
+        self.assertTrue(cross_attention.fuse_attention)
+        self.assertFalse(cross_attention.use_bf16)
+
+        with tempfile.TemporaryDirectory() as export_dir:
+            model = self._export_attention(
+                cross_attention, Path(export_dir) / "cross_attention.onnx"
+            )
+        self.assertFalse(
+            any(node.op_type in {"ReduceMax", "Sub", "Cast"} for node in model.graph.node)
+        )
 
     def test_get_targets_populates_labels_and_boxes(self) -> None:
         """Test that get_targets returns targets shaped for every decoder layer's queries."""
