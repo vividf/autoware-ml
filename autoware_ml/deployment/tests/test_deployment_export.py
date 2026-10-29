@@ -161,6 +161,21 @@ def _point_batch() -> ModelGTBatch:
     )
 
 
+class _RenamingModifier:
+    """A modifier that writes the graph under ``output_path`` with a marker."""
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = Path(output_path)
+
+    def __call__(self, onnx_path: Path) -> Path:
+        model = onnx.load(str(onnx_path))
+        model.graph.initializer.append(
+            onnx.numpy_helper.from_array(np.zeros(1, dtype=np.float32), "modified_marker")
+        )
+        onnx.save(model, str(self.output_path))
+        return self.output_path
+
+
 def _deploy_cfg(
     modules: dict, onnx_enabled: bool = True, tensorrt_enabled: bool = False
 ) -> DictConfig:
@@ -251,6 +266,31 @@ class TestOutputLayout:
             "encoder.onnx",
             "head.onnx",
         ]
+
+    def test_a_modifier_writing_elsewhere_still_ships_as_the_module_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Input: a graph modifier configured to write its result under another file name.
+        Expected: the shipped artifact is ``<module>.onnx`` and carries the modified graph,
+            so the backends and the runtime find it under the module name.
+        """
+        cfg = _deploy_cfg(
+            {
+                "head": {
+                    "modify_graph": {
+                        "_target_": f"{__name__}._RenamingModifier",
+                        "output_path": str(tmp_path / "exports" / "head_modified.onnx"),
+                    }
+                }
+            }
+        )
+        outputs = _exporter(tmp_path, cfg).export()
+
+        assert list(outputs.onnx_exported_paths) == [tmp_path / "exports" / "head.onnx"]
+        assert not (tmp_path / "exports" / "head_modified.onnx").exists()
+        initializers = onnx.load(str(tmp_path / "exports" / "head.onnx")).graph.initializer
+        assert "modified_marker" in {initializer.name for initializer in initializers}
 
     def test_disabled_stages_export_nothing(self, tmp_path: Path) -> None:
         """

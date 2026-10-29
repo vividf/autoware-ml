@@ -39,6 +39,7 @@ from autoware_ml.builders.model_builder import (
 )
 from autoware_ml.datamodule.data_module import DataModule
 from autoware_ml.deployment.deployment_export import DeploymentExport
+from autoware_ml.deployment.config import PostExportConfig
 from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.utils.mlflow_helpers import (
@@ -106,12 +107,11 @@ def deploy(
 
     # A no-op unless deploy.verification or deploy.evaluation is enabled.
     run_post_export(
-        deploy_cfg=OmegaConf.to_container(deploy_cfg, resolve=True),
+        PostExportConfig.from_deploy_cfg(deploy_cfg),
         model=model,
         datamodule=datamodule,
         output_dir=output_dir,
         device=deployment_exporter.device,
-        onnx_paths=export_outputs.onnx_paths_by_module,
         plugin_libraries=tuple(str(p) for p in (deploy_cfg.tensorrt.get("plugin_libraries") or ())),
         log_metric=log_metric,
     )

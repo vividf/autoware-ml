@@ -28,6 +28,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from autoware_ml.datamodule.data_module import DataLoaderConfig
+from autoware_ml.deployment.config import PostExportConfig
 from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.deployment.tests.toy_batch import ToyBatch
@@ -182,24 +183,30 @@ def _export_stage_artifacts(model: _StagedModel, tmp_path) -> None:
         )
 
 
-def _cfg(enabled: bool = True, tolerance: float | None = None) -> dict:
+def _cfg(enabled: bool = True, tolerance: float | None = None) -> PostExportConfig:
     scenario = {
         "ref": {"backend": "pytorch", "device": "cpu"},
         "test": {"backend": "onnx", "device": "cpu"},
     }
     if tolerance is not None:
         scenario["tolerance"] = tolerance
-    return {
-        "onnx": {"enabled": True},
-        "tensorrt": {"enabled": False},
-        "verification": {"enabled": enabled, "num_verify_batches": 2, "scenarios": [scenario]},
-    }
+    return PostExportConfig.from_deploy_cfg(
+        {
+            "onnx": {"enabled": True},
+            "tensorrt": {"enabled": False},
+            "verification": {"enabled": enabled, "num_verify_batches": 2, "scenarios": [scenario]},
+        }
+    )
 
 
 def test_disabled_sections_do_nothing_even_without_stages(tmp_path) -> None:
     datamodule = _DataModule()
     run_post_export(
-        {"onnx": {}, "tensorrt": {}}, _PlainModel(), datamodule, tmp_path, torch.device("cpu")
+        PostExportConfig.from_deploy_cfg({"onnx": {}, "tensorrt": {}}),
+        _PlainModel(),
+        datamodule,
+        tmp_path,
+        torch.device("cpu"),
     )
     assert datamodule.setup_calls == []
 
@@ -232,21 +239,23 @@ def test_a_diverging_artifact_fails_the_deploy(tmp_path) -> None:
         run_post_export(_cfg(tolerance=0.5), model, _DataModule(), tmp_path, torch.device("cpu"))
 
 
-def _evaluation_cfg() -> dict:
-    return {
-        "onnx": {"enabled": True},
-        "tensorrt": {"enabled": False},
-        "evaluation": {
-            "enabled": True,
-            "num_samples": -1,
-            "num_warmup": 1,
-            "backends": {
-                "pytorch": {"enabled": True, "device": "cpu"},
-                "onnx": {"enabled": True, "device": "cpu"},
-                "tensorrt": {"enabled": True, "device": "cuda"},
+def _evaluation_cfg() -> PostExportConfig:
+    return PostExportConfig.from_deploy_cfg(
+        {
+            "onnx": {"enabled": True},
+            "tensorrt": {"enabled": False},
+            "evaluation": {
+                "enabled": True,
+                "num_samples": -1,
+                "num_warmup": 1,
+                "backends": {
+                    "pytorch": {"enabled": True, "device": "cpu"},
+                    "onnx": {"enabled": True, "device": "cpu"},
+                    "tensorrt": {"enabled": True, "device": "cuda"},
+                },
             },
-        },
-    }
+        }
+    )
 
 
 def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) -> None:

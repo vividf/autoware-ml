@@ -21,11 +21,12 @@ agree within an absolute tolerance, integer outputs by the share that differ.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from autoware_ml.deployment.verification.output_comparator import OutputComparator
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from autoware_ml.deployment.verification.output_comparator import compare_outputs
 from autoware_ml.types.backend import Backend
 
 if TYPE_CHECKING:
@@ -34,57 +35,48 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class VerificationScenario:
+class PipelineEndpoint(BaseModel):
+    """A ``(backend, device)`` pair a scenario runs on."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    backend: Backend
+    device: str = "cuda"
+
+    def __str__(self) -> str:
+        return f"{self.backend}({self.device})"
+
+
+class VerificationScenario(BaseModel):
     """One reference-vs-test backend comparison.
 
     Attributes:
-        ref_backend: Reference backend.
-        ref_device: Device of the reference pipeline.
-        test_backend: Tested backend.
-        test_device: Device of the tested pipeline.
+        ref: Reference pipeline.
+        test: Tested pipeline.
         tolerance: Absolute tolerance replacing the verifier default, or ``None``.
     """
 
-    ref_backend: Backend
-    ref_device: str
-    test_backend: Backend
-    test_device: str
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ref: PipelineEndpoint
+    test: PipelineEndpoint
     tolerance: float | None = None
 
-    def __post_init__(self) -> None:
-        if (self.ref_backend, self.ref_device) == (self.test_backend, self.test_device):
+    @model_validator(mode="after")
+    def _reject_a_pipeline_against_itself(self) -> VerificationScenario:
+        if self.ref == self.test:
             # Both sides would get the same cached pipeline, and the TensorRT runner reuses
             # its output buffers, so the comparison would read one buffer twice and always pass.
             raise ValueError(
-                f"Verification scenario compares {self.ref_backend}({self.ref_device}) with "
-                "itself. A scenario must name two different (backend, device) pairs — "
-                "comparing a pipeline against itself always passes and verifies nothing."
+                f"Verification scenario compares {self.ref} with itself. A scenario must name "
+                "two different (backend, device) pairs; comparing a pipeline against itself "
+                "always passes and verifies nothing."
             )
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> VerificationScenario:
-        """Parse ``{ref: {backend, device}, test: {backend, device}, tolerance}``."""
-        try:
-            raw_tolerance = raw.get("tolerance")
-            return cls(
-                ref_backend=Backend(raw["ref"]["backend"]),
-                ref_device=str(raw["ref"].get("device", "cuda")),
-                test_backend=Backend(raw["test"]["backend"]),
-                test_device=str(raw["test"].get("device", "cuda")),
-                tolerance=float(raw_tolerance) if raw_tolerance is not None else None,
-            )
-        except (AttributeError, KeyError, TypeError) as error:
-            raise ValueError(
-                "A verification scenario must look like "
-                "{ref: {backend: ..., device: ...}, test: {backend: ..., device: ...}, "
-                "tolerance: <optional float>}, "
-                f"got: {raw!r}"
-            ) from error
+        return self
 
     def describe(self) -> str:
         """Human-readable scenario label."""
-        return f"{self.ref_backend}({self.ref_device}) vs {self.test_backend}({self.test_device})"
+        return f"{self.ref} vs {self.test}"
 
 
 class BackendVerifier:
@@ -123,7 +115,7 @@ class BackendVerifier:
         executed = 0
         all_passed = True
         for scenario in scenarios:
-            required = {scenario.ref_backend, scenario.test_backend}
+            required = {scenario.ref.backend, scenario.test.backend}
             missing = required - available_backends
             if missing:
                 logger.warning(
@@ -143,9 +135,8 @@ class BackendVerifier:
         return all_passed
 
     def _run_scenario(self, scenario: VerificationScenario, batches: Sequence[Any]) -> bool:
-        ref_pipeline = self.pipelines.get(scenario.ref_backend, scenario.ref_device)
-        test_pipeline = self.pipelines.get(scenario.test_backend, scenario.test_device)
-        comparator = OutputComparator(output_names=test_pipeline.output_names)
+        ref_pipeline = self.pipelines.get(scenario.ref.backend, scenario.ref.device)
+        test_pipeline = self.pipelines.get(scenario.test.backend, scenario.test.device)
 
         tolerance = scenario.tolerance if scenario.tolerance is not None else self.tolerance
         tolerance_source = (
@@ -163,7 +154,8 @@ class BackendVerifier:
         for index, batch_inputs in enumerate(batches):
             ref_result = ref_pipeline.infer(batch_inputs)
             test_result = test_pipeline.infer(batch_inputs)
-            summary, details = comparator.compare(
+            summary, details = compare_outputs(
+                test_pipeline.output_names,
                 ref_result.ordered_outputs(),
                 test_result.ordered_outputs(),
                 tolerance=tolerance,
@@ -179,7 +171,7 @@ class BackendVerifier:
             for detail in details:
                 logger.info(
                     "    %-32s shape=%s max=%.6f mean=%.6f",
-                    detail.path,
+                    detail.name,
                     detail.shape,
                     detail.max_diff,
                     detail.mean_diff,
