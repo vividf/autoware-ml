@@ -795,7 +795,6 @@ def encoder_stage_input_names(num_poolings: int) -> list[str]:
 def serialize_stage_output_names(num_poolings: int) -> tuple[str, ...]:
     """Return the serialize glue's outputs: every tensor the encoder or a head graph reads."""
     names = list(encoder_stage_input_names(num_poolings))
-    names += [f"serialized_pooling_{stage}_cluster" for stage in range(num_poolings)]
     names += pooling_cluster_names(num_poolings + 1)
     names.append(f"point_grid_coord_{num_poolings - 1}")
     return tuple(names)
@@ -836,8 +835,9 @@ def build_serialize_stage(model: PTv3BaseModel) -> TorchStage:
             "serialized_inverse": point["serialized_inverse"],
         }
         for stage_index, meta in enumerate(metadata):
-            for field in SERIALIZED_POOLING_FIELDS:
+            for field in ENCODER_EXPORT_POOLING_FIELDS:
                 produced[f"serialized_pooling_{stage_index}_{field}"] = getattr(meta, field)
+            # The heads read the cluster under the name of their input.
             produced[f"pooling_cluster_{stage_index}"] = meta.cluster
         # The detection head reads the skip stage's grid coordinates.
         skip_stage = num_poolings - 1
