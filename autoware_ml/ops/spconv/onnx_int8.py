@@ -51,6 +51,10 @@ from autoware_ml.ops.spconv.contract import (
     AUTOWARE_DOMAIN,
     IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
     IMPLICIT_GEMM_OP,
+    INPUT_SCALE_ATTR,
+    OUTPUT_SCALE_ATTR,
+    PRECISION_ATTR,
+    PRECISION_INT8,
 )
 from autoware_ml.ops.spconv.onnx_fusion import replace_attribute
 
@@ -59,9 +63,6 @@ if IS_SPCONV_AVAILABLE:
 
 logger = logging.getLogger(__name__)
 
-#: Values of the plugin's ``ImplicitGemmParameters::precision``.
-PRECISION_FP = 0
-PRECISION_INT8 = 1
 _INT8_MAX = 127.0
 _SPARSE_INPUTS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 
@@ -240,9 +241,9 @@ def quantize_implicit_gemm_nodes(
 
         del node.input[_SPARSE_INPUTS:]
         node.input.extend([channel_scale_name, bias_scaled_name])
-        replace_attribute(node, "precision", PRECISION_INT8)
-        replace_attribute(node, "input_scale", float(layer.input_scale))
-        replace_attribute(node, "output_scale", 1.0)
+        replace_attribute(node, PRECISION_ATTR, PRECISION_INT8)
+        replace_attribute(node, INPUT_SCALE_ATTR, float(layer.input_scale))
+        replace_attribute(node, OUTPUT_SCALE_ATTR, 1.0)
         converted.add(stem)
         logger.debug(
             "Sparse INT8: %s -> precision=1 input_scale=%.6f channel_scale[%d]",
