@@ -21,14 +21,9 @@ from typing import Any
 
 import torch
 
-from autoware_ml.deployment.stages import (
-    GraphStage,
-    RunState,
-    Stage,
-    graph_stages,
-    run_stages_in_torch,
-    validate_stages,
-)
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.deployment.stages import GraphStage, RunState, Stage, graph_stages
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -58,7 +53,7 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
 def build_export_specs_from_stages(
     stages: Sequence[Stage], batch: Any, device: torch.device
 ) -> dict[str, ExportSpec]:
-    """Run the stage graph once and return ``{stage name: ExportSpec}`` per graph stage.
+    """Trace the stage graph once in PyTorch and return ``{stage name: ExportSpec}`` per graph stage.
 
     The graph modules are switched to eval first. An export wrapper starts in training
     mode, and ``torch.onnx.export`` restores the module's mode recursively when it is done:
@@ -70,8 +65,10 @@ def build_export_specs_from_stages(
         batch: One preprocessed example batch.
         device: Device of the tracing run.
     """
-    stages = validate_stages(stages)
-    for stage in graph_stages(stages):
+    pipeline = StagedPipeline(stages, Backend.PYTORCH, device)
+    for stage in graph_stages(pipeline.stages):
         stage.module.eval()
-    state = run_stages_in_torch(stages, batch, device)
-    return {stage.name: export_spec_for_stage(stage, state) for stage in graph_stages(stages)}
+    state = pipeline.trace(batch)
+    return {
+        stage.name: export_spec_for_stage(stage, state) for stage in graph_stages(pipeline.stages)
+    }
