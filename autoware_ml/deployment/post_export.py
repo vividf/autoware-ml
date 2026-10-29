@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -197,13 +197,12 @@ def _evaluate_enabled_backends(
 
 
 def run_post_export(
-    deploy_cfg: Any,
+    cfg: PostExportConfig,
     model: L.LightningModule,
     datamodule: L.LightningDataModule,
     output_dir: str | Path,
     device: torch.device,
     log_metric: Callable[[str, float], None] | None = None,
-    onnx_paths: Mapping[str, Path] | None = None,
     plugin_libraries: Sequence[str] = (),
 ) -> list[EvaluationResult]:
     """Run the enabled ``deploy.verification`` and ``deploy.evaluation`` over ``output_dir``.
@@ -213,7 +212,6 @@ def run_post_export(
     plugins the engines were built with. Enabling either step on a model without
     ``build_stages()`` is an error.
     """
-    cfg = PostExportConfig.from_deploy_cfg(deploy_cfg)
     if not cfg.any_enabled:
         return []
     stages = model.build_stages()
@@ -224,11 +222,8 @@ def run_post_export(
             "graph (see autoware_ml.deployment.stages) or disable these sections."
         )
     output_dir = Path(output_dir)
-    # A graph modifier may rename the ONNX files; the engines are always <stage>.engine.
-    pipelines = PipelineCache(
-        stages, output_dir, plugin_libraries=plugin_libraries, onnx_paths=onnx_paths
-    )
-    available = available_backends(stages, output_dir, onnx_paths)
+    pipelines = PipelineCache(stages, output_dir, plugin_libraries=plugin_libraries)
+    available = available_backends(stages, output_dir)
     if cfg.verification.enabled:
         run_verification(cfg.verification, model, pipelines, available, datamodule, device)
     results: list[EvaluationResult] = []

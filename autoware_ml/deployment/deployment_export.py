@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import logging
+import os
 from pathlib import Path
 from types import MappingProxyType
 
@@ -52,8 +53,6 @@ class DeploymentExportOutputs(BaseModel):
 
     onnx_exported_paths: Sequence[Path]
     tensorrt_exported_paths: Sequence[Path]
-    #: Final ONNX of every exported module; a graph modifier may write it under another name.
-    onnx_paths_by_module: Mapping[str, Path]
 
 
 class DeploymentExport:
@@ -110,7 +109,6 @@ class DeploymentExport:
 
         onnx_exported_paths: Sequence[Path] = []
         tensorrt_exported_paths: Sequence[Path] = []
-        onnx_paths_by_module: dict[str, Path] = {}
 
         for module_name, export_spec in export_specs.items():
             module_onnx_cfg = merge_module_onnx_cfg(self.deploy_cfg.onnx, module_name)
@@ -147,9 +145,13 @@ class DeploymentExport:
                     tracker=self.tracker,
                     run_id=self.run_id,
                 )
-                # Recorded after the modifiers, which may write to a different path.
+                # A graph modifier may have written the graph under another name; the
+                # artifact of a module is <module>.onnx, which the runtime and the backends load.
+                final_onnx_path = artifact_path(self.output_dir, module_name, Backend.ONNX)
+                if module_onnx_path != final_onnx_path:
+                    os.replace(module_onnx_path, final_onnx_path)
+                    module_onnx_path = final_onnx_path
                 onnx_exported_paths.append(module_onnx_path)
-                onnx_paths_by_module[module_name] = module_onnx_path
                 logger.info(
                     "Stamped %s metadata: release=%s, commit=%s",
                     module_name,
@@ -166,10 +168,8 @@ class DeploymentExport:
                 build_engine_from_config(module_onnx_path, self.deploy_cfg, module_engine_path)
                 tensorrt_exported_paths.append(module_engine_path)
 
-        # Implement the export logic here
         logger.info("Model export completed.")
         return DeploymentExportOutputs(
             onnx_exported_paths=onnx_exported_paths,
             tensorrt_exported_paths=tensorrt_exported_paths,
-            onnx_paths_by_module=onnx_paths_by_module,
         )

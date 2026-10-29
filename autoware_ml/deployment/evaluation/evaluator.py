@@ -166,7 +166,7 @@ def evaluate_backend(
         headline_metrics=tuple(
             dict.fromkeys(name for suite in suites for name in suite.headline_metrics)
         ),
-        fallback_stages=tuple(getattr(pipeline, "fallback_stage_names", ())),
+        fallback_stages=pipeline.fallback_stage_names,
     )
     log_backend_report(result)
     return result

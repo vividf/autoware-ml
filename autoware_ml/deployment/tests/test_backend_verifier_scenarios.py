@@ -16,9 +16,8 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
+from pydantic import ValidationError
 
 from autoware_ml.deployment.verification.backend_verifier import (
     BackendVerifier,
@@ -26,29 +25,29 @@ from autoware_ml.deployment.verification.backend_verifier import (
 )
 
 
-class TestVerificationScenarioFromDict:
+class TestVerificationScenario:
     def test_valid_mapping(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {
                 "ref": {"backend": "pytorch", "device": "cpu"},
                 "test": {"backend": "onnx", "device": "cuda"},
             }
         )
-        assert scenario.ref_backend == "pytorch"
-        assert scenario.ref_device == "cpu"
-        assert scenario.test_backend == "onnx"
-        assert scenario.test_device == "cuda"
+        assert scenario.ref.backend == "pytorch"
+        assert scenario.ref.device == "cpu"
+        assert scenario.test.backend == "onnx"
+        assert scenario.test.device == "cuda"
         assert scenario.tolerance is None
 
     def test_device_defaults_to_cuda(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "tensorrt"}}
         )
-        assert scenario.ref_device == "cuda"
-        assert scenario.test_device == "cuda"
+        assert scenario.ref.device == "cuda"
+        assert scenario.test.device == "cuda"
 
     def test_per_scenario_tolerance_parsed_as_float(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {
                 "ref": {"backend": "pytorch"},
                 "test": {"backend": "onnx"},
@@ -59,7 +58,7 @@ class TestVerificationScenarioFromDict:
         assert scenario.tolerance == pytest.approx(0.001)
 
     def test_missing_tolerance_stays_none(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "onnx"}}
         )
         assert scenario.tolerance is None
@@ -74,18 +73,18 @@ class TestVerificationScenarioFromDict:
         ],
     )
     def test_malformed_input_raises_value_error(self, raw):
-        with pytest.raises(ValueError, match="verification scenario"):
-            VerificationScenario.from_dict(raw)
+        with pytest.raises(ValidationError):
+            VerificationScenario.model_validate(raw)
 
     def test_scenario_is_frozen(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "onnx"}}
         )
-        with pytest.raises(dataclasses.FrozenInstanceError):
+        with pytest.raises(ValidationError):
             scenario.tolerance = 0.5
 
     def test_describe_names_backends_and_devices(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {
                 "ref": {"backend": "pytorch", "device": "cpu"},
                 "test": {"backend": "onnx", "device": "cuda"},
@@ -96,8 +95,8 @@ class TestVerificationScenarioFromDict:
 
 class TestDegenerateScenariosAreRejected:
     def test_same_backend_and_device_is_refused(self):
-        with pytest.raises(ValueError, match="with itself"):
-            VerificationScenario.from_dict(
+        with pytest.raises(ValidationError, match="with itself"):
+            VerificationScenario.model_validate(
                 {
                     "ref": {"backend": "tensorrt", "device": "cuda"},
                     "test": {"backend": "tensorrt", "device": "cuda"},
@@ -105,13 +104,13 @@ class TestDegenerateScenariosAreRejected:
             )
 
     def test_same_backend_on_different_devices_is_allowed(self):
-        scenario = VerificationScenario.from_dict(
+        scenario = VerificationScenario.model_validate(
             {
                 "ref": {"backend": "pytorch", "device": "cpu"},
                 "test": {"backend": "pytorch", "device": "cuda"},
             }
         )
-        assert scenario.ref_device == "cpu" and scenario.test_device == "cuda"
+        assert scenario.ref.device == "cpu" and scenario.test.device == "cuda"
 
     def test_verification_enabled_without_scenarios_raises(self):
         verifier = BackendVerifier(pipelines=None, tolerance=0.01)
