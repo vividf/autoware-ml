@@ -16,6 +16,12 @@ model:
       dense_output_shapes: [180, 180, 2]
 
 deploy:
+  # On by default: it is the only gate of model.bbox_head.fuse_export_attention above, whose
+  # fp16 attention overflows where TensorRT does not fuse it. 100 frames show that; the whole
+  # split (num_samples: -1) is the release measurement.
+  evaluation:
+    enabled: true
+    num_samples: 100
   tensorrt:
     # The max is the evaluation voxel budget (eval_max_voxels), the most the runtime hands
     # the engine. Point channels: x, y, z, intensity, time lag.
