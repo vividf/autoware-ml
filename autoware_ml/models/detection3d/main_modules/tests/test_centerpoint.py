@@ -27,7 +27,9 @@ from autoware_ml.dataclasses.batch.detection3d import (
     Detection3DGTBatch,
 )
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
-from autoware_ml.deployment.stages import GraphStage, model_output_names, run_stages_in_torch
+from autoware_ml.deployment.stages import GraphStage, model_output_names
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.types.backend import Backend
 from autoware_ml.models.detection3d.main_modules.centerpoint import (
     CenterPointDetection3DModel,
     _CenterPointBackboneNeckHeadExportWrapper,
@@ -380,7 +382,7 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         with torch.no_grad():
             forward_outputs = self.centerpoint(multi_task_batch_inputs)
         expected = forward_outputs.detection3d().center_head()
-        state = run_stages_in_torch(stages, multi_task_batch_inputs, self.device)
+        state = StagedPipeline(stages, Backend.PYTORCH, self.device).trace(multi_task_batch_inputs)
         for name in names:
             # Same modules, so only CUDA kernel-selection noise remains: two forward() calls
             # differ by up to 1.3e-4 on a shared GPU. A wrong dataflow would be off by O(1).
@@ -470,7 +472,7 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
             with self.subTest(case=case):
                 with torch.no_grad():
                     forward_outputs = self.centerpoint(inputs)
-                state = run_stages_in_torch(stages, inputs, self.device)
+                state = StagedPipeline(stages, Backend.PYTORCH, self.device).trace(inputs)
 
                 torch.testing.assert_close(
                     state["heatmap"],
