@@ -63,17 +63,6 @@ class ExportSpec:
     dynamic_axes: dict[str, dict[int, str]] | None = None
     onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
-
-def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
-    """Run ``transforms`` over the exported file in order and return the resulting path."""
-    for transform in transforms:
-        name = getattr(transform, "__name__", None) or getattr(
-            getattr(transform, "func", None), "__name__", type(transform).__name__
-        )
-        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
-        onnx_path = Path(transform(onnx_path))
-    return onnx_path
-
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed.
 
@@ -89,6 +78,17 @@ def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path],
             )
         if not self.output_names:
             raise ValueError("The export spec names no outputs.")
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run ``transforms`` over the exported file in order and return the resulting path."""
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
 
 def validate_cuda_available() -> None:
