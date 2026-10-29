@@ -17,8 +17,10 @@
 
 modelopt's symbolics emit a quantizer's scale as a ``Constant`` and its zero point as
 ``Constant -> Cast``, and with ``do_constant_folding: false`` (the tracer folds some of the
-exported ops wrongly) the chains reach the artifact. Netron inlines a ``Constant`` only
-into a single consumer input, so neither value shows on the Q/DQ nodes.
+exported ops wrongly) the chains reach the artifact. The fp16 cast
+(:mod:`autoware_ml.deployment.onnx.precision`) checks every Q/DQ scale for fp16 underflow
+and twins the initializers an island and the sea share; a scale left as a ``Constant``
+would bypass both. Netron also shows an initializer on the node, a ``Constant`` chain not.
 """
 
 from __future__ import annotations
