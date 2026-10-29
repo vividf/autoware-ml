@@ -37,6 +37,7 @@ from autoware_ml.models.detection3d.tests.ptv3_detection3d_fixtures import (
     build_seg3d_model,
     build_trans_model,
 )
+from autoware_ml.models.segmentation3d.ptv3 import PTV3_SEG_QUANT_RULES
 from autoware_ml.models.segmentation3d.ptv3_base import (
     DET3D_HEAD_STAGE,
     ENCODER_EXPORT_INPUT_NAMES,
@@ -71,6 +72,7 @@ def test_seg3d_declaration_names_the_runtime_modules_and_is_name_covered() -> No
     assert not any(name.endswith("_cluster") for name in encoder.inputs)
     assert encoder.torch_fallback_backends == (Backend.ONNX,)
     assert stages[2].outputs == ("pred_labels", "pred_probs")
+    assert model.build_quantization_rules() is PTV3_SEG_QUANT_RULES
 
 
 @REQUIRES_SPARSE_CUDA
@@ -170,3 +172,27 @@ def test_det3d_declaration_specs_and_deployed_eval_output() -> None:
     deployed = model.build_deployed_eval_output(batch, outputs)
     assert {"predictions", "gt_boxes", "gt_labels"} <= deployed.keys()
     assert len(deployed["predictions"]) == 1
+
+
+def test_export_replacement_drops_quantizer_buffers_of_a_quantized_cpe_conv() -> None:
+    spconv = pytest.importorskip("spconv.pytorch")
+    from autoware_ml.models.segmentation3d.encoders.ptv3 import (
+        ExportableSubMConv3d,
+        replace_submconv3d_for_export,
+    )
+
+    conv = spconv.SubMConv3d(4, 8, kernel_size=3, indice_key="cpe", bias=True)
+    # Stand-ins for the amax buffers modelopt's quantizers add to a calibrated conv.
+    conv.input_quantizer = torch.nn.Module()
+    conv.input_quantizer.register_buffer("_amax", torch.tensor(1.5))
+    conv.weight_quantizer = torch.nn.Module()
+    conv.weight_quantizer.register_buffer("_amax", torch.tensor(0.5))
+    holder = torch.nn.Sequential(conv)
+
+    replace_submconv3d_for_export(holder)
+
+    exported = holder[0]
+    assert isinstance(exported, ExportableSubMConv3d)
+    assert torch.equal(exported.weight, conv.weight)
+    assert torch.equal(exported.bias, conv.bias)
+    assert not any("quantizer" in key for key in exported.state_dict())
