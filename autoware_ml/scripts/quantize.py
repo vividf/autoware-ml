@@ -14,10 +14,15 @@
 
 """Quantization entrypoint: FP checkpoint in, self-describing quantized checkpoint out.
 
-``quantization.mode: ptq`` folds BatchNorm and inserts Q/DQ through the model's quantization
-plan, calibrates on the validation split and saves ``ptq.ckpt``. The checkpoint embeds its
-:class:`~autoware_ml.quantization.QuantizationDescription` (config and placement record), so
-``deploy`` and ``test`` rebuild the same quantized tree from the checkpoint alone.
+- ``quantization.mode: ptq`` folds BatchNorm and inserts Q/DQ through the model's quantization
+  plan, calibrates on the validation split and saves ``ptq.ckpt``.
+- ``quantization.mode: qat`` fine-tunes with frozen amax: a short training run with
+  :class:`~autoware_ml.quantization.qat_callback.QATCallback`, from which Lightning saves
+  ``best.ckpt`` / ``last.ckpt``.
+
+Both checkpoints embed their :class:`~autoware_ml.quantization.QuantizationDescription` (config
+and placement record), so ``deploy`` and ``test`` rebuild the same quantized tree from the
+checkpoint alone.
 
 ``quantization.dry_run: true`` only logs the placement table, on CPU without weights or data.
 """
@@ -37,7 +42,7 @@ import numpy as np
 import torch
 from mlflow.entities import RunStatus
 from mlflow.tracking import MlflowClient
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from autoware_ml.quantization.checkpoint import QuantizationDescription, save_quantized_checkpoint
@@ -49,6 +54,7 @@ from autoware_ml.quantization.core.quantizer_state import (
     validate_quantizer_amax,
 )
 from autoware_ml.quantization.plan import prepare_quantized_tree
+from autoware_ml.quantization.qat_callback import QATCallback
 from autoware_ml.utils.deploy import validate_cuda_available
 from autoware_ml.builders.database_builder import build_datamodule
 from autoware_ml.builders.mlflow_builder import build_mlflow_run_context
@@ -65,6 +71,7 @@ from autoware_ml.utils.mlflow_helpers import (
     write_run_config_artifacts,
     write_run_metadata,
 )
+from autoware_ml.scripts.train import fit_model
 from autoware_ml.utils.runtime import (
     configure_torch_runtime,
     get_config_path,
@@ -163,6 +170,98 @@ def run_ptq(
     )
 
 
+def apply_qat_trainer_overrides(cfg: DictConfig, quantization_config: QuantizationConfig) -> None:
+    """Turn the training config into the QAT fine-tune schedule, in place.
+
+    ``quantization.qat`` sets the epochs, lr, lr schedule and ``val_check_interval``. Fixed
+    on purpose: ``devices=1`` and ``precision="32-true"`` (what ``QATCallback`` requires),
+    ``num_sanity_val_steps=0`` (sanity validation would run on quantizers not calibrated
+    yet) and ``check_val_every_n_epoch=1`` (validating every N epochs could produce no
+    ``best.ckpt`` in a few QAT epochs). ``DynamicValidation`` is dropped for the same
+    reason: it restores the training cadence at every epoch start and refuses a fractional
+    ``val_check_interval``.
+
+    Must run before anything is instantiated from ``cfg``: Hydra binds the optimizer and
+    scheduler when the model is built, so a later override would leave QAT on the training
+    lr and schedule.
+    """
+    qat = quantization_config.qat
+    if qat is None:
+        raise ValueError("quantization.mode='qat' requires a quantization.qat block.")
+    with open_dict(cfg):
+        cfg.trainer.max_epochs = qat.epochs
+        cfg.trainer.devices = 1
+        cfg.trainer.precision = "32-true"
+        cfg.trainer.num_sanity_val_steps = 0
+        cfg.trainer.check_val_every_n_epoch = 1
+        cfg.trainer.val_check_interval = qat.val_check_interval
+        if "callbacks" in cfg and "dynamic_validation" in cfg.callbacks:
+            cfg.callbacks.dynamic_validation = None
+        # model.optimizer interpolates the top-level optimizer node; resolve it first, or the
+        # lr override would replace the interpolation with a bare {lr} and lose the target.
+        optimizer = OmegaConf.to_container(cfg.model.optimizer, resolve=True)
+        optimizer["lr"] = qat.lr
+        cfg.model.optimizer = optimizer
+        # The QAT schedule steps per iteration; the optimizer builder fills in total_steps to
+        # span all QAT epochs.
+        scheduler, scheduler_config = qat.schedule.build_lightning_scheduler(qat.lr)
+        cfg.model.scheduler = scheduler
+        cfg.model.scheduler_config = scheduler_config
+    logger.info(
+        "QAT config: epochs=%d, peak lr=%g (%s), freeze_unquantized=%s, val every %.2f epoch, "
+        "calibrate_samples=%d (single device, no sanity-val)",
+        qat.epochs,
+        qat.lr,
+        qat.schedule.describe(),
+        qat.freeze_unquantized,
+        qat.val_check_interval,
+        qat.calibrate_samples,
+    )
+
+
+def run_qat(
+    cfg: DictConfig,
+    model: L.LightningModule,
+    quantization_config: QuantizationConfig,
+    datamodule: L.LightningDataModule,
+    checkpoints_dir: Path,
+    run_context: MlflowRunContext | None,
+    config_name: str,
+) -> Path:
+    """Fine-tune the FP ``model`` with QAT and return the checkpoint to deploy.
+
+    ``cfg`` must already carry the QAT schedule (:func:`apply_qat_trainer_overrides`). The
+    trainer is the training stage's, with :class:`QATCallback` added.
+    """
+    model.train()
+    trainer = fit_model(
+        cfg,
+        model,
+        datamodule,
+        run_context,
+        config_name,
+        stage="quantize",
+        checkpoint_dir=checkpoints_dir,
+        extra_callbacks=[QATCallback(quantization_config)],
+    )
+
+    # Prefer best.ckpt (scored on the quantized model); last.ckpt is a valid fallback.
+    best_model_path = getattr(trainer.checkpoint_callback, "best_model_path", "") or ""
+    best_path = Path(best_model_path) if best_model_path else None
+    last_path = checkpoints_dir / "last.ckpt"
+    if best_path is not None and best_path.exists():
+        return best_path
+    if last_path.exists():
+        logger.warning(
+            "QAT produced no best checkpoint: validation never ran, or the checkpoint "
+            "callback tracks no monitored metric. Falling back to last.ckpt."
+        )
+        return last_path
+    raise FileNotFoundError(
+        f"QAT training produced no checkpoint under {checkpoints_dir} (expected best/last)."
+    )
+
+
 def log_placement_dry_run(
     model: L.LightningModule, quantization_config: QuantizationConfig
 ) -> None:
@@ -190,11 +289,6 @@ def _parse_quantization_config(cfg: DictConfig) -> QuantizationConfig:
     )
     if not quantization_config.enabled:
         raise ValueError("quantization.enabled must be true for quantize.")
-    if quantization_config.mode is not Mode.PTQ:
-        raise NotImplementedError(
-            f"quantization.mode={quantization_config.mode.value!r} is not available yet; this "
-            "entrypoint runs post-training quantization (mode: ptq)."
-        )
     return quantization_config
 
 
@@ -235,6 +329,9 @@ def run_quantize(cfg: DictConfig) -> None:
     # First, so that every rank after rank zero stays silent from the config dump onwards.
     restrict_console_logging_to_rank_zero()
     quantization_config = _parse_quantization_config(cfg)
+    if quantization_config.mode is Mode.QAT:
+        # Before the config is logged, recorded or instantiated.
+        apply_qat_trainer_overrides(cfg, quantization_config)
 
     log_configuration(cfg)
     config_name = HydraConfig.get().job.config_name
@@ -277,12 +374,12 @@ def run_quantize(cfg: DictConfig) -> None:
     )
 
     if run_context is None:
-        _quantize(cfg, quantization_config, weight_paths, run_context=None)
+        _quantize(cfg, quantization_config, weight_paths, config_name, run_context=None)
         return
 
     try:
         record_quantize_run(cfg, run_context, config_name, checkpoint_path=checkpoint_path)
-        _quantize(cfg, quantization_config, weight_paths, run_context=run_context)
+        _quantize(cfg, quantization_config, weight_paths, config_name, run_context=run_context)
     except Exception:
         MlflowClient(tracking_uri=run_context.tracking_uri).set_terminated(
             run_context.run_id, status=RunStatus.to_string(RunStatus.FAILED)
@@ -297,16 +394,19 @@ def _quantize(
     cfg: DictConfig,
     quantization_config: QuantizationConfig,
     weight_paths: list[Path],
+    config_name: str,
     run_context: MlflowRunContext | None,
 ) -> None:
-    """Build the data module and the FP model, then calibrate and write the checkpoint.
+    """Build the data module and the FP model, then quantize it (PTQ or QAT).
 
     Args:
         cfg: Hydra configuration.
         quantization_config: The parsed ``quantization`` section.
         weight_paths: FP checkpoints the model is built from.
-        run_context: The quantize run, whose ``checkpoints`` directory receives
-            ``ptq.ckpt``. Without one it lands in ``experiment_run_dir`` of the config.
+        config_name: User-facing config name, for the QAT trainer logger.
+        run_context: The quantize run, whose ``checkpoints`` directory receives the
+            quantized checkpoint. Without one it lands in ``experiment_run_dir`` of the
+            config.
     """
     validate_cuda_available()
     configure_torch_runtime()
@@ -337,7 +437,12 @@ def _quantize(
         enforce_full_coverage=True,
         allow_quantized_weights=False,
     )
-    result_path = run_ptq(model, quantization_config, datamodule, checkpoints_dir)
+    if quantization_config.mode is Mode.PTQ:
+        result_path = run_ptq(model, quantization_config, datamodule, checkpoints_dir)
+    else:
+        result_path = run_qat(
+            cfg, model, quantization_config, datamodule, checkpoints_dir, run_context, config_name
+        )
     logger.info("Quantization complete. Deploy with: autoware-ml deploy --weights %s", result_path)
 
 
