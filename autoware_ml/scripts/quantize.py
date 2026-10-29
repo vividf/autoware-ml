@@ -57,7 +57,6 @@ from autoware_ml.quantization.plan import prepare_quantized_tree
 from autoware_ml.quantization.qat_callback import QATCallback
 from autoware_ml.utils.deploy import validate_cuda_available
 from autoware_ml.builders.database_builder import build_datamodule
-from autoware_ml.builders.logger_builder import build_trainer_logger
 from autoware_ml.builders.mlflow_builder import build_mlflow_run_context
 from autoware_ml.builders.model_builder import (
     build_data_preprocessor,
@@ -72,13 +71,11 @@ from autoware_ml.utils.mlflow_helpers import (
     write_run_config_artifacts,
     write_run_metadata,
 )
+from autoware_ml.scripts.train import fit_model
 from autoware_ml.utils.runtime import (
     configure_torch_runtime,
     get_config_path,
-    instantiate_callbacks,
-    instantiate_trainer,
     log_configuration,
-    log_hyperparameters,
     restrict_console_logging_to_rank_zero,
     set_seed,
 )
@@ -234,27 +231,19 @@ def run_qat(
     """Fine-tune the FP ``model`` with QAT and return the checkpoint to deploy.
 
     ``cfg`` must already carry the QAT schedule (:func:`apply_qat_trainer_overrides`). The
-    trainer is assembled like in ``train``, with :class:`QATCallback` added.
+    trainer is the training stage's, with :class:`QATCallback` added.
     """
-    logger_enabled = run_context is not None
-    callbacks = instantiate_callbacks(
-        cfg, logger_enabled=logger_enabled, checkpoint_dir=checkpoints_dir
-    )
-    callbacks.append(QATCallback(quantization_config))
-    trainer_logger = build_trainer_logger(
-        cfg,
-        ml_flow_run_context=run_context,
-        stage="quantize",
-        config_name=config_name,
-        logger_enabled=logger_enabled,
-    )
-    trainer_root_dir = (
-        run_context.artifact_dir if run_context is not None else cfg.experiment_run_dir
-    )
-    trainer: L.Trainer = instantiate_trainer(cfg, callbacks, trainer_logger, trainer_root_dir)
-    log_hyperparameters(cfg, trainer_logger)
     model.train()
-    trainer.fit(model, datamodule=datamodule)
+    trainer = fit_model(
+        cfg,
+        model,
+        datamodule,
+        run_context,
+        config_name,
+        stage="quantize",
+        checkpoint_dir=checkpoints_dir,
+        extra_callbacks=[QATCallback(quantization_config)],
+    )
 
     # Prefer best.ckpt (scored on the quantized model); last.ckpt is a valid fallback.
     best_model_path = getattr(trainer.checkpoint_callback, "best_model_path", "") or ""
@@ -264,8 +253,8 @@ def run_qat(
         return best_path
     if last_path.exists():
         logger.warning(
-            "QAT produced no best checkpoint — validation never ran (or the checkpoint "
-            "callback tracks no monitored metric). Falling back to last.ckpt."
+            "QAT produced no best checkpoint: validation never ran, or the checkpoint "
+            "callback tracks no monitored metric. Falling back to last.ckpt."
         )
         return last_path
     raise FileNotFoundError(
@@ -340,7 +329,7 @@ def run_quantize(cfg: DictConfig) -> None:
     # First, so that every rank after rank zero stays silent from the config dump onwards.
     restrict_console_logging_to_rank_zero()
     quantization_config = _parse_quantization_config(cfg)
-    if quantization_config.mode == "qat":
+    if quantization_config.mode is Mode.QAT:
         # Before the config is logged, recorded or instantiated.
         apply_qat_trainer_overrides(cfg, quantization_config)
 
@@ -448,7 +437,7 @@ def _quantize(
         enforce_full_coverage=True,
         allow_quantized_weights=False,
     )
-    if quantization_config.mode == "ptq":
+    if quantization_config.mode is Mode.PTQ:
         result_path = run_ptq(model, quantization_config, datamodule, checkpoints_dir)
     else:
         result_path = run_qat(
