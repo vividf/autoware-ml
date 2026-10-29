@@ -28,18 +28,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from copy import deepcopy
-from itertools import pairwise
 
 from jaxtyping import Float32
 import torch
 import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential, SubMConv3d, SparseConv3d
 from spconv.pytorch.conv import SparseConvolution
-from spconv.pytorch.quantization.utils import fuse_spconv_bn_eval
 from spconv.pytorch.modules import SparseModule
 
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
+from autoware_ml.utils.bn_fusion import fuse_model_bn
 
 logger = logging.getLogger(__name__)
 
@@ -105,35 +104,29 @@ def _convert_sparse_convolution(module: nn.Module, do_sort: bool) -> nn.Module:
 
 
 def fold_sparse_encoder_bn(encoder: nn.Module) -> int:
-    """Fold every adjacent (sparse convolution, BatchNorm1d) pair of an export copy in place.
+    """Fold every (sparse convolution, BatchNorm1d) pair of an export copy in place.
 
     TensorRT fuses the BatchNorm of a dense graph itself but cannot fuse one into a plugin
     node, so the plugin graph has to carry folded weights. Call it on an eval-mode copy
     before :meth:`SparseEncoder.prepare_for_export`, which then builds the wrappers with the
-    bias the fold introduces.
+    bias the fold introduces. The pairs come from :func:`fuse_model_bn`, which quantization
+    folds the same way.
 
     Returns:
         Number of folded pairs.
 
     Raises:
-        RuntimeError: If a BatchNorm1d is left, i.e. a norm that does not directly follow
-            its convolution in the same container.
+        RuntimeError: If a BatchNorm1d is left: a norm the module structure does not pair
+            with a convolution (see ``bn_fusion_pairs``).
     """
-    fused = 0
-    for parent in list(encoder.modules()):
-        children = list(parent.named_children())
-        for (left_name, left), (right_name, right) in pairwise(children):
-            if isinstance(left, SparseConvolution) and isinstance(right, nn.BatchNorm1d):
-                parent.add_module(left_name, fuse_spconv_bn_eval(left, right))
-                parent.add_module(right_name, nn.Identity())
-                fused += 1
+    fused = len(fuse_model_bn(encoder))
     remaining = [name for name, m in encoder.named_modules() if isinstance(m, nn.BatchNorm1d)]
     if remaining:
         raise RuntimeError(
             f"{len(remaining)} BatchNorm1d layer(s) survived the export fold "
             f"({fused} pair(s) folded): {remaining[:5]}. The deployed sparse graph must "
-            "carry no BatchNormalization node — a convolution and its norm must be "
-            "adjacent children of the same module for the fold to pair them."
+            "carry no BatchNormalization node; a convolution and its norm must be adjacent "
+            "children of an in-order container or declared in bn_fusion_pairs."
         )
     logger.info("Folded %d sparse Conv-BN pair(s) into the export copy.", fused)
     return fused

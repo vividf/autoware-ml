@@ -38,6 +38,18 @@ def qualified(op_type: str) -> str:
 IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS = 5
 IMPLICIT_GEMM_BIAS_SLOT = 5
 
+#: ``ImplicitGemm`` attributes the ONNX passes write; the symbolics emit them by name.
+ACT_TYPE_ATTR = "act_type"
+PRECISION_ATTR = "precision"
+INPUT_SCALE_ATTR = "input_scale"
+OUTPUT_SCALE_ATTR = "output_scale"
+#: ``GetIndicePairsImplicitGemm`` attribute: whether the pair masks are argsorted.
+DO_SORT_ATTR = "do_sort"
+
 #: ``ImplicitGemm.act_type`` values; the plugin mirrors cumm's ``tv::gemm::Activation``.
 ACT_NONE = 0
 ACT_RELU = 1
+
+#: ``ImplicitGemm.precision`` values (``ImplicitGemmParameters::precision``).
+PRECISION_FP = 0
+PRECISION_INT8 = 1

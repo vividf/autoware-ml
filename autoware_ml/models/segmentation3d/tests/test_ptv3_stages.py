@@ -50,7 +50,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.types.backend import Backend
-from autoware_ml.utils.deploy import export_to_onnx
+from autoware_ml.utils.deploy import apply_onnx_transforms, export_to_onnx
 
 REQUIRES_SPARSE_CUDA = pytest.mark.skipif(
     not (IS_SPCONV_AVAILABLE and torch.cuda.is_available()),
@@ -106,6 +106,7 @@ def test_derived_specs_export_onnx_with_the_declared_io_contract(tmp_path: Path)
     for name, spec in model.build_export_specs(batch).items():
         path = tmp_path / f"{name}.onnx"
         export_to_onnx(spec, onnx_cfg, path)
+        path = apply_onnx_transforms(path, spec.onnx_transforms)
         graph = onnx.load(path).graph
         assert [tensor.name for tensor in graph.input] == list(stages[name].inputs)
         assert [tensor.name for tensor in graph.output] == list(stages[name].outputs)
@@ -113,6 +114,10 @@ def test_derived_specs_export_onnx_with_the_declared_io_contract(tmp_path: Path)
             axes = stages[name].onnx_dynamic_axes.get(tensor.name, {})
             dims = tensor.type.tensor_type.shape.dim
             assert {i: dims[i].dim_param for i in axes} == dict(axes), tensor.name
+        # The cpe convolutions have a bias; the stage transform folds it into the plugin node.
+        gemm_nodes = [node for node in graph.node if node.op_type == "ImplicitGemm"]
+        assert gemm_nodes, name
+        assert all(len(node.input) == 6 for node in gemm_nodes), name
 
 
 @REQUIRES_SPARSE_CUDA
