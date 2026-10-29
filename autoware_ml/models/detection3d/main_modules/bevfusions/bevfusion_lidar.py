@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from jaxtyping import Float32, Int32
 import torch
@@ -79,6 +80,7 @@ class BEVFusionLidar(nn.Module):
         batch_size: int,
         other_bev_features: Sequence[Float32[torch.Tensor, "batch_size num_channels height width"]]
         | None,
+        precomputed_rulebooks: Mapping[str, Any] | None = None,
     ) -> Float32[torch.Tensor, "batch_size channels height width"]:
         """Encode lidar voxels into a BEV feature map.
 
@@ -89,6 +91,8 @@ class BEVFusionLidar(nn.Module):
                 encoder consumes them.
             batch_size: Explicit batch size.
             other_bev_features: Optional bev features from other modalities.
+            precomputed_rulebooks: Middle-encoder rulebooks precomputed for deployment, by
+                indice key.
 
         Returns:
             BEV feature maps from lidar if fusion is disable, otherwise, BEV feature maps fused
@@ -102,8 +106,17 @@ class BEVFusionLidar(nn.Module):
             num_points=num_points,
             coords=coords,
         )
+        # Only the sparse encoder accepts precomputed_rulebooks.
+        middle_encoder_kwargs = (
+            {}
+            if precomputed_rulebooks is None
+            else {"precomputed_rulebooks": precomputed_rulebooks}
+        )
         bev_features = self.pts_middle_encoder(
-            voxel_features=voxel_features, coords=coords, batch_size=batch_size
+            voxel_features=voxel_features,
+            coords=coords,
+            batch_size=batch_size,
+            **middle_encoder_kwargs,
         )
 
         if other_bev_features is not None:
