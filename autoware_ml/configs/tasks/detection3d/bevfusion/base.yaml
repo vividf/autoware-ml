@@ -67,6 +67,16 @@ deploy:
           indices: { 0: num_kept }
   tensorrt:
     enabled: false
+  # No verification: the graph keeps the top num_proposals queries and the zero-padded
+  # heatmap borders produce many ties, so backends pick different near-zero-score proposals
+  # and the raw outputs do not line up by position (measured: high-score proposals agree to
+  # 0.038, the positional bbox_pred diff is 159). It would fail on the first batch; compare
+  # the backends by evaluation mAP instead.
+  evaluation:
+    backends:
+      # Plugin ops have no ONNX Runtime implementation, so this column would repeat PyTorch's.
+      onnx: { enabled: false }
+
 
 model:
   _target_: autoware_ml.models.detection3d.main_modules.bevfusion.BEVFusionDetection3DModel
