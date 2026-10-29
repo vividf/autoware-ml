@@ -20,10 +20,7 @@ import pytest
 from torch import nn
 
 from autoware_ml.quantization.config import QuantizationConfig
-from autoware_ml.quantization.plan import (
-    PlacementRecord,
-    QuantizationPlan,
-)
+from autoware_ml.quantization.plan import PlacementRecord, prepare_quantized_tree
 from autoware_ml.quantization.rules import QuantRules
 
 
@@ -57,25 +54,24 @@ class TestQuantRules:
         assert loaded.decisions == record.decisions
 
 
-class TestRecordDiff:
-    def test_identical_records_have_empty_diff(self):
+class TestVerifyMatches:
+    def test_identical_records_match(self):
         entry = ("a.conv", "replace_module", "submodule rule: a", "Conv2d -> QuantConv2d")
-        only_self, only_other = _record(entry).diff(_record(entry))
-        assert only_self == [] and only_other == []
+        _record(entry).verify_matches(_record(entry), source="test")
 
     def test_order_is_irrelevant(self):
         one = ("a.conv", "replace_module", "r", "d")
         two = ("b.conv", "replace_module", "r", "d")
-        only_self, only_other = _record(one, two).diff(_record(two, one))
-        assert only_self == [] and only_other == []
+        _record(one, two).verify_matches(_record(two, one), source="test")
 
     def test_drift_is_reported_on_both_sides(self):
         base = ("a.conv", "replace_module", "r", "d")
-        only_self, only_other = _record(base, ("extra.conv", "replace_module", "r", "d")).diff(
-            _record(base, ("other.conv", "wrap_module", "r", "d"))
-        )
-        assert [d.module for d in only_self] == ["extra.conv"]
-        assert [d.module for d in only_other] == ["other.conv"]
+        rebuilt = _record(base, ("extra.conv", "replace_module", "r", "d"))
+        saved = _record(base, ("other.conv", "wrap_module", "r", "d"))
+        with pytest.raises(
+            RuntimeError, match=r"(?s)rebuilt only: extra.conv.*saved only: other.conv"
+        ):
+            rebuilt.verify_matches(saved, source="test")
 
 
 class TestVerifyMatchesIsStructural:
@@ -113,11 +109,9 @@ class TestPrepareRecordsDecisions:
         config = QuantizationConfig.from_dict(
             {"enabled": True, "mode": "ptq", "ptq": {"calibrate_samples": 4}}
         )
-        plan = QuantizationPlan(
-            rules=QuantRules(quantize_submodules={"absent_submodule": ("conv",)}), config=config
-        )
+        rules = QuantRules(quantize_submodules={"absent_submodule": ("conv",)})
         with pytest.raises(ValueError, match="absent_submodule"):
-            plan.prepare(self._model())
+            prepare_quantized_tree(self._model(), config, rules=rules)
 
     def test_fuse_and_skip_quantize_decisions_recorded(self):
         config = QuantizationConfig.from_dict(
@@ -128,21 +122,31 @@ class TestPrepareRecordsDecisions:
                 "ptq": {"calibrate_samples": 4},
             }
         )
-        plan = QuantizationPlan(
-            rules=QuantRules(quantize_submodules={"some_tower": ("conv",)}), config=config
-        )
         model = self._model()
-        plan.prepare(model)
+        prepared = prepare_quantized_tree(
+            model, config, rules=QuantRules(quantize_submodules={"some_tower": ("conv",)})
+        )
 
-        transforms = {d.transform for d in plan.placement_record.decisions}
-        assert transforms == {"fuse_bn", "skip_quantize"}
-        fuse = [d for d in plan.placement_record.decisions if d.transform == "fuse_bn"]
+        decisions = prepared.placement_record.decisions
+        assert {d.transform for d in decisions} == {"fuse_bn", "skip_quantize"}
+        fuse = [d for d in decisions if d.transform == "fuse_bn"]
         assert fuse[0].module == "some_tower.0"
         assert "some_tower.1" in fuse[0].detail
         assert isinstance(model.some_tower[1], nn.Identity)
-        kept = [d for d in plan.placement_record.decisions if d.transform == "skip_quantize"]
+        kept = [d for d in decisions if d.transform == "skip_quantize"]
         assert kept[0].module == "some_tower"
         assert "skip_quantize pattern" in kept[0].reason
+        assert prepared.skip_names == {"some_tower", "some_tower.0", "some_tower.1", "some_tower.2"}
+
+    def test_a_model_without_rules_cannot_be_quantized(self):
+        config = QuantizationConfig.from_dict({"enabled": True, "ptq": {"calibrate_samples": 4}})
+
+        class _Model(nn.Module):
+            def build_quantization_rules(self):
+                return None
+
+        with pytest.raises(NotImplementedError, match="declares no quantization rules"):
+            prepare_quantized_tree(_Model(), config)
 
     def test_dry_run_config_key_parses(self):
         config = QuantizationConfig.from_dict(

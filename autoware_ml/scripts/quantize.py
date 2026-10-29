@@ -40,18 +40,15 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
-from autoware_ml.quantization import (
-    Calibrator,
-    QuantizationDescription,
+from autoware_ml.quantization.checkpoint import QuantizationDescription, save_quantized_checkpoint
+from autoware_ml.quantization.config import Mode, QuantizationConfig
+from autoware_ml.quantization.core.calibration import Calibrator, default_calib_forward
+from autoware_ml.quantization.core.quantizer_state import (
     disable_quantizers_in,
-    expand_skip_quantize,
     print_quantizer_status,
-    save_quantized_checkpoint,
     validate_quantizer_amax,
 )
-from autoware_ml.quantization.config import QuantizationConfig
-from autoware_ml.quantization.plan import QuantizationPlan
-from autoware_ml.quantization.core.calibration import default_calib_forward
+from autoware_ml.quantization.plan import prepare_quantized_tree
 from autoware_ml.utils.deploy import validate_cuda_available
 from autoware_ml.builders.database_builder import build_datamodule
 from autoware_ml.builders.mlflow_builder import build_mlflow_run_context
@@ -129,12 +126,7 @@ def run_ptq(
     if ptq is None:
         raise ValueError("quantization.mode='ptq' requires a quantization.ptq block.")
 
-    plan = QuantizationPlan.for_model(model, quantization_config)
-    plan.prepare(model)
-    model.eval()
-    # After prepare, like the loader: prepare adds the quantizer submodules, so a glob can
-    # match differently before and after.
-    skip_layers = expand_skip_quantize(model, quantization_config.skip_quantize)
+    prepared = prepare_quantized_tree(model, quantization_config)
 
     calibrate_batches = math.ceil(ptq.calibrate_samples / ptq.batch_size)
     dataloader = build_calibration_dataloader(
@@ -156,7 +148,7 @@ def run_ptq(
         forward_fn=default_calib_forward,
     )
 
-    disable_quantizers_in(model, skip_layers)
+    disable_quantizers_in(model, prepared.skip_names)
     # Runs after the skipped quantizers are disabled, which it ignores; a failed calibration
     # must fail here and not at deploy.
     validate_quantizer_amax(model)
@@ -165,7 +157,9 @@ def run_ptq(
     return save_quantized_checkpoint(
         model,
         checkpoints_dir / "ptq.ckpt",
-        QuantizationDescription(config=quantization_config, placement_record=plan.placement_record),
+        QuantizationDescription(
+            config=quantization_config, placement_record=prepared.placement_record
+        ),
     )
 
 
@@ -173,9 +167,7 @@ def log_placement_dry_run(
     model: L.LightningModule, quantization_config: QuantizationConfig
 ) -> None:
     """Prepare the quantized tree on the (weightless, CPU) model and log the placement table."""
-    plan = QuantizationPlan.for_model(model, quantization_config)
-    plan.prepare(model)
-    plan.placement_record.log_table()
+    prepare_quantized_tree(model, quantization_config).placement_record.log_table()
     logger.info("quantization.dry_run=true — exiting before calibration.")
 
 
@@ -198,9 +190,9 @@ def _parse_quantization_config(cfg: DictConfig) -> QuantizationConfig:
     )
     if not quantization_config.enabled:
         raise ValueError("quantization.enabled must be true for quantize.")
-    if quantization_config.mode != "ptq":
+    if quantization_config.mode is not Mode.PTQ:
         raise NotImplementedError(
-            f"quantization.mode={quantization_config.mode!r} is not available yet; this "
+            f"quantization.mode={quantization_config.mode.value!r} is not available yet; this "
             "entrypoint runs post-training quantization (mode: ptq)."
         )
     return quantization_config
@@ -277,7 +269,7 @@ def run_quantize(cfg: DictConfig) -> None:
         extra_tags=MappingProxyType(
             {
                 "checkpoint_path": str(checkpoint_path),
-                "quantization_mode": quantization_config.mode,
+                "quantization_mode": quantization_config.mode.value,
                 "source_run_id": parent_run_id or "",
                 "source_checkpoint_count": str(len(source_checkpoints)),
             }

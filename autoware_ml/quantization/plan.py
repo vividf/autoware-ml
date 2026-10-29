@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantization plans: build a model's quantized tree and record every placement decision.
+
+"""Build a model's quantized tree and record every placement decision.
 
 The record covers only what shapes the tree: disabling the quantizers of the ``skip_quantize``
 subtrees after loading changes no ``state_dict`` key and is not recorded.
@@ -24,7 +25,9 @@ import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from torch import nn
 
 from autoware_ml.quantization.config import Precision, QuantizationConfig
 from autoware_ml.quantization.core.replace import (
@@ -34,6 +37,9 @@ from autoware_ml.quantization.core.replace import (
 )
 from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.bn_fusion import fuse_model_bn
+
+if TYPE_CHECKING:
+    from autoware_ml.models.module_base_model import ModuleBaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -56,21 +62,9 @@ class PlacementDecision:
     reason: str
     detail: str = ""
 
-    @property
-    def structure(self) -> tuple[str, str]:
-        """``(module, transform)``: the part of the decision that shapes the module tree.
-
-        Loading compares only this, so rewording a ``reason``, or modelopt renaming a
-        quantized class that lands in ``detail``, does not invalidate existing checkpoints.
-        """
-        return (self.module, self.transform)
-
 
 class PlacementRecord:
-    """The decisions of one :meth:`QuantizationPlan.prepare`, in the order they were made.
-
-    Comparisons ignore that order: it does not change the resulting tree.
-    """
+    """The decisions of one :func:`prepare_quantized_tree`, in the order they were made."""
 
     def __init__(self, decisions: Sequence[PlacementDecision] = ()) -> None:
         self.decisions: list[PlacementDecision] = list(decisions)
@@ -93,35 +87,21 @@ class PlacementRecord:
         """Deserialize from :meth:`to_json_dict` output."""
         return cls([PlacementDecision(**entry) for entry in data.get("decisions", [])])
 
-    def diff(
-        self, other: PlacementRecord, *, structural_only: bool = False
-    ) -> tuple[list[PlacementDecision], list[PlacementDecision]]:
-        """Return ``(only_in_self, only_in_other)``, comparing the decisions as multisets.
-
-        ``structural_only`` compares :attr:`PlacementDecision.structure` alone, as loading does.
-        """
-        key = (lambda d: d.structure) if structural_only else (lambda d: d)
-        mine = Counter(key(decision) for decision in self.decisions)
-        theirs = Counter(key(decision) for decision in other.decisions)
-        by_key: dict[Any, list[PlacementDecision]] = {}
-        for decision in [*self.decisions, *other.decisions]:
-            by_key.setdefault(key(decision), []).append(decision)
-
-        def expand(counter: Counter) -> list[PlacementDecision]:
-            return sorted(
-                (by_key[k][0] for k in counter.elements()),
-                key=lambda d: (d.module, d.transform),
-            )
-
-        return expand(mine - theirs), expand(theirs - mine)
-
     def verify_matches(self, produced: PlacementRecord, source: str) -> None:
-        """Raise unless this record, of a rebuilt tree, matches ``produced`` structurally."""
-        only_rebuilt, only_produced = self.diff(produced, structural_only=True)
+        """Raise unless this record, of a rebuilt tree, matches ``produced`` structurally.
+
+        Only ``(module, transform)`` is compared, in any order: a reworded ``reason``, or a
+        modelopt release that renamed a quantized class in ``detail``, does not invalidate a
+        checkpoint. A decision made twice is a difference.
+        """
+        mine = Counter((d.module, d.transform) for d in self.decisions)
+        theirs = Counter((d.module, d.transform) for d in produced.decisions)
+        only_rebuilt = sorted((mine - theirs).elements())
+        only_produced = sorted((theirs - mine).elements())
         if only_rebuilt or only_produced:
             preview = "\n  ".join(
-                [f"rebuilt only: {d}" for d in only_rebuilt[:5]]
-                + [f"saved only: {d}" for d in only_produced[:5]]
+                [f"rebuilt only: {module} ({transform})" for module, transform in only_rebuilt[:5]]
+                + [f"saved only: {module} ({transform})" for module, transform in only_produced[:5]]
             )
             raise RuntimeError(
                 f"Quantized tree drift: the rebuilt tree does not match the placement record from "
@@ -152,105 +132,116 @@ class PlacementRecord:
             logger.info("    %-52s %-16s %s", decision.module, decision.transform, note)
 
 
-class QuantizationPlan:
-    """A model's :class:`QuantRules` bound to a parsed ``quantization`` config.
+@dataclass(frozen=True)
+class PreparedTree:
+    """What :func:`prepare_quantized_tree` did to the model.
 
-    The quantize stage and the loader build the quantized tree through the same
-    :meth:`prepare`, so the calibrated ``state_dict`` keys match on load; the placement record
-    lets the loader check that.
+    Attributes:
+        placement_record: Every decision, for the checkpoint and for the loader's check.
+        skip_names: The ``skip_quantize`` modules with their descendants, named on the
+            prepared tree: the quantizers under them are disabled after calibration.
     """
 
-    def __init__(self, rules: QuantRules, config: QuantizationConfig) -> None:
-        self.rules = rules
-        self.config = config
-        #: Placement record of the last :meth:`prepare` call (``None`` until then).
-        self.placement_record: PlacementRecord | None = None
+    placement_record: PlacementRecord
+    skip_names: frozenset[str]
 
-    @classmethod
-    def for_model(cls, model: Any, config: QuantizationConfig) -> QuantizationPlan:
-        """Bind ``model.build_quantization_rules()`` to ``config``."""
+
+def prepare_quantized_tree(
+    model: ModuleBaseModel | nn.Module,
+    config: QuantizationConfig,
+    rules: QuantRules | None = None,
+) -> PreparedTree:
+    """Fuse BN and insert the quantizers in place, recording every decision.
+
+    The quantize stage, QAT and the loader build the tree through this one function, so the
+    calibrated ``state_dict`` keys match on load; the placement record lets the loader check
+    that. TensorRT folds BN into the convolution, so a weight quantizer must calibrate on the
+    folded weight: the fold is an inference identity and covers the whole model,
+    ``skip_quantize`` subtrees included. The calibration method changes no key: a checkpoint
+    loads into a tree prepared for another method.
+
+    Args:
+        model: The model to prepare, in place.
+        config: The ``quantization`` section.
+        rules: The model's declaration; ``model.build_quantization_rules()`` by default.
+
+    Raises:
+        NotImplementedError: When the model declares no quantization rules.
+        ValueError: When the rules name a submodule the model does not have, or a
+            ``skip_quantize`` pattern matches nothing.
+    """
+    if rules is None:
         rules = model.build_quantization_rules()
         if rules is None:
             raise NotImplementedError(
                 f"{type(model).__name__} declares no quantization rules "
                 "(build_quantization_rules returned None), so it cannot be quantized."
             )
-        return cls(rules=rules, config=config)
+    record = PlacementRecord()
+    model.eval()
+    for conv_name, bn_name in fuse_model_bn(model):
+        record.add(
+            conv_name,
+            "fuse_bn",
+            reason="Conv+BN pair (sequential container or declared bn_fusion_pairs)",
+            detail=f"folds {bn_name}; BN becomes Identity",
+        )
+    for pattern, root_name in match_skip_quantize_roots(model, config.skip_quantize):
+        record.add(
+            root_name,
+            "skip_quantize",
+            reason=f"skip_quantize pattern {pattern!r}",
+            detail="module and all descendants stay un-quantized",
+        )
+    skip_names = expand_skip_quantize(model, config.skip_quantize, log=False)
+    _replace_modules(model, rules, config, skip_names, record)
+    # Named on the prepared tree: the replacement adds the quantizer submodules, so a glob
+    # can match differently before and after.
+    skip_names = expand_skip_quantize(model, config.skip_quantize, log=False)
+    record.log_summary()
+    return PreparedTree(placement_record=record, skip_names=frozenset(skip_names))
 
-    def prepare(self, model: Any) -> Any:
-        """Fuse BN and insert Q/DQ in place, recording every decision; return ``model``.
 
-        TensorRT folds BN into the convolution, so a weight quantizer must calibrate on the
-        folded weight. The fold is an inference identity and covers the whole model,
-        ``skip_quantize`` subtrees included; it changes ``state_dict`` keys, so the quantize
-        stage and the loader must fold the same set. The calibration method changes no key: a
-        checkpoint loads into a tree prepared for another method.
-        """
-        record = PlacementRecord()
-        self._fuse_bn(model, record)
-        skip_names = self._resolve_skip_quantize(model, record)
-        self._replace_modules(model, skip_names, record)
-        self.placement_record = record
-        record.log_summary()
-        return model
+def _replace_modules(
+    model: nn.Module,
+    rules: QuantRules,
+    config: QuantizationConfig,
+    skip_names: set[str],
+    record: PlacementRecord,
+) -> None:
+    calibrator = config.calibration.activation_calibrator
+    for submodule_name in rules.quantize_submodules:
+        try:
+            submodule = model.get_submodule(submodule_name)
+        except AttributeError as error:
+            raise ValueError(
+                f"{type(model).__name__} declares the quantizable submodule "
+                f"'{submodule_name}' in its QuantRules, but the model has no such "
+                "submodule. The rules name dotted paths of the module tree."
+            ) from error
+        by_precision: dict[Precision, list[str]] = {}
+        for kind, precision in rules.resolved_kinds(
+            submodule_name, config.default_precision
+        ).items():
+            by_precision.setdefault(precision, []).append(kind)
+        for precision, kinds in by_precision.items():
+            reason = f"submodule rule: {submodule_name} ({', '.join(kinds)})"
+            suffix = "" if precision is config.default_precision else f" @{precision.value}"
 
-    @staticmethod
-    def _fuse_bn(model: Any, record: PlacementRecord) -> None:
-        model.eval()
-        for conv_name, bn_name in fuse_model_bn(model):
-            record.add(
-                conv_name,
-                "fuse_bn",
-                reason="Conv+BN pair (sequential container or declared bn_fusion_pairs)",
-                detail=f"folds {bn_name}; BN becomes Identity",
-            )
-
-    def _resolve_skip_quantize(self, model: Any, record: PlacementRecord) -> set[str]:
-        """Record the matched skip roots and return the skip set with their subtrees."""
-        for pattern, root_name in match_skip_quantize_roots(model, self.config.skip_quantize):
-            record.add(
-                root_name,
-                "skip_quantize",
-                reason=f"skip_quantize pattern {pattern!r}",
-                detail="module and all descendants stay un-quantized",
-            )
-        return expand_skip_quantize(model, self.config.skip_quantize, log=False)
-
-    def _replace_modules(self, model: Any, skip_names: set[str], record: PlacementRecord) -> None:
-        default_precision = self.config.default_precision
-        calibrator = self.config.calibration.activation_calibrator
-        for submodule_name in self.rules.quantize_submodules:
-            try:
-                submodule = model.get_submodule(submodule_name)
-            except AttributeError as error:
-                raise ValueError(
-                    f"{type(model).__name__} declares the quantizable submodule "
-                    f"'{submodule_name}' in its QuantRules, but the model has no such "
-                    "submodule. The rules name dotted paths of the module tree."
-                ) from error
-            by_precision: dict[Precision, list[str]] = {}
-            for kind, precision in self.rules.resolved_kinds(
-                submodule_name, default_precision
-            ).items():
-                by_precision.setdefault(precision, []).append(kind)
-            for precision, kinds in by_precision.items():
-                reason = f"submodule rule: {submodule_name} ({', '.join(kinds)})"
-                suffix = "" if precision is default_precision else f" @{precision.value}"
-
-                def on_replace(name: str, original: str, new: Any, reason=reason, suffix=suffix):
-                    record.add(
-                        name,
-                        "replace_module",
-                        reason=reason,
-                        detail=f"{original} -> {type(new).__name__}{suffix}",
-                    )
-
-                replace_quantizable_modules(
-                    submodule,
-                    kinds=tuple(kinds),
-                    skip_names=skip_names,
-                    prefix=submodule_name,
-                    on_replace=on_replace,
-                    precision=precision,
-                    calibrator=calibrator,
+            def on_replace(name: str, original: str, new: nn.Module, reason=reason, suffix=suffix):
+                record.add(
+                    name,
+                    "replace_module",
+                    reason=reason,
+                    detail=f"{original} -> {type(new).__name__}{suffix}",
                 )
+
+            replace_quantizable_modules(
+                submodule,
+                kinds=tuple(kinds),
+                skip_names=skip_names,
+                prefix=submodule_name,
+                on_replace=on_replace,
+                precision=precision,
+                calibrator=calibrator,
+            )
