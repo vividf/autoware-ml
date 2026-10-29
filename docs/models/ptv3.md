@@ -95,8 +95,10 @@ PointTransformerV3 exports to ONNX; the sparse (cpe) convolutions become
 `autoware::ImplicitGemm` plugin nodes, so TensorRT builds the engines once
 `deploy.tensorrt.plugin_libraries` points at the plugin the image ships
 ([Deployment › Plugin graphs](../user-guide/deployment.md#plugin-graphs-sparse-convolutions)).
-The segmentation j6gen2 config carries the optimization profiles for the two graphs; the
-other configs (nuScenes, detection) leave TensorRT off until theirs are measured.
+The segmentation j6gen2 config carries the optimization profiles for the two graphs, built
+from the ECU node's voxel counts with the node's own per-level rule so the engine evaluated
+here is the engine shipped; the other configs (nuScenes, detection) leave TensorRT off until
+theirs are set.
 
 ```bash
 autoware-ml deploy \

@@ -109,9 +109,12 @@ The LiDAR-only model declares its deployment as a stage graph (`BEVFusionDetecti
 autoware-ml deploy \
     --config-name detection3d/bevfusion/t4dataset/bevfusion_lidar/lidar_voxel0170_second_secfpn_b16_50e_t4dataset_120m_j6gen2_base \
     --weights <best.ckpt> \
-    deploy.onnx.precision=fp16 deploy.tensorrt.enabled=true \
-    deploy.evaluation.enabled=true deploy.evaluation.num_samples=100
+    deploy.onnx.precision=fp16 deploy.tensorrt.enabled=true
 ```
+
+The j6gen2 config scores the deployed graphs on 100 frames by default
+(`deploy.evaluation`): that evaluation is the gate of `fuse_export_attention` below. Pass
+`deploy.evaluation.num_samples=-1` for the whole split.
 
 `deploy.verification` stays off for this model: the head's proposal selection is a top-k over scores, so a near-tie sends different proposals to the same output slot on different backends while the decoded detections agree (enabling it fails on the first batch); the evaluation table is the comparison. ONNX Runtime cannot run the plugin nodes, so the `onnx` backend runs the graph in PyTorch (starred in the table).
 
