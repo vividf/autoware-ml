@@ -46,9 +46,9 @@ quantization:
 ```
 
 `quantization.dry_run=true` builds the weightless model on the CPU, resolves the placement
-and prints one line per module — which transform it gets (`int8`, `fp8`, `spconv int8`,
-skipped) and the rule that decided it. Use it before any calibration run; it is the
-fastest way to check a `skip_quantize` pattern.
+and prints one line per module: which transform it gets (`fuse_bn`, `replace_module` with
+the quantized class and precision, or `skip_quantize`) and the rule that decided it. Use it
+before any calibration run; it is the fastest way to check a `skip_quantize` pattern.
 
 ### Model rules and the plan
 
@@ -58,27 +58,27 @@ declares `QuantRules` through `ModuleBaseModel.build_quantization_rules()`:
 ```python
 CENTERPOINT_QUANT_RULES = QuantRules(
     quantize_submodules={
-        "pts_backbone": ("conv",),
+        "pts_backbone": ("conv", "linear"),
         "pts_neck": ("conv",),
         "bbox_head": ("conv",),
+        "pts_voxel_encoder": ("linear",),
     },
 )
 ```
 
 Per submodule the rules list the layer kinds to quantize (`conv`, `linear`, `spconv`) and
 optionally pin a precision (`{"spconv": "int8"}` — the sparse plugin has no FP8 path;
-`{"linear": "fp8"}` for attention projections that INT8 damages). The framework binds the
-rules to the config into a `QuantizationPlan` (`skip_quantize` and `default_precision`
-applied), replaces the selected modules with their ModelOpt-quantized counterparts and
-records the placement (`PlacementRecord`) into the checkpoint. `deploy` and `test` rebuild
+`{"linear": "fp8"}` for attention projections that INT8 damages). `prepare_quantized_tree`
+applies the rules under the config (`skip_quantize` and `default_precision`): it folds
+BatchNorm, replaces the selected modules with their ModelOpt-quantized counterparts and
+records every decision (`PlacementRecord`) into the checkpoint. `deploy` and `test` rebuild
 the same tree from that record before loading the weights, so an FP checkpoint and a
 quantized one are loaded through the same `load_model_weights`.
 
 A model declares its rules once (`build_quantization_rules()`, next to the model, importing
-only `autoware_ml/quantization/rules.py` — no ModelOpt behind it); every stage binds them to
-the config through `QuantizationPlan.for_model(model, config)`, so PTQ, QAT and the loader
-build the same tree. Placement is the kind table plus `skip_quantize`; there is no other
-knob.
+only `autoware_ml/quantization/rules.py`, no ModelOpt behind it); every stage prepares the
+tree through `prepare_quantized_tree(model, config)`, so PTQ, QAT and the loader build the
+same tree. Placement is the kind table plus `skip_quantize`; there is no other knob.
 
 ### Calibration
 
@@ -115,8 +115,8 @@ self-describing like the PTQ one.
 - **Dense layers** (Conv, Linear) export as `QuantizeLinear` / `DequantizeLinear` pairs
   (INT8) or `TRT_FP8QuantizeLinear` / `TRT_FP8DequantizeLinear` (FP8). The Q/DQ scales
   are folded into the graph; BatchNorm was folded into the weights before calibration
-  (`QuantizationPlan.prepare`, step 1), so the quantized weight the graph carries is the
-  one the scales were taken on.
+  (the first step of `prepare_quantized_tree`), so the quantized weight the graph carries
+  is the one the scales were taken on.
 - **Sparse convolutions** (BEVFusion's encoder, PTv3's cpe convs) export as
   `autoware::ImplicitGemm` plugin nodes; a calibrated one carries `precision=1` plus its
   `channel_scale` / `bias_scaled` inputs instead of Q/DQ. See

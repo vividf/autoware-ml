@@ -102,8 +102,9 @@ PointTransformerV3 exports to ONNX; the sparse (cpe) convolutions become
 `deploy.tensorrt.plugin_libraries` points at the plugin the image ships
 ([Deployment › Plugin graphs](../user-guide/deployment.md#plugin-graphs-sparse-convolutions)).
 The segmentation T4 base (`segmentation3d/ptv3/t4dataset/base_voxel012_122m`) carries the
-optimization profiles for the two graphs; the other configs (nuScenes, detection) leave
-TensorRT off until theirs are measured.
+optimization profiles for the two graphs, built from the ECU node's voxel counts with the
+node's own per-level rule so the engine evaluated here is the engine shipped; the other
+configs (nuScenes, detection) leave TensorRT off until theirs are set.
 
 ```bash
 autoware-ml deploy \
