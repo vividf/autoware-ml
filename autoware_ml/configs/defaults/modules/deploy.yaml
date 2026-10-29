@@ -10,3 +10,5 @@ deploy:
   tensorrt:
     enabled: true
     workspace_size: 4294967296
+    # Shared libraries of custom TensorRT plugins, for graphs with autoware::* ops.
+    plugin_libraries: []

@@ -11,9 +11,10 @@ import torch
 from autoware_ml.deployment.stages import (
     GraphStage,
     model_output_names,
-    run_stages_in_torch,
     validate_stages,
 )
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.types.backend import Backend
 
 from autoware_ml.dataclasses.batch.segmentation3d import Segmentation3DGTBatch
 from autoware_ml.dataclasses.geometry.voxels import VoxelsData
@@ -328,9 +329,13 @@ def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_enc
     assert not set(det_stage.inputs) & set(seg_stage.outputs)
 
     batch = build_inputs(device=torch.device("cuda"))
-    joint = run_stages_in_torch(stages, batch, torch.device("cuda"))
-    seg_only = run_stages_in_torch(seg_model.build_stages(), batch, torch.device("cuda"))
-    det_only = run_stages_in_torch(detection3d_model.build_stages(), batch, torch.device("cuda"))
+    joint = StagedPipeline(stages, Backend.PYTORCH, torch.device("cuda")).trace(batch)
+    seg_only = StagedPipeline(
+        seg_model.build_stages(), Backend.PYTORCH, torch.device("cuda")
+    ).trace(batch)
+    det_only = StagedPipeline(
+        detection3d_model.build_stages(), Backend.PYTORCH, torch.device("cuda")
+    ).trace(batch)
     assert torch.equal(joint["pred_labels"], seg_only["pred_labels"])
     torch.testing.assert_close(joint["pred_probs"], seg_only["pred_probs"])
     for name in JOINT_EXPORT_OUTPUT_NAMES[2:]:
