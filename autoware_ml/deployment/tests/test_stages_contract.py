@@ -29,9 +29,9 @@ from autoware_ml.deployment.stages import (
     artifact_path,
     graph_stages,
     model_output_names,
-    run_stages_in_torch,
     validate_stages,
 )
+from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.types.backend import Backend
 
 
@@ -182,11 +182,14 @@ class TestStageDeclaration:
         assert state["x"].item() == 1.0
 
 
-class TestRunStagesInTorch:
+def _run_in_torch(stages, batch):
+    """Run the stages on the pytorch backend and return the run state."""
+    return StagedPipeline(stages, Backend.PYTORCH, torch.device("cpu")).trace(batch)
+
+
+class TestRunInTorch:
     def test_runs_all_stages_in_order(self):
-        state = run_stages_in_torch(
-            _toy_stages(), {"x": torch.tensor([1, 2, 3])}, torch.device("cpu")
-        )
+        state = _run_in_torch(_toy_stages(), {"x": torch.tensor([1, 2, 3])})
         # prep: x=[1,2,3]; encoder: y=2x; glue: z=y+0.5; head: plus=z+1, minus=z-1
         assert torch.equal(state["plus"], torch.tensor([3.5, 5.5, 7.5]))
         assert torch.equal(state["minus"], torch.tensor([1.5, 3.5, 5.5]))
@@ -204,7 +207,7 @@ class TestRunStagesInTorch:
             GraphStage("ab", module=_Subtract(), inputs=("a", "b"), outputs=("a_minus_b",)),
             GraphStage("ba", module=_Subtract(), inputs=("b", "a"), outputs=("b_minus_a",)),
         )
-        state = run_stages_in_torch(stages, None, torch.device("cpu"))
+        state = _run_in_torch(stages, None)
         assert torch.equal(state["a_minus_b"], torch.tensor([9.0]))
         assert torch.equal(state["b_minus_a"], torch.tensor([-9.0]))
 
@@ -212,7 +215,7 @@ class TestRunStagesInTorch:
         stages = list(_toy_stages())
         stages[3] = GraphStage("head", module=_DictHead(), inputs=("z",), outputs=("plus", "minus"))
         with pytest.raises(TypeError, match="'head' returned a mapping"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_torch_stage_non_mapping_rejected(self):
         stages = list(_toy_stages())
@@ -220,7 +223,7 @@ class TestRunStagesInTorch:
             "glue", run=lambda state: state["y"] + 0.5, inputs=("y",), outputs=("z",)
         )
         with pytest.raises(TypeError, match="'glue' returned Tensor"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_glue_overwriting_graph_output_rejected(self):
         stages = list(_toy_stages())
@@ -231,7 +234,7 @@ class TestRunStagesInTorch:
             outputs=("y", "z"),
         )
         with pytest.raises(ValueError, match="'glue' writes 'y', which stage 'encoder'"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_glue_returning_other_names_than_declared_is_rejected(self):
         stages = list(_toy_stages())
@@ -239,7 +242,7 @@ class TestRunStagesInTorch:
             "glue", run=lambda state: {"zz": state["y"]}, inputs=("y",), outputs=("z",)
         )
         with pytest.raises(ValueError, match="'glue' returned \\['zz'\\] but declares"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_glue_runs_on_its_declared_inputs_only(self):
         stages = list(_toy_stages())
@@ -247,13 +250,13 @@ class TestRunStagesInTorch:
             "glue", run=lambda state: {"z": state["x"]}, inputs=("y",), outputs=("z",)
         )
         with pytest.raises(KeyError, match="did not declare as an input"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_graph_stage_output_arity_is_checked(self):
         stages = list(_toy_stages())
         stages[3] = GraphStage("head", module=_Double(), inputs=("z",), outputs=("plus", "minus"))
         with pytest.raises(ValueError, match="returned 1 tensor"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_graph_stage_inputs_are_tensors(self):
         stages = list(_toy_stages())
@@ -261,26 +264,14 @@ class TestRunStagesInTorch:
             "glue", run=lambda state: {"z": [state["y"]]}, inputs=("y",), outputs=("z",)
         )
         with pytest.raises(TypeError, match="'head' input 'z' is a list"):
-            run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
-
-    def test_graph_inputs_are_kept_as_the_graph_saw_them(self):
-        # Later glue may reuse a graph output in place; the recorded inputs do not follow.
-        stages = list(_toy_stages())
-        stages[2] = TorchStage(
-            "glue", run=lambda state: {"z": state["y"].add_(100.0)}, inputs=("y",), outputs=("z",)
-        )
-        state = run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
-        (encoder_input,) = state.graph_inputs["encoder"]
-        (head_input,) = state.graph_inputs["head"]
-        assert torch.equal(encoder_input, torch.tensor([1.0]))
-        assert torch.equal(head_input, torch.tensor([102.0]))
+            _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
     def test_graph_stage_outputs_are_tensors(self):
         for module, other in ((_NestedHead(), "tuple"), (_ScalarHead(), "int")):
             stages = list(_toy_stages())
             stages[3] = GraphStage("head", module=module, inputs=("z",), outputs=("plus", "minus"))
             with pytest.raises(TypeError, match=rf"'head' returned \['{other}'\] among"):
-                run_stages_in_torch(stages, {"x": torch.tensor([1.0])}, torch.device("cpu"))
+                _run_in_torch(stages, {"x": torch.tensor([1.0])})
 
 
 def test_artifact_path_per_backend() -> None:

@@ -64,15 +64,43 @@ class TestStagedPipeline:
         pipeline = StagedPipeline(
             _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
         )
-        result, state = pipeline.run({"x": torch.tensor([1, 2, 3])})
+        result = pipeline.infer({"x": torch.tensor([1, 2, 3])})
 
         # prep: x=[1,2,3]; encoder: y=2x; glue: z=y+0.5; head: plus=z+1, minus=z-1
         assert torch.equal(result.outputs["plus"], torch.tensor([3.5, 5.5, 7.5]))
         assert torch.equal(result.outputs["minus"], torch.tensor([1.5, 3.5, 5.5]))
-        assert result.output_names == ["plus", "minus"]
+        assert result.output_names == ("plus", "minus")
         assert result.graph_stage_names == ("encoder", "head")
         assert set(result.stage_times_ms) == {"prep", "encoder", "glue", "head"}
+
+    def test_trace_records_every_tensor_and_the_graph_inputs(self):
+        pipeline = StagedPipeline(
+            _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        state = pipeline.trace({"x": torch.tensor([1, 2, 3])})
         assert set(state.tensors) == {"x", "y", "z", "plus", "minus"}
+        assert set(state.graph_inputs) == {"encoder", "head"}
+        assert torch.equal(state.graph_inputs["head"][0], torch.tensor([2.5, 4.5, 6.5]))
+
+    def test_trace_keeps_the_graph_inputs_as_the_graph_saw_them(self):
+        # Later glue may reuse a graph output in place; the recorded inputs do not follow.
+        stages = list(_toy_stages())
+        stages[2] = TorchStage(
+            "glue", run=lambda state: {"z": state["y"].add_(100.0)}, inputs=("y",), outputs=("z",)
+        )
+        pipeline = StagedPipeline(stages, backend=Backend.PYTORCH, device=torch.device("cpu"))
+        state = pipeline.trace({"x": torch.tensor([1.0])})
+        (encoder_input,) = state.graph_inputs["encoder"]
+        (head_input,) = state.graph_inputs["head"]
+        assert torch.equal(encoder_input, torch.tensor([1.0]))
+        assert torch.equal(head_input, torch.tensor([102.0]))
+
+    def test_infer_does_not_copy_the_graph_inputs(self):
+        pipeline = StagedPipeline(
+            _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        state, _ = pipeline._run({"x": torch.tensor([1.0])}, trace=False)
+        assert state.graph_inputs == {}
 
     def test_assemble_keys_by_the_model_output_names(self):
         pipeline = StagedPipeline(
@@ -143,7 +171,7 @@ class TestPipelineResult:
     def test_model_ms_sums_only_graph_stages(self):
         result = PipelineResult(
             outputs={},
-            output_names=[],
+            output_names=(),
             stage_times_ms={"pillar_decorate": 1.0, "graph_a": 2.0, "graph_b": 3.5},
             graph_stage_names=("graph_a", "graph_b"),
         )
@@ -152,7 +180,7 @@ class TestPipelineResult:
     def test_model_ms_treats_missing_graph_stage_as_zero(self):
         result = PipelineResult(
             outputs={},
-            output_names=[],
+            output_names=(),
             stage_times_ms={"graph_a": 2.0},
             graph_stage_names=("graph_a", "b"),
         )
@@ -161,13 +189,13 @@ class TestPipelineResult:
     def test_ordered_outputs_respects_output_names_order(self):
         heatmap, reg = torch.zeros(1), torch.ones(1)
         result = PipelineResult(
-            outputs={"reg": reg, "heatmap": heatmap}, output_names=["heatmap", "reg"]
+            outputs={"reg": reg, "heatmap": heatmap}, output_names=("heatmap", "reg")
         )
         ordered = result.ordered_outputs()
         assert ordered[0] is heatmap and ordered[1] is reg
 
     def test_ordered_outputs_raises_on_missing_name(self):
-        result = PipelineResult(outputs={"reg": torch.ones(1)}, output_names=["heatmap", "reg"])
+        result = PipelineResult(outputs={"reg": torch.ones(1)}, output_names=("heatmap", "reg"))
         with pytest.raises(KeyError):
             result.ordered_outputs()
 

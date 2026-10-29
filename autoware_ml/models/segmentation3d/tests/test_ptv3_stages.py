@@ -29,9 +29,9 @@ from autoware_ml.dataclasses.models.segmentation3d.head_outputs import Segmentat
 from autoware_ml.deployment.stages import (
     TorchStage,
     model_output_names,
-    run_stages_in_torch,
     validate_stages,
 )
+from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.models.detection3d.tests.ptv3_detection3d_fixtures import (
     build_inputs,
     build_seg3d_model,
@@ -157,7 +157,7 @@ def test_det3d_declaration_specs_and_deployed_eval_output() -> None:
     assert list(specs) == ["ptv3_encoder", "ptv3_det3d_head"]
     assert specs["ptv3_det3d_head"].output_names == list(model.bbox_head.export_output_names)
 
-    state = run_stages_in_torch(stages, batch, torch.device("cuda"))
+    state = StagedPipeline(stages, Backend.PYTORCH, torch.device("cuda")).trace(batch)
     outputs = {name: state[name] for name in model_output_names(stages)}
     rebuilt = TransFusionHeadOutputs.from_export_tensors(outputs)
     for name, tensor in zip(outputs, rebuilt.export_tensors(list(outputs))):

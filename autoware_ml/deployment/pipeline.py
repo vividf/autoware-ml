@@ -24,11 +24,11 @@ from __future__ import annotations
 import copy
 import logging
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 from torch import nn
@@ -48,6 +48,10 @@ from autoware_ml.deployment.stages import (
 )
 from autoware_ml.types.backend import Backend
 
+if TYPE_CHECKING:
+    from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
+    from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +67,7 @@ class PipelineResult:
     """
 
     outputs: dict[str, torch.Tensor]
-    output_names: list[str]
+    output_names: tuple[str, ...]
     stage_times_ms: dict[str, float] = field(default_factory=dict)
     graph_stage_names: tuple[str, ...] = ()
 
@@ -72,9 +76,9 @@ class PipelineResult:
         """Summed latency of the graph stages (pure GPU time on TensorRT)."""
         return sum(self.stage_times_ms.get(name, 0.0) for name in self.graph_stage_names)
 
-    def ordered_outputs(self) -> list[torch.Tensor]:
+    def ordered_outputs(self) -> tuple[torch.Tensor, ...]:
         """Return the outputs in ``output_names`` order."""
-        return [self.outputs[name] for name in self.output_names]
+        return tuple(self.outputs[name] for name in self.output_names)
 
 
 @contextmanager
@@ -112,6 +116,10 @@ class _ModuleRunner:
         return outputs, times["run"]
 
 
+#: What runs one graph stage: ``run(inputs) -> (outputs, ms)``.
+Runner: TypeAlias = "_ModuleRunner | OnnxModuleRunner | TensorRTModuleRunner"
+
+
 def normalize_device(device: str | torch.device) -> torch.device:
     """Return ``device`` with an explicit CUDA index, so ``cuda`` and ``cuda:0`` compare equal.
 
@@ -131,11 +139,8 @@ def _artifact_runner(
     device: torch.device,
     artifacts_dir: Path,
     plugin_libraries: Sequence[str] = (),
-    onnx_paths: Mapping[str, Path] | None = None,
-):
+) -> Runner:
     path = artifact_path(artifacts_dir, stage.name, backend)
-    if backend is Backend.ONNX and onnx_paths and stage.name in onnx_paths:
-        path = Path(onnx_paths[stage.name])  # the graph the export loop actually shipped
     if backend is Backend.ONNX:
         # Lazy imports: a pytorch pipeline needs neither onnxruntime nor tensorrt.
         from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
@@ -157,6 +162,7 @@ class StagedPipeline:
         device: Device the graph stages run on.
         artifacts_dir: Directory of the ``<stage>.onnx`` / ``<stage>.engine`` artifacts,
             required by the ``onnx`` and ``tensorrt`` backends.
+        plugin_libraries: TensorRT plugin libraries the engines were built with.
     """
 
     def __init__(
@@ -166,17 +172,15 @@ class StagedPipeline:
         device: torch.device,
         artifacts_dir: str | Path | None = None,
         plugin_libraries: Sequence[str] = (),
-        onnx_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self.stages = validate_stages(stages)
         self.backend = backend
         self.plugin_libraries = tuple(plugin_libraries)
-        self.onnx_paths = dict(onnx_paths or {})
         self.device = normalize_device(device)
-        self.output_names = list(model_output_names(self.stages))
+        self.output_names = model_output_names(self.stages)
         self.graph_stage_names = tuple(stage.name for stage in graph_stages(self.stages))
 
-        self._runners: dict[str, Any] = {}
+        self._runners: dict[str, Runner] = {}
         #: Graph stages that fall back to PyTorch on this backend. Reports must name them, or
         #: a backend's numbers could silently be PyTorch's.
         self.fallback_stage_names: tuple[str, ...] = tuple(
@@ -191,16 +195,15 @@ class StagedPipeline:
                 if artifacts_dir is None:
                     raise ValueError(f"artifacts_dir is required for the {self.backend} backend.")
                 self._runners[stage.name] = _artifact_runner(
-                    stage,
-                    self.backend,
-                    self.device,
-                    Path(artifacts_dir),
-                    self.plugin_libraries,
-                    self.onnx_paths,
+                    stage, self.backend, self.device, Path(artifacts_dir), self.plugin_libraries
                 )
 
-    def run(self, batch: Any) -> tuple[PipelineResult, RunState]:
-        """Run every stage; return the result and the run state holding every named tensor."""
+    def _run(self, batch: Any, *, trace: bool) -> tuple[RunState, dict[str, float]]:
+        """Run every stage; return the run state and the latency per stage.
+
+        With ``trace``, the state records the positional inputs each graph stage ran on
+        (:attr:`RunState.graph_inputs`), copied so that later glue cannot change them.
+        """
         state = RunState(batch=batch, device=self.device)
         times: dict[str, float] = {}
         with torch.no_grad():
@@ -209,23 +212,33 @@ class StagedPipeline:
                     with cuda_synced_timer(times, stage.name, self.device):
                         produced = run_torch_stage(stage, state)
                     state.add(produced)
-                else:
-                    inputs = dict(zip(stage.inputs, graph_input_tensors(stage, state)))
-                    outputs, elapsed_ms = self._runners[stage.name].run(inputs)
-                    times[stage.name] = times.get(stage.name, 0.0) + elapsed_ms
-                    state.add({name: outputs[name] for name in stage.outputs})
-        result = PipelineResult(
+                    continue
+                args = graph_input_tensors(stage, state)
+                if trace:
+                    state.graph_inputs[stage.name] = tuple(arg.detach().clone() for arg in args)
+                outputs, elapsed_ms = self._runners[stage.name].run(dict(zip(stage.inputs, args)))
+                times[stage.name] = times.get(stage.name, 0.0) + elapsed_ms
+                state.add({name: outputs[name] for name in stage.outputs})
+        return state, times
+
+    def infer(self, batch: Any) -> PipelineResult:
+        """Run every stage and return the model outputs with the latency per stage."""
+        state, times = self._run(batch, trace=False)
+        return PipelineResult(
             outputs={name: state[name] for name in self.output_names},
-            output_names=list(self.output_names),
+            output_names=self.output_names,
             stage_times_ms=times,
             graph_stage_names=self.graph_stage_names,
         )
-        return result, state
 
-    def infer(self, batch: Any) -> PipelineResult:
-        """Run every stage and return the final raw outputs plus timing."""
-        result, _ = self.run(batch)
-        return result
+    def trace(self, batch: Any) -> RunState:
+        """Run every stage and return the run state with every tensor and the graph inputs.
+
+        Export derives its trace arguments from ``graph_inputs``; a ``pytorch`` pipeline runs
+        the stage modules themselves, so the recorded inputs are what the graphs are traced on.
+        """
+        state, _ = self._run(batch, trace=True)
+        return state
 
     def assemble(
         self, result: PipelineResult, device: torch.device | None = None
@@ -263,14 +276,10 @@ class PipelineCache:
         stages: Sequence[Stage],
         artifacts_dir: str | Path,
         plugin_libraries: Sequence[str] = (),
-        onnx_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self.stages = validate_stages(stages)
         self.artifacts_dir = Path(artifacts_dir)
         self.plugin_libraries = tuple(plugin_libraries)
-        #: Stage name -> the ``.onnx`` the export loop shipped, where a graph modifier wrote it
-        #: under a name other than ``<stage>.onnx``.
-        self.onnx_paths = dict(onnx_paths or {})
         self._pipelines: dict[tuple[Backend, str], StagedPipeline] = {}
 
     def get(self, backend: Backend, device: str | torch.device) -> StagedPipeline:
@@ -284,27 +293,19 @@ class PipelineCache:
                 device=device,
                 artifacts_dir=self.artifacts_dir,
                 plugin_libraries=self.plugin_libraries,
-                onnx_paths=self.onnx_paths,
             )
         return self._pipelines[key]
 
 
-def available_backends(
-    stages: Sequence[Stage],
-    artifacts_dir: str | Path,
-    onnx_paths: Mapping[str, Path] | None = None,
-) -> set[Backend]:
+def available_backends(stages: Sequence[Stage], artifacts_dir: str | Path) -> set[Backend]:
     """Return the backends whose artifacts exist for every graph stage; PyTorch always counts.
 
     An engine older than its ONNX still counts, since artifacts may be reused, but is logged
     as stale: it may not reflect the current weights.
     """
     artifacts_dir = Path(artifacts_dir)
-    onnx_paths = dict(onnx_paths or {})
 
     def path_of(stage: GraphStage, backend: Backend) -> Path:
-        if backend is Backend.ONNX and stage.name in onnx_paths:
-            return Path(onnx_paths[stage.name])
         return artifact_path(artifacts_dir, stage.name, backend)
 
     exportable = graph_stages(stages)

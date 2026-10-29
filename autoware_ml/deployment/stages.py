@@ -41,8 +41,9 @@ class RunState:
         batch: The preprocessed batch the run started from; only glue reads it.
         device: Device the graph stages run on.
         tensors: Tensors produced so far, by name.
-        graph_inputs: The positional inputs each graph stage ran on, by stage name, copied
-            when the stage ran: later glue cannot change what export traces.
+        graph_inputs: The positional inputs each graph stage ran on, by stage name, filled by
+            a tracing run (:meth:`StagedPipeline.trace`) and copied when the stage ran, so
+            later glue cannot change what export traces.
     """
 
     batch: Any
@@ -309,29 +310,3 @@ def run_graph_stage(stage: GraphStage, args: Sequence[Any]) -> dict[str, Any]:
             f"stage returns one tensor per declared output {list(stage.outputs)}."
         )
     return dict(zip(stage.outputs, raw))
-
-
-def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.device) -> RunState:
-    """Run every stage in PyTorch and return the filled run state.
-
-    Export takes its trace inputs from ``RunState.graph_inputs``, filled by this run. A graph
-    stage gets its ``inputs`` as positional arguments and returns one tensor per ``outputs``
-    name, in order. Modules run in their current mode; export switches them to eval first.
-
-    Raises:
-        TypeError: When a graph stage gets a non-tensor input or returns a mapping or a
-            non-tensor, or a glue stage returns something other than a mapping.
-        ValueError: When a stage returns other names, or another number of tensors, than
-            it declares.
-    """
-    stages = validate_stages(stages)
-    state = RunState(batch=batch, device=device)
-    with torch.no_grad():
-        for stage in stages:
-            if isinstance(stage, TorchStage):
-                state.add(run_torch_stage(stage, state))
-                continue
-            args = graph_input_tensors(stage, state)
-            state.graph_inputs[stage.name] = tuple(arg.detach().clone() for arg in args)
-            state.add(run_graph_stage(stage, args))
-    return state
