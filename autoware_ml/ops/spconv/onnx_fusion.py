@@ -29,6 +29,7 @@ from onnx import helper
 
 from autoware_ml.ops.spconv.contract import (
     ACT_RELU,
+    ACT_TYPE_ATTR,
     AUTOWARE_DOMAIN,
     IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
     IMPLICIT_GEMM_OP,
@@ -104,7 +105,7 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
             and add.output[0] not in graph_outputs
         ):
             relu = activation[0]
-            _set_attribute(gemm, "act_type", ACT_RELU)
+            _set_attribute(gemm, ACT_TYPE_ATTR, ACT_RELU)
             fused_activations += 1
             removed.append(relu)
             last, last_output = relu, relu.output[0]

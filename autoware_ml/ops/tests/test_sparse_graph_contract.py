@@ -26,7 +26,7 @@ import pytest
 
 pytest.importorskip("spconv", reason="the export symbolics import spconv")
 
-from autoware_ml.ops.spconv import sparse_functional  # noqa: E402
+from autoware_ml.ops.spconv import contract, sparse_functional  # noqa: E402
 
 
 def _emitted_attributes(symbolic) -> set[str]:
@@ -53,7 +53,7 @@ def test_get_indice_pairs_implicit_gemm_emits_the_plugin_field_set() -> None:
         "subm",
         "transpose",
         "is_train",
-        "do_sort",
+        contract.DO_SORT_ATTR,
     }
     assert _emitted_attributes(sparse_functional.GetIndicePairsImplicitGemm.symbolic) == expected
 
@@ -66,8 +66,8 @@ def test_implicit_gemm_emits_the_plugin_field_set() -> None:
         "fp32_accum",
         "act_alpha",
         "act_beta",
-        "output_scale",
+        contract.OUTPUT_SCALE_ATTR,
         "output_add_scale",
-        "act_type",
+        contract.ACT_TYPE_ATTR,
     }
     assert _emitted_attributes(sparse_functional.ImplicitGemm.symbolic) == expected

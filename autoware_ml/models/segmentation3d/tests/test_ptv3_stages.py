@@ -51,7 +51,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.types.backend import Backend
-from autoware_ml.utils.deploy import export_to_onnx
+from autoware_ml.utils.deploy import apply_onnx_transforms, export_to_onnx
 
 REQUIRES_SPARSE_CUDA = unittest.skipUnless(
     IS_SPCONV_AVAILABLE and torch.cuda.is_available(), "PTv3 export needs spconv and CUDA"
@@ -114,6 +114,7 @@ class TestSeg3dStageGraph(unittest.TestCase):
         for name, spec in model.build_export_specs(batch).items():
             path = tmp_path / f"{name}.onnx"
             export_to_onnx(spec, onnx_cfg, path)
+            path = apply_onnx_transforms(path, spec.onnx_transforms)
             graph = onnx.load(path).graph
             self.assertEqual([tensor.name for tensor in graph.input], list(stages[name].inputs))
             self.assertEqual([tensor.name for tensor in graph.output], list(stages[name].outputs))
@@ -121,6 +122,10 @@ class TestSeg3dStageGraph(unittest.TestCase):
                 axes = stages[name].onnx_dynamic_axes.get(tensor.name, {})
                 dims = tensor.type.tensor_type.shape.dim
                 self.assertEqual({i: dims[i].dim_param for i in axes}, dict(axes), tensor.name)
+            # The cpe convolutions have a bias; the stage transform folds it into the plugin node.
+            gemm_nodes = [node for node in graph.node if node.op_type == "ImplicitGemm"]
+            self.assertTrue(gemm_nodes, name)
+            self.assertTrue(all(len(node.input) == 6 for node in gemm_nodes), name)
 
     def test_seg3d_head_stage_emits_the_head_graph_names(self) -> None:
         model = build_seg3d_model().cuda().eval()
