@@ -24,13 +24,17 @@ import numpy as np
 import tensorrt as trt
 import torch
 
-from autoware_ml.deployment.backends.tensorrt_builder import load_tensorrt_plugin_libraries
+from autoware_ml.deployment.backends.tensorrt_builder import (
+    _init_plugin_registry,
+    load_tensorrt_plugin_libraries,
+    trt_logger,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] = ()):
-    """Deserialize a TensorRT engine and return ``(engine, execution_context)``.
+    """Deserialize a TensorRT engine and return ``(runtime, engine, execution_context)``.
 
     Raises:
         RuntimeError: If deserialization or context creation fails.
@@ -43,9 +47,9 @@ def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] 
 
     # The engine's plugin ops need their libraries in this process, wherever it was built.
     load_tensorrt_plugin_libraries(plugin_libraries)
-    trt_logger = trt.Logger(trt.Logger.WARNING)
-    trt.init_libnvinfer_plugins(trt_logger, "")
-    runtime = trt.Runtime(trt_logger)
+    _init_plugin_registry()
+    # The runtime has to outlive the engine it deserializes, so it is returned with it.
+    runtime = trt.Runtime(trt_logger())
     with open(engine_path, "rb") as f:
         engine = runtime.deserialize_cuda_engine(f.read())
     if engine is None:
@@ -56,7 +60,7 @@ def load_trt_engine(engine_path: str | Path, *, plugin_libraries: Sequence[str] 
         raise RuntimeError(
             f"Failed to create TensorRT execution context for {label} (likely GPU out-of-memory)."
         )
-    return engine, context
+    return runtime, engine, context
 
 
 def list_trt_io_names(engine) -> tuple[list[str], list[str]]:
@@ -93,7 +97,9 @@ class TensorRTModuleRunner:
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError(f"TensorRT requires a CUDA device, got {self.device}.")
-        self.engine, self.context = load_trt_engine(engine_path, plugin_libraries=plugin_libraries)
+        self.runtime, self.engine, self.context = load_trt_engine(
+            engine_path, plugin_libraries=plugin_libraries
+        )
         self.input_names, self.output_names = list_trt_io_names(self.engine)
         # Re-bind only when a shape changes: re-binding every call added ~0.5 ms per engine to
         # the measured time on BEVFusion.

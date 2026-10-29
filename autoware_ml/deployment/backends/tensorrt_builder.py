@@ -22,32 +22,34 @@ the weak-typing precision flags in 10.12 and removed them in 11.
 from __future__ import annotations
 
 import ctypes
+import functools
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class ShapeProfile:
-    """One input's TensorRT optimization profile.
+class ShapeProfile(BaseModel):
+    """One input's TensorRT optimization profile (``{min_shape, opt_shape, max_shape}``).
 
-    Validated on construction, so a bad profile is a config error naming the input and
-    dimension rather than a TensorRT build failure.
+    Validated on construction, so a bad profile is a config error naming the dimension rather
+    than a TensorRT build failure. Only the minimum may be 0: TensorRT accepts empty tensors,
+    and a point model can get an empty cloud.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     min_shape: tuple[int, ...]
     opt_shape: tuple[int, ...]
     max_shape: tuple[int, ...]
 
-    KNOWN_KEYS = frozenset({"min_shape", "opt_shape", "max_shape"})
-
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _check_ranks_and_order(self) -> ShapeProfile:
         ranks = {len(self.min_shape), len(self.opt_shape), len(self.max_shape)}
         if len(ranks) != 1 or 0 in ranks:
             raise ValueError(
@@ -57,8 +59,6 @@ class ShapeProfile:
         for index, (low, opt, high) in enumerate(
             zip(self.min_shape, self.opt_shape, self.max_shape)
         ):
-            # Only the minimum may be 0: TensorRT accepts empty tensors, and a point model
-            # can get an empty cloud.
             if low < 0 or opt < 1:
                 raise ValueError(
                     f"dim {index} has min={low}, opt={opt}; min must be >= 0 and opt >= 1."
@@ -67,39 +67,41 @@ class ShapeProfile:
                 raise ValueError(
                     f"dim {index} violates min <= opt <= max ({low} <= {opt} <= {high} is false)."
                 )
+        return self
 
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], where: str) -> ShapeProfile:
-        """Parse ``{min_shape, opt_shape, max_shape}``; ``where`` names the config path."""
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"{where} must be a mapping, got {type(raw).__name__}.")
-        unknown = set(raw) - cls.KNOWN_KEYS
-        if unknown:
-            raise ValueError(f"Unknown {where} key(s): {sorted(unknown)}.")
-        missing = cls.KNOWN_KEYS - set(raw)
-        if missing:
-            raise ValueError(
-                f"TensorRT optimization profile {where} is incomplete: missing {sorted(missing)}. "
-                "All of min_shape, opt_shape, and max_shape must be specified."
-            )
-        try:
-            return cls(
-                min_shape=tuple(int(x) for x in raw["min_shape"]),
-                opt_shape=tuple(int(x) for x in raw["opt_shape"]),
-                max_shape=tuple(int(x) for x in raw["max_shape"]),
-            )
-        except ValueError as error:
-            raise ValueError(f"{where}: {error}") from None
+
+@functools.cache
+def _load_plugin_library(library: str) -> None:
+    library_path = Path(library)
+    if not library_path.exists():
+        raise FileNotFoundError(f"TensorRT plugin library not found: {library_path}")
+    ctypes.CDLL(str(library_path), mode=ctypes.RTLD_GLOBAL)
+    logger.info("Loaded TensorRT plugin library: %s", library_path)
 
 
 def load_tensorrt_plugin_libraries(plugin_libraries: Sequence[str] | None) -> None:
-    """Load custom TensorRT plugin libraries; call before the plugin registry initializes."""
+    """Load custom TensorRT plugin libraries, each once; call before the registry initializes."""
     for library in plugin_libraries or ():
-        library_path = Path(library)
-        if not library_path.exists():
-            raise FileNotFoundError(f"TensorRT plugin library not found: {library_path}")
-        ctypes.CDLL(str(library_path), mode=ctypes.RTLD_GLOBAL)
-        logger.info("Loaded TensorRT plugin library: %s", library_path)
+        _load_plugin_library(str(library))
+
+
+@functools.cache
+def trt_logger():
+    """The one TensorRT logger of the process, shared by every builder, runtime and engine.
+
+    TensorRT keeps a raw pointer to the logger it was given: a logger created per build or
+    per engine load is destroyed before the objects that log through it.
+    """
+    import tensorrt as trt
+
+    return trt.Logger(trt.Logger.WARNING)
+
+
+@functools.cache
+def _init_plugin_registry() -> None:
+    import tensorrt as trt
+
+    trt.init_libnvinfer_plugins(trt_logger(), "")
 
 
 def _create_builder(workspace_size: int, plugin_libraries: Sequence[str]):
@@ -107,12 +109,10 @@ def _create_builder(workspace_size: int, plugin_libraries: Sequence[str]):
     import tensorrt as trt
 
     load_tensorrt_plugin_libraries(plugin_libraries)
-
-    trt_logger = trt.Logger(trt.Logger.WARNING)
-    trt.init_libnvinfer_plugins(trt_logger, "")
-    builder = trt.Builder(trt_logger)
+    _init_plugin_registry()
+    builder = trt.Builder(trt_logger())
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    parser = trt.OnnxParser(network, trt_logger)
+    parser = trt.OnnxParser(network, trt_logger())
     config = builder.create_builder_config()
 
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(workspace_size))
@@ -229,15 +229,12 @@ def build_engine_from_config(
     raw_shapes = tensorrt_cfg.get("input_shapes", None)
     input_shapes = None
     if raw_shapes:
-        input_shapes = {
-            str(name): ShapeProfile.from_dict(
-                OmegaConf.to_container(shapes, resolve=True)
-                if OmegaConf.is_config(shapes)
-                else shapes,
-                f"deploy.tensorrt.input_shapes.{name}",
-            )
-            for name, shapes in raw_shapes.items()
-        }
+        input_shapes = {}
+        for name, shapes in OmegaConf.to_container(raw_shapes, resolve=True).items():
+            try:
+                input_shapes[str(name)] = ShapeProfile.model_validate(shapes)
+            except ValidationError as error:
+                raise ValueError(f"deploy.tensorrt.input_shapes.{name}: {error}") from None
     build_engine(
         onnx_path,
         output_path,
