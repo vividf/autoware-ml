@@ -43,6 +43,7 @@ from autoware_ml.deployment.stages import (
 )
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
+from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import SparseEncoder
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_attention import (
     ExportableMultiheadAttention,
@@ -76,6 +77,9 @@ from autoware_ml.models.detection3d.task_modules.match_costs import (
     IoU3DCost,
 )
 from autoware_ml.models.detection3d.view_transforms.depth_lss import DepthLSSTransform
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
+from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
@@ -629,6 +633,41 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         # Dynamic axes come from deploy.onnx.modules.bevfusion_lidar, not the declaration.
         self.assertFalse(graph.onnx_dynamic_axes)
         self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
+        self.assertEqual(graph.onnx_transforms, (fuse_sparse_graph,))
+
+    @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
+    def test_stage_graph_exports_the_sparse_encoder_with_folded_batchnorm(self) -> None:
+        """
+        Test that the lidar graph exports the sparse encoder with BatchNorm folded into biased
+        wrappers, while the model keeps its BatchNorm layers.
+        """
+        lidar_network = self._build_lidar_network()
+        lidar_network.pts_middle_encoder = SparseEncoder(
+            in_channels=self.middle_channels,
+            sparse_shape=[*self.bev_shape, 5],
+            output_channels=self.middle_channels,
+            dense_output_shapes=[*self.bev_shape, 1],
+        ).to(self.device)
+        model = self._build_model(lidar_network=lidar_network, camera_network=None).eval()
+
+        stages = model.build_stages()
+        assert stages is not None
+        export_encoder = stages[1].module.model.lidar_network.pts_middle_encoder
+
+        self.assertFalse(any(isinstance(m, nn.BatchNorm1d) for m in export_encoder.modules()))
+        wrappers = [
+            m
+            for m in export_encoder.modules()
+            if isinstance(m, (ExportableSparseConv3d, ExportableSubMConv3d))
+        ]
+        self.assertTrue(wrappers)
+        self.assertTrue(all(wrapper.bias is not None for wrapper in wrappers))
+        self.assertTrue(
+            any(
+                isinstance(m, nn.BatchNorm1d)
+                for m in model.lidar_network.pts_middle_encoder.modules()
+            )
+        )
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
         """Test that a multi-sample batch is refused instead of exporting only its first sample."""

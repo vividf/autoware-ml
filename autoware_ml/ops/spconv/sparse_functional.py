@@ -12,14 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Autograd bridges and ONNX symbolics for deployment-aware sparse ops."""
+"""Autograd bridges and ONNX symbolics for deployment-aware sparse ops.
+
+Used by the export copy only. The eager path mirrors spconv's implicit-GEMM execution so a
+traced graph matches the engine, and arguments outside that subset raise instead of
+diverging (:func:`_validate_implicit_gemm_export_arguments`).
+
+The bridges subclass internals of spconv 2.3.6 (pinned in ``pyproject.toml``), so a spconv
+upgrade needs review. The emitted attributes are the runtime plugin's contract
+(autoware_universe ``perception/autoware_tensorrt_plugins``), pinned by
+``test_sparse_graph_contract.py``.
+"""
 
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
-from jaxtyping import UInt32
 from cumm import tensorview as tv
 from spconv import constants
 from spconv.algo import CONV_CPP
@@ -39,6 +49,13 @@ from spconv.pytorch.cppcore import (
 from spconv.tools import CUDAKernelTimer
 from torch.autograd import Function
 from torch.onnx.symbolic_helper import _get_tensor_sizes
+from autoware_ml.ops.spconv.contract import (
+    GET_INDICE_PAIRS_IMPLICIT_GEMM_OP,
+    GET_INDICE_PAIRS_OP,
+    IMPLICIT_GEMM_OP,
+    INDICE_CONV_OP,
+    qualified,
+)
 
 
 def _kernel_volume(kernel_size: Sequence[int]) -> int:
@@ -124,6 +141,18 @@ def _no_gradients(count: int) -> tuple[None, ...]:
     return (None,) * count
 
 
+def _gemm_activation_to_onnx_int(act_type: Any) -> int:
+    """Map a ``tv.gemm.Activation`` to the plugin's integer ``act_type``."""
+    if act_type is None:
+        return 0
+    if isinstance(act_type, int):
+        return int(act_type)
+    value = getattr(act_type, "value", None)
+    if value is None:
+        raise ValueError(f"Cannot map activation {act_type!r} to the plugin's enum.")
+    return int(value)
+
+
 class GetIndicePairs(Function):
     """Bridge sparse indice-pair generation into autograd and ONNX export.
 
@@ -152,7 +181,7 @@ class GetIndicePairs(Function):
             ONNX outputs representing sparse output indices and pairing metadata.
         """
         outputs = g.op(
-            "autoware::GetIndicePairs",
+            qualified(GET_INDICE_PAIRS_OP),
             indices,
             batch_size_i=batch_size,
             spatial_shape_i=spatial_shape,
@@ -281,7 +310,7 @@ class IndiceConvFunction(Function):
         """
 
         output = g.op(
-            "autoware::IndiceConv",
+            qualified(INDICE_CONV_OP),
             features,
             filters,
             indice_pairs,
@@ -408,6 +437,7 @@ class GetIndicePairsImplicitGemm(Function):
         is_train: bool,
         alloc: ThrustSortAllocator | None,
         timer: CUDAKernelTimer,
+        do_sort: bool = SPCONV_DO_SORT,
     ):
         """Register the ONNX symbolic for implicit-GEMM indice generation.
 
@@ -415,7 +445,7 @@ class GetIndicePairsImplicitGemm(Function):
             ONNX outputs representing implicit-GEMM pairing metadata.
         """
         outputs = g.op(
-            "autoware::GetIndicePairsImplicitGemm",
+            qualified(GET_INDICE_PAIRS_IMPLICIT_GEMM_OP),
             indices,
             batch_size_i=batch_size,
             spatial_shape_i=spatial_shape,
@@ -428,6 +458,8 @@ class GetIndicePairsImplicitGemm(Function):
             subm_i=subm,
             transpose_i=transpose,
             is_train_i=is_train,
+            # Without do_sort the plugin takes its legacy path, which warns and sorts.
+            do_sort_i=int(do_sort),
             outputs=5,
         )
         indices_shape = _get_tensor_sizes(indices)
@@ -457,6 +489,7 @@ class GetIndicePairsImplicitGemm(Function):
         is_train: bool,
         alloc: ThrustSortAllocator | None,
         timer: CUDAKernelTimer,
+        do_sort: bool = SPCONV_DO_SORT,
     ) -> torch.Tensor:
         """Generate implicit-GEMM indice pairs during eager execution.
 
@@ -490,7 +523,6 @@ class GetIndicePairsImplicitGemm(Function):
         # The flag only affects tracing, the deployed plugin builds its own tables and
         # training uses the native spconv layers.
         direct_table: bool = False
-        do_sort = SPCONV_DO_SORT
 
         stream = _current_stream_for(indices)
 
@@ -553,7 +585,7 @@ class GetIndicePairsImplicitGemm(Function):
             Tuple of ``None`` gradients for all inputs.
         """
         del ctx, grad_output
-        return _no_gradients(14)
+        return _no_gradients(15)
 
 
 class ImplicitGemm(Function):
@@ -572,7 +604,7 @@ class ImplicitGemm(Function):
         pair_mask_fwd_splits: torch.Tensor,
         mask_argsort_fwd_splits: torch.Tensor,
         num_activate_out: int,
-        masks: Sequence[UInt32[np.ndarray, " 1"] | None],
+        masks: list[npt.NDArray],
         is_train: bool,
         is_subm: bool,
         timer: CUDAKernelTimer,
@@ -594,7 +626,7 @@ class ImplicitGemm(Function):
         """
 
         output = g.op(
-            "autoware::ImplicitGemm",
+            qualified(IMPLICIT_GEMM_OP),
             features,
             filters,
             pair_fwd,
@@ -607,6 +639,7 @@ class ImplicitGemm(Function):
             act_beta_f=act_beta,
             output_scale_f=output_scale,
             output_add_scale_f=output_add_scale,
+            act_type_i=_gemm_activation_to_onnx_int(act_type),
             outputs=1,
         )
         _set_sparse_feature_metadata(output, features, filters)
@@ -622,7 +655,7 @@ class ImplicitGemm(Function):
         pair_mask_fwd_splits: torch.Tensor,
         mask_argsort_fwd_splits: torch.Tensor,
         num_activate_out: int,
-        masks: Sequence[UInt32[np.ndarray, " 1"] | None],
+        masks: list[npt.NDArray],
         is_train: bool,
         is_subm: bool,
         timer: CUDAKernelTimer = CUDAKernelTimer(False),

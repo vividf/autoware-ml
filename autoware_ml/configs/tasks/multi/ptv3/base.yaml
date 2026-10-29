@@ -77,6 +77,9 @@ deploy:
           attention_node_name_substring: /bbox_head/decoder
   tensorrt:
     enabled: false
+    # Implements the autoware:: sparse-convolution ops (the cpe layers) of the encoder and
+    # head graphs; built by the image (docker/tensorrt_plugins/README.md).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
 
 model:
   _target_: autoware_ml.models.multi.ptv3_det3d_seg3d.PTv3Det3DSeg3DModel

@@ -31,7 +31,8 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
     """Build one graph stage's spec from a completed run of the stage graph.
 
     The trace inputs are the tensors the stage ran on (``state.graph_inputs``). The spec takes
-    the stage's declared input and output names. Its ``dynamic_axes`` are the stage's
+    the stage's declared input and output names and its ``onnx_transforms``. Its
+    ``dynamic_axes`` are the stage's
     ``onnx_dynamic_axes``, or ``None`` so that the module's config entry applies.
     """
     dynamic_axes = (
@@ -47,6 +48,7 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
         input_names=list(stage.inputs),
         output_names=list(stage.outputs),
         dynamic_axes=dynamic_axes,
+        onnx_transforms=tuple(stage.onnx_transforms),
     )
 
 
