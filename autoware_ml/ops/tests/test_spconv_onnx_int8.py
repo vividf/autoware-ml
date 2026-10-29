@@ -21,8 +21,8 @@ import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+from autoware_ml.ops.spconv.contract import PRECISION_INT8
 from autoware_ml.ops.spconv.onnx_int8 import (
-    PRECISION_INT8,
     SparseLayerScales,
     quantize_implicit_gemm_nodes,
 )
