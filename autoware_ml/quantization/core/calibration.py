@@ -28,7 +28,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 from torch import nn
 from tqdm import tqdm
 
-from autoware_ml.quantization.config import CalibrationConfig
+from autoware_ml.quantization.config import CalibrationConfig, CalibrationMethod
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,10 @@ class Calibrator:
             if isinstance(quantizer._calibrator, calib.HistogramCalibrator):
                 kwargs = (
                     {"percentile": calibration.percentile}
-                    if calibration.method == "percentile"
+                    if calibration.method is CalibrationMethod.PERCENTILE
                     else {}
                 )
-                quantizer.load_calib_amax(calibration.method, strict=False, **kwargs)
+                quantizer.load_calib_amax(calibration.method.value, strict=False, **kwargs)
             else:
                 quantizer.load_calib_amax(strict=False)
             quantizer.enable_quant()
@@ -120,7 +120,7 @@ class Calibrator:
         ``forward_fn(model, batch)`` moves the batch to the model's device and preprocesses it.
         """
         logger.info("Starting calibration with %d batches, %s", num_batches, calibration.describe())
-        if calibration.method == "smoothquant":
+        if calibration.method is CalibrationMethod.SMOOTHQUANT:
             # modelopt rescales the INT8 Linear weights in place (input_quantizer.pre_quant_scale).
             smoothquant(
                 self.model,

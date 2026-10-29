@@ -25,7 +25,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
 
 from autoware_ml.models.detection3d.main_modules.centerpoint import CENTERPOINT_QUANT_RULES  # noqa: E402
 from autoware_ml.quantization.config import QuantizationConfig  # noqa: E402
-from autoware_ml.quantization.plan import QuantizationPlan  # noqa: E402
+from autoware_ml.quantization.plan import prepare_quantized_tree  # noqa: E402
 
 _CONFIG = QuantizationConfig.from_dict(
     {
@@ -52,9 +52,7 @@ def _build_model():
 def _prepared():
     torch.manual_seed(0)
     model = _build_model().eval()
-    plan = QuantizationPlan.for_model(model, _CONFIG)
-    plan.prepare(model)
-    return model, plan
+    return model, prepare_quantized_tree(model, _CONFIG)
 
 
 def test_rules_are_the_model_declaration() -> None:
@@ -69,12 +67,11 @@ def test_rules_are_the_model_declaration() -> None:
 
 
 def test_same_plan_builds_identical_trees_and_records() -> None:
-    model_a, plan_a = _prepared()
-    model_b, plan_b = _prepared()
+    model_a, prepared_a = _prepared()
+    model_b, prepared_b = _prepared()
     assert set(model_a.state_dict()) == set(model_b.state_dict())
-    only_a, only_b = plan_a.placement_record.diff(plan_b.placement_record)
-    assert only_a == [] and only_b == []
-    assert len(plan_a.placement_record) > 0
+    assert prepared_a.placement_record.decisions == prepared_b.placement_record.decisions
+    assert len(prepared_a.placement_record) > 0
 
 
 def test_producer_state_dict_loads_strict_into_loader_tree() -> None:
