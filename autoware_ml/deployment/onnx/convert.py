@@ -27,7 +27,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from autoware_ml.deployment.onnx.inspect import onnx_custom_op_domains, onnx_has_qdq
+import onnx
+
+from autoware_ml.deployment.onnx.inspect import custom_op_domains, has_qdq
 from autoware_ml.deployment.onnx.precision import cast_graph_to_fp16
 from autoware_ml.utils.onnx_precision import OnnxPrecision
 from autoware_ml.utils.onnx_precision import convert_onnx_precision as convert_plain_onnx_precision
@@ -40,9 +42,10 @@ def convert_onnx_precision(onnx_path: str | Path, precision: OnnxPrecision) -> P
     if precision != OnnxPrecision.FP16:
         raise ValueError(f"No conversion implemented for precision '{precision}'.")
     onnx_path = Path(onnx_path)
-    domains = onnx_custom_op_domains(onnx_path)
-    has_qdq = onnx_has_qdq(onnx_path)
-    if domains or has_qdq:
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    domains = custom_op_domains(model)
+    quantized = has_qdq(model)
+    if domains or quantized:
         logger.info(
             "Converting %s to fp16 with the island-aware whole-graph cast (%s).",
             onnx_path.name,
@@ -51,7 +54,7 @@ def convert_onnx_precision(onnx_path: str | Path, precision: OnnxPrecision) -> P
                     None,
                     [
                         f"plugin domains: {', '.join(domains)}" if domains else "",
-                        "Q/DQ nodes" if has_qdq else "",
+                        "Q/DQ nodes" if quantized else "",
                     ],
                 )
             ),
