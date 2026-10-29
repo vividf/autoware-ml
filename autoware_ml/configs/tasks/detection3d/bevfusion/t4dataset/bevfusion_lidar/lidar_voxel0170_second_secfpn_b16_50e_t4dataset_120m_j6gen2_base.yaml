@@ -31,6 +31,12 @@ deploy:
         min_shape: [1000]
         opt_shape: [80000]
         max_shape: ["${eval_max_voxels}"]
+  # On by default: it is the only gate of model.bbox_head.fuse_export_attention below, whose
+  # fp16 attention overflows where TensorRT does not fuse it. 100 frames show that; the whole
+  # split (num_samples: -1) is the release measurement.
+  evaluation:
+    enabled: true
+    num_samples: 100
 
 callbacks:
   dynamic_validation:
