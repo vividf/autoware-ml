@@ -20,10 +20,11 @@ import logging
 import time
 from pathlib import Path
 
+import onnx
 import onnxruntime as ort
 import torch
 
-from autoware_ml.deployment.onnx.inspect import onnx_has_qdq
+from autoware_ml.deployment.onnx.inspect import has_qdq
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class OnnxModuleRunner:
             providers = ["CPUExecutionProvider"]
 
         session_options = ort.SessionOptions()
-        if onnx_has_qdq(onnx_path):
+        if has_qdq(onnx.load(str(onnx_path), load_external_data=False)):
             # ONNX Runtime's graph optimizer (the whole BASIC level, not one transformer)
             # mis-executes fp16-typed Q/DQ graphs: on the BEVFusion dense stage the heatmap's
             # mean error grows 30x (3.7e-3 vs 1.4e-4) and mAP drops from 0.45 to 0.39, while
