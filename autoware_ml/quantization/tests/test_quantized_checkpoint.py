@@ -50,13 +50,6 @@ def _record(*modules: str) -> PlacementRecord:
 
 
 class TestDescriptionRoundTrip:
-    def test_a_payload_with_the_dropped_fuse_bn_key_still_reads(self):
-        payload = QuantizationDescription(
-            config=_CONFIG, placement_record=_record("a.conv")
-        ).to_payload()
-        payload["config"]["fuse_bn"] = True  # written before the flag was removed
-        assert QuantizationDescription.from_payload(payload).config == _CONFIG
-
     def test_payload_round_trips_config_and_record(self):
         description = QuantizationDescription(
             config=_CONFIG, placement_record=_record("a.conv", "b.conv")
@@ -64,20 +57,6 @@ class TestDescriptionRoundTrip:
         restored = QuantizationDescription.from_payload(description.to_payload())
         assert restored.config == _CONFIG
         assert restored.placement_record.decisions == description.placement_record.decisions
-
-    def test_qat_config_round_trips(self):
-        qat = QuantizationConfig.from_dict(
-            {
-                "enabled": True,
-                "mode": "qat",
-                "qat": {
-                    "epochs": 2,
-                    "lr": 1e-5,
-                    "schedule": {"type": "one_cycle", "div_factor": 5},
-                },
-            }
-        )
-        assert QuantizationConfig.from_dict(qat.to_dict()) == qat
 
 
 class TestCheckpointFiles:

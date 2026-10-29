@@ -20,7 +20,7 @@ import pytest
 from torch import nn
 
 from autoware_ml.quantization.config import Precision, QuantizationConfig
-from autoware_ml.quantization.plan import QuantizationPlan
+from autoware_ml.quantization.plan import prepare_quantized_tree
 from autoware_ml.quantization.rules import QuantRules
 
 
@@ -67,8 +67,7 @@ def test_unknown_kind_and_unknown_precision_are_rejected() -> None:
 def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     model = _Model().eval()
     rules = QuantRules(quantize_submodules={"body": {"conv": "int8", "linear": "fp8"}})
-    plan = QuantizationPlan(rules=rules, config=_config())
-    plan.prepare(model)
+    prepared = prepare_quantized_tree(model, _config(), rules=rules)
 
     conv_bits = model.body.conv.weight_quantizer.num_bits
     linear_bits = model.body.linear.weight_quantizer.num_bits
@@ -76,7 +75,7 @@ def test_mixed_precision_prepare_quantizes_each_kind_at_its_precision() -> None:
     assert linear_bits == (4, 3)  # FP8 E4M3
 
     # The record spells the deviating precision, and only that one.
-    details = {d.module: d.detail for d in plan.placement_record.decisions}
+    details = {d.module: d.detail for d in prepared.placement_record.decisions}
     assert "@fp8" in details["body.linear"]
     assert "@" not in details["body.conv"]
 
@@ -97,15 +96,14 @@ def test_attention_out_proj_is_never_replaced() -> None:
 
     model = _AttnModel().eval()
     rules = QuantRules(quantize_submodules={"body": {"linear": "fp8"}})
-    plan = QuantizationPlan(rules=rules, config=_config())
-    plan.prepare(model)
+    prepared = prepare_quantized_tree(model, _config(), rules=rules)
 
     assert type(model.body.attn.out_proj).__name__ == "NonDynamicallyQuantizableLinear"
     assert not hasattr(model.body.attn.out_proj, "weight_quantizer")
     assert "weight_quantizer" not in "".join(model.body.attn.state_dict().keys())
     assert model.body.linear.weight_quantizer.num_bits == (4, 3)
     replaced = [
-        d.module for d in plan.placement_record.decisions if d.transform == "replace_module"
+        d.module for d in prepared.placement_record.decisions if d.transform == "replace_module"
     ]
     assert replaced == ["body.linear"]
 
@@ -113,7 +111,8 @@ def test_attention_out_proj_is_never_replaced() -> None:
 def test_default_precision_records_stay_identical_to_the_pre_feature_format() -> None:
     model = _Model().eval()
     rules = QuantRules(quantize_submodules={"body": ("conv", "linear")})
-    plan = QuantizationPlan(rules=rules, config=_config())
-    plan.prepare(model)
-    details = [d.detail for d in plan.placement_record.decisions if d.transform == "replace_module"]
+    prepared = prepare_quantized_tree(model, _config(), rules=rules)
+    details = [
+        d.detail for d in prepared.placement_record.decisions if d.transform == "replace_module"
+    ]
     assert details == ["Conv2d -> QuantConv2d", "Linear -> QuantLinear"]

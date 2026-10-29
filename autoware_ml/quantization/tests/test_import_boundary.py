@@ -12,16 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Every model imports ``quantization.rules``; that must not load modelopt or the engine."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
-
-import pytest
-
-import autoware_ml.quantization as quantization
 
 
 def _loaded_after(statement: str) -> list[str]:
@@ -44,16 +41,19 @@ def test_importing_the_model_base_loads_neither_modelopt_nor_the_engine() -> Non
     assert _loaded_after("import autoware_ml.models.module_base_model") == ["False", "False"]
 
 
-def test_package_exports_load_on_access() -> None:
-    assert _loaded_after("from autoware_ml.quantization import QuantRules") == ["False", "False"]
-    assert _loaded_after("from autoware_ml.quantization import QuantizationPlan") == [
-        "True",
-        "True",
+def test_the_rules_and_config_modules_load_without_the_engine() -> None:
+    assert _loaded_after("from autoware_ml.quantization.rules import QuantRules") == [
+        "False",
+        "False",
+    ]
+    assert _loaded_after("from autoware_ml.quantization.config import QuantizationConfig") == [
+        "False",
+        "False",
     ]
 
 
-def test_every_export_resolves() -> None:
-    for name in quantization.__all__:
-        assert getattr(quantization, name) is not None
-    with pytest.raises(AttributeError, match="no attribute 'not_an_export'"):
-        quantization.not_an_export  # noqa: B018
+def test_the_plan_loads_the_engine() -> None:
+    assert _loaded_after("from autoware_ml.quantization.plan import prepare_quantized_tree") == [
+        "True",
+        "True",
+    ]

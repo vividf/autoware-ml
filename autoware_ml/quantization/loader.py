@@ -22,13 +22,13 @@ from pathlib import Path
 
 import torch
 
-from autoware_ml.quantization.checkpoint import QuantizationDescription
+from autoware_ml.quantization.checkpoint import QuantizationDescription, find_quantization
 from autoware_ml.quantization.core.quantizer_state import (
     disable_quantizers_in,
     validate_quantizer_amax,
 )
-from autoware_ml.quantization.core.replace import expand_skip_quantize
-from autoware_ml.quantization.plan import QuantizationPlan
+from autoware_ml.quantization.plan import prepare_quantized_tree
+from autoware_ml.utils.checkpoints import apply_matching_weights
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +85,10 @@ def load_quantized_model(
         config.mode,
         list(config.skip_quantize),
     )
-    plan = QuantizationPlan.for_model(model, config)
-    plan.prepare(model)
-    plan.placement_record.verify_matches(
+    prepared = prepare_quantized_tree(model, config)
+    prepared.placement_record.verify_matches(
         description.placement_record, source="the checkpoint's embedded placement record"
     )
-    skip_layers = expand_skip_quantize(model, config.skip_quantize, log=False)
 
     loaded_keys = _load_checkpoints_into_model(model, weight_paths, map_location=device)
     uncovered = sorted(set(model.state_dict().keys()) - loaded_keys)
@@ -110,7 +108,7 @@ def load_quantized_model(
     model.to(device)
     model.eval()
     # Disable first: skip_quantize quantizers carry amax=None, and validation skips disabled ones.
-    disable_quantizers_in(model, skip_layers)
+    disable_quantizers_in(model, prepared.skip_names)
     validate_quantizer_amax(model)
 
     logger.info("Quantized checkpoint loaded successfully")
@@ -135,9 +133,6 @@ def load_model_weights(
     ``skip_mismatched_shapes`` applies to FP checkpoints only: a quantized one must match its
     rebuilt tree exactly.
     """
-    from autoware_ml.quantization.checkpoint import find_quantization
-    from autoware_ml.utils.checkpoints import apply_matching_weights
-
     if isinstance(weight_paths, (str, Path)):
         weight_paths = [weight_paths]
     weight_paths = [Path(path) for path in weight_paths]

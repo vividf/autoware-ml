@@ -66,7 +66,7 @@ def _batches(n: int = 4):
 
 @pytest.mark.parametrize("method", ["mse", "entropy", "percentile", "max"])
 def test_every_method_yields_validated_amax(method):
-    calibration = CalibrationConfig.from_raw(method)
+    calibration = CalibrationConfig.model_validate(method)
     net = _prepared(calibration)
     Calibrator(net).calibrate(
         _batches(), num_batches=4, calibration=calibration, forward_fn=_forward
@@ -83,16 +83,20 @@ def test_every_method_yields_validated_amax(method):
 
 
 def test_percentile_clips_below_max():
-    hi = _prepared(CalibrationConfig.from_raw("max"))
-    Calibrator(hi).calibrate(_batches(), 4, CalibrationConfig.from_raw("max"), forward_fn=_forward)
-    lo_cfg = CalibrationConfig.from_raw({"method": "percentile", "percentile": 90.0})
+    hi = _prepared(CalibrationConfig.model_validate("max"))
+    Calibrator(hi).calibrate(
+        _batches(), 4, CalibrationConfig.model_validate("max"), forward_fn=_forward
+    )
+    lo_cfg = CalibrationConfig.model_validate({"method": "percentile", "percentile": 90.0})
     lo = _prepared(lo_cfg)
     Calibrator(lo).calibrate(_batches(), 4, lo_cfg, forward_fn=_forward)
     assert lo.conv.input_quantizer._amax < hi.conv.input_quantizer._amax
 
 
 def test_smoothquant_migrates_outliers_and_round_trips(tmp_path):
-    calibration = CalibrationConfig.from_raw({"method": "smoothquant", "smoothquant_alpha": 0.5})
+    calibration = CalibrationConfig.model_validate(
+        {"method": "smoothquant", "smoothquant_alpha": 0.5}
+    )
     net = _prepared(calibration)
     weight_before = net.linear.weight.detach().clone()
     Calibrator(net).calibrate(_batches(), 4, calibration, forward_fn=_forward)

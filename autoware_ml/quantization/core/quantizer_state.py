@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import torch
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -111,8 +112,20 @@ def validate_quantizer_amax(model: nn.Module) -> None:
         )
 
 
-def print_quantizer_status(model: nn.Module) -> None:
-    """Log the enabled, disabled and calibrated quantizer counts, and each quantizer at DEBUG."""
+class QuantizerCounts(NamedTuple):
+    """Enabled, disabled and calibrated ``TensorQuantizer`` counts of a model."""
+
+    enabled: int
+    disabled: int
+    calibrated: int
+
+    @property
+    def total(self) -> int:
+        return self.enabled + self.disabled
+
+
+def count_quantizers(model: nn.Module) -> QuantizerCounts:
+    """Count the quantizers of ``model``, logging each one at DEBUG."""
     enabled = disabled = calibrated = 0
     for name, module in model.named_modules():
         if not isinstance(module, TensorQuantizer):
@@ -135,24 +148,16 @@ def print_quantizer_status(model: nn.Module) -> None:
                 )
         status = "DISABLED" if module._disabled else "ENABLED"
         logger.debug("Quantizer %s: %s, %s", name, status, detail)
+    return QuantizerCounts(enabled, disabled, calibrated)
 
+
+def print_quantizer_status(model: nn.Module) -> None:
+    """Log the enabled, disabled and calibrated quantizer counts."""
+    counts = count_quantizers(model)
     logger.info(
         "Quantizer status: %d enabled, %d disabled, %d calibrated (%d total)",
-        enabled,
-        disabled,
-        calibrated,
-        enabled + disabled,
+        counts.enabled,
+        counts.disabled,
+        counts.calibrated,
+        counts.total,
     )
-
-
-def count_quantizers(model: nn.Module) -> dict:
-    """Count the enabled and disabled quantizers in the model."""
-    enabled = 0
-    disabled = 0
-    for _name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            if module._disabled:
-                disabled += 1
-            else:
-                enabled += 1
-    return {"enabled": enabled, "disabled": disabled, "total": enabled + disabled}

@@ -43,10 +43,6 @@ QUANTIZATION_KEY = "quantization"
 #: reproduces it.
 FORMAT_VERSION = 1
 
-#: ``config`` keys of older payloads that no longer exist. ``fuse_bn`` only ever accepted
-#: ``true`` (BN is always folded), so ignoring it changes nothing.
-_DROPPED_CONFIG_KEYS = frozenset({"fuse_bn"})
-
 
 @dataclass(frozen=True)
 class QuantizationDescription:
@@ -72,9 +68,8 @@ class QuantizationDescription:
                 f"Quantized checkpoint payload format {version!r} is not the supported "
                 f"{FORMAT_VERSION}; re-produce it with `autoware-ml quantize`."
             )
-        config = {k: v for k, v in payload["config"].items() if k not in _DROPPED_CONFIG_KEYS}
         return cls(
-            config=QuantizationConfig.from_dict(config),
+            config=QuantizationConfig.from_dict(payload["config"]),
             placement_record=PlacementRecord.from_json_dict(payload["placement_record"]),
         )
 
