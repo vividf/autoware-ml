@@ -41,6 +41,7 @@ from autoware_ml.deployment.stages import Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.types.dataset import SplitType
 from autoware_ml.utils.deploy import ExportSpec
 from autoware_ml.utils.optimizer import build_lightning_optimizer_config
@@ -453,6 +454,17 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
             f"{type(self).__name__} does not implement build_deployed_eval_output(), so the "
             "outputs of its deployed graphs cannot be scored."
         )
+
+    def build_quantization_rules(self) -> QuantRules | None:
+        """Declare the module kinds the quantize stage may replace in each submodule.
+
+        The rules are architecture facts, so they live in code; the ``quantization`` config
+        can only exclude modules from them (``skip_quantize``).
+
+        Returns:
+            The rules, or ``None`` when the model does not support quantization.
+        """
+        return None
 
     def build_export_specs(
         self, multi_task_batch_inputs: ModelBatchInputs

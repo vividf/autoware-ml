@@ -22,7 +22,6 @@ import torch
 
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
-from autoware_ml.utils.checkpoints import apply_matching_weights
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +48,7 @@ def build_model(
     set_eval: bool = False,
     enforce_full_coverage: bool = False,
     skip_mismatched_weights: bool = False,
+    allow_quantized_weights: bool = True,
 ) -> ModuleBaseModel:
     """
     Build a model from the Hydra configuration.
@@ -63,6 +63,9 @@ def build_model(
         enforce_full_coverage: Whether to enforce that all model parameters are covered by the weights.
         skip_mismatched_weights: Whether to skip, with a warning, weight tensors whose key matches a
             model tensor of a different shape instead of raising.
+        allow_quantized_weights: Whether a quantized checkpoint (from ``autoware-ml quantize``)
+            may be loaded; the model then comes back quantized. Stages that need the FP model
+            (training, quantize) pass ``False``.
 
     Returns:
         Pytorch-Lightning ModuleBaseModel for multi-task learning/inference.
@@ -77,15 +80,17 @@ def build_model(
     model = instantiate(cfg.model, data_preprocessor=data_preprocessor).to(device)
 
     if weights_path is not None:
-        apply_matching_weights(
+        # Imported here: the quantization engine is only needed to load weights.
+        from autoware_ml.quantization.loader import load_model_weights
+
+        load_model_weights(
             model,
             weights_path,
-            map_location=device,
-            device=device,
-            logger=logger,
+            device,
+            set_eval=set_eval,
             enforce_full_coverage=enforce_full_coverage,
             skip_mismatched_shapes=skip_mismatched_weights,
-            set_eval=set_eval,
+            allow_quantized=allow_quantized_weights,
         )
 
     if resume_checkpoint_path is not None:
