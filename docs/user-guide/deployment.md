@@ -227,25 +227,24 @@ Plain graphs go through the upstream `onnxconverter_common` cast unchanged.
 
 ## Model-Owned Export Wrappers
 
-The preferred deployment path is to keep export logic inside the model. Models
-with deployment-specific requirements should override `build_export_spec()` and
-return an explicit export module plus example tensor inputs.
-
-This keeps export-time behavior close to the model implementation and avoids
-ad hoc post-processing for most cases.
-
-A model whose deployment splits into several exported graphs with PyTorch glue
-between them can declare that split once instead, by overriding
-`build_stages()`: an ordered list of `GraphStage` (one exported module, named
-after the stage, with the tensor names it reads and writes) and `TorchStage`
-(glue that is not exported). `build_export_specs()` then checks the dataflow,
-runs the stages once on the example batch in eval mode, and returns one export
-spec per `GraphStage`, traced on the tensors the glue produced. The model
-outputs are the graph outputs no later stage reads, so a declaration ends with
-a `GraphStage`; PyTorch post-processing of the deployed outputs belongs in
-`build_deployed_eval_output()`. CenterPoint declares its two modules this way;
+Export logic lives inside the model. A new model declares its deployment as a
+stage graph by overriding `build_stages()`: an ordered list of `GraphStage` (one
+exported module, named after the stage, with the tensor names it reads and
+writes) and `TorchStage` (glue that is not exported). `build_export_specs()`
+then checks the dataflow, runs the stages once on the example batch in eval
+mode, and returns one export spec per `GraphStage`, traced on the tensors the
+glue produced. The model outputs are the graph outputs no later stage reads, so
+a declaration ends with a `GraphStage`; PyTorch post-processing of the deployed
+outputs belongs in `build_deployed_eval_output()`. CenterPoint, BEVFusion
+(lidar-only) and the PTv3 models declare their modules this way;
 [Stage graph: verification and evaluation](#stage-graph-verification-and-evaluation)
 describes the declaration in full and what else runs on it.
+
+Models that do not declare a stage graph yet (TransFusion, FRNet, the
+calibration-status classifier, camera-lidar BEVFusion) override
+`build_export_spec()` or `build_export_specs()` instead and return an explicit
+export module plus example tensor inputs. That path exports, but nothing
+verifies or scores its artifacts.
 
 ## Optional Graph Modification
 
