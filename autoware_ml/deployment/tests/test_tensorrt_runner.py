@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 import torch
 
@@ -24,7 +26,7 @@ from autoware_ml.deployment.tests.test_onnx_runner import _gemm_graph
 
 pytest.importorskip("tensorrt", reason="the TensorRT runner needs the tensorrt package")
 
-from autoware_ml.deployment.backends.tensorrt_builder import build_engine  # noqa: E402
+from autoware_ml.deployment.backends.tensorrt_builder import build_engine, trt_logger  # noqa: E402
 from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner  # noqa: E402
 
 REQUIRES_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="TensorRT needs CUDA")
@@ -50,6 +52,27 @@ def test_engine_matches_onnxruntime_and_reuses_its_output_buffers(tmp_path) -> N
     outputs, _ = runner.run({"x": (x + 1).cuda()})
     assert outputs["y"].data_ptr() == first_buffer
     torch.testing.assert_close(outputs["y"].cpu(), x + 1)
+
+
+@REQUIRES_CUDA
+def test_engines_share_one_logger_and_survive_a_reload(tmp_path) -> None:
+    # One logger per process: a logger created per engine is destroyed before the runtime and
+    # engine that log through it, which crashed the second load of a plugin engine.
+    onnx_path = _gemm_graph(tmp_path, quantized=False)
+    engine_path = tmp_path / "plain.engine"
+    build_engine(onnx_path, engine_path)
+    x = torch.arange(8, dtype=torch.float32).reshape(2, 4).cuda()
+
+    first = TensorRTModuleRunner(engine_path, torch.device("cuda"))
+    assert first.runtime.logger is trt_logger()
+    expected, _ = first.run({"x": x})
+    expected = expected["y"].clone()
+    del first
+    gc.collect()
+
+    second = TensorRTModuleRunner(engine_path, torch.device("cuda"))
+    outputs, _ = second.run({"x": x})
+    torch.testing.assert_close(outputs["y"], expected)
 
 
 @REQUIRES_CUDA
