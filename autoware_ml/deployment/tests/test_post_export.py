@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
+import unittest
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import lightning as L
-import pytest
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -199,44 +202,55 @@ def _cfg(enabled: bool = True, tolerance: float | None = None) -> PostExportConf
     )
 
 
-def test_disabled_sections_do_nothing_even_without_stages(tmp_path) -> None:
-    datamodule = _DataModule()
-    run_post_export(
-        PostExportConfig.from_deploy_cfg({"onnx": {}, "tensorrt": {}}),
-        _PlainModel(),
-        datamodule,
-        tmp_path,
-        torch.device("cpu"),
-    )
-    assert datamodule.setup_calls == []
+class TestPostExportVerification(unittest.TestCase):
+    """Unit tests for verifying the exported artifacts against the PyTorch reference."""
 
+    def setUp(self) -> None:
+        """Give each test its own directory for the exported artifacts."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
 
-def test_enabling_verification_on_a_model_without_stages_is_an_error(tmp_path) -> None:
-    with pytest.raises(ValueError, match="build_stages"):
-        run_post_export(_cfg(), _PlainModel(), _DataModule(), tmp_path, torch.device("cpu"))
+    def test_disabled_sections_do_nothing_even_without_stages(self) -> None:
+        datamodule = _DataModule()
+        run_post_export(
+            PostExportConfig.from_deploy_cfg({"onnx": {}, "tensorrt": {}}),
+            _PlainModel(),
+            datamodule,
+            self.tmp_path,
+            torch.device("cpu"),
+        )
+        self.assertEqual(datamodule.setup_calls, [])
 
+    def test_enabling_verification_on_a_model_without_stages_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "build_stages"):
+            run_post_export(
+                _cfg(), _PlainModel(), _DataModule(), self.tmp_path, torch.device("cpu")
+            )
 
-def test_onnx_artifacts_verify_against_the_pytorch_reference(tmp_path, caplog) -> None:
-    torch.manual_seed(0)
-    model = _StagedModel().eval()
-    _export_stage_artifacts(model, tmp_path)
-    datamodule = _DataModule()
-    with caplog.at_level(logging.INFO):
-        run_post_export(_cfg(), model, datamodule, tmp_path, torch.device("cpu"))
-    assert "Backend verification passed" in caplog.text
-    assert datamodule.setup_calls == ["prepare_data", "predict"]
-    assert "2 batch(es)" in caplog.text
+    def test_onnx_artifacts_verify_against_the_pytorch_reference(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        datamodule = _DataModule()
+        with self.assertLogs(level=logging.INFO) as logs:
+            run_post_export(_cfg(), model, datamodule, self.tmp_path, torch.device("cpu"))
+        text = "\n".join(logs.output)
+        self.assertIn("Backend verification passed", text)
+        self.assertEqual(datamodule.setup_calls, ["prepare_data", "predict"])
+        self.assertIn("2 batch(es)", text)
 
-
-def test_a_diverging_artifact_fails_the_deploy(tmp_path) -> None:
-    torch.manual_seed(0)
-    model = _StagedModel().eval()
-    _export_stage_artifacts(model, tmp_path)
-    # The PyTorch reference now differs from the exported artifacts.
-    with torch.no_grad():
-        model.encoder.linear.weight.add_(10.0)
-    with pytest.raises(RuntimeError, match="verification FAILED"):
-        run_post_export(_cfg(tolerance=0.5), model, _DataModule(), tmp_path, torch.device("cpu"))
+    def test_a_diverging_artifact_fails_the_deploy(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        # The PyTorch reference now differs from the exported artifacts.
+        with torch.no_grad():
+            model.encoder.linear.weight.add_(10.0)
+        with self.assertRaisesRegex(RuntimeError, "verification FAILED"):
+            run_post_export(
+                _cfg(tolerance=0.5), model, _DataModule(), self.tmp_path, torch.device("cpu")
+            )
 
 
 def _evaluation_cfg() -> PostExportConfig:
@@ -258,43 +272,62 @@ def _evaluation_cfg() -> PostExportConfig:
     )
 
 
-def test_evaluation_scores_every_available_backend_and_logs_metrics(tmp_path) -> None:
-    torch.manual_seed(0)
-    model = _StagedModel().eval()
-    _export_stage_artifacts(model, tmp_path)
-    logged: dict[str, float] = {}
-    datamodule = _DataModule()
-    results = run_post_export(
-        _evaluation_cfg(),
-        model,
-        datamodule,
-        tmp_path,
-        torch.device("cpu"),
-        log_metric=logged.__setitem__,
-    )
-    # tensorrt has no artifacts and is skipped.
-    assert [r.backend.value for r in results] == ["pytorch", "onnx"]
-    # deploy.evaluation.batch_size, not the split's training-time 16.
-    assert datamodule.built_batch_sizes == [(SplitType.TEST, 1), (SplitType.TEST, 1)]
-    assert results[0].num_samples == 12
-    assert results[0].metrics["test/pytorch/toy/error"] == pytest.approx(
-        results[1].metrics["test/onnx/toy/error"], abs=1e-5
-    )
-    assert "latency/onnx/model_graphs_mean_ms" in logged
-    assert "test/pytorch/toy/error" in logged
+class TestPostExportEvaluation(unittest.TestCase):
+    """Unit tests for scoring every available backend and writing the results."""
 
+    def setUp(self) -> None:
+        """Give each test its own directory for the exported artifacts and the results."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
 
-def test_evaluation_writes_every_metric_without_a_tracker(tmp_path) -> None:
-    torch.manual_seed(0)
-    model = _StagedModel().eval()
-    _export_stage_artifacts(model, tmp_path)
-    results = run_post_export(
-        _evaluation_cfg(), model, _DataModule(), tmp_path, torch.device("cpu")
-    )
-    entries = json.loads((tmp_path / "evaluation.json").read_text())["results"]
-    assert [entry["backend"] for entry in entries] == ["pytorch", "onnx"]
-    for entry, result in zip(entries, results):
-        assert entry["metrics"] == pytest.approx(result.metrics)
-        assert entry["latency_ms"]["model_graphs"]["mean"] == pytest.approx(
-            result.latency["model_graphs"].mean
+    def test_evaluation_scores_every_available_backend_and_logs_metrics(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        logged: dict[str, float] = {}
+        datamodule = _DataModule()
+        results = run_post_export(
+            _evaluation_cfg(),
+            model,
+            datamodule,
+            self.tmp_path,
+            torch.device("cpu"),
+            log_metric=logged.__setitem__,
         )
+        # tensorrt has no artifacts and is skipped.
+        self.assertEqual([r.backend.value for r in results], ["pytorch", "onnx"])
+        # deploy.evaluation.batch_size, not the split's training-time 16.
+        self.assertEqual(datamodule.built_batch_sizes, [(SplitType.TEST, 1), (SplitType.TEST, 1)])
+        self.assertEqual(results[0].num_samples, 12)
+        self.assertAlmostEqual(
+            results[0].metrics["test/pytorch/toy/error"],
+            results[1].metrics["test/onnx/toy/error"],
+            delta=1e-5,
+        )
+        self.assertIn("latency/onnx/model_graphs_mean_ms", logged)
+        self.assertIn("test/pytorch/toy/error", logged)
+
+    def test_evaluation_writes_every_metric_without_a_tracker(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        results = run_post_export(
+            _evaluation_cfg(), model, _DataModule(), self.tmp_path, torch.device("cpu")
+        )
+        entries = json.loads((self.tmp_path / "evaluation.json").read_text())["results"]
+        self.assertEqual([entry["backend"] for entry in entries], ["pytorch", "onnx"])
+        for entry, result in zip(entries, results):
+            self.assertEqual(entry["metrics"].keys(), result.metrics.keys())
+            for key, value in result.metrics.items():
+                np.testing.assert_allclose(entry["metrics"][key], value, rtol=1e-6, atol=1e-12)
+            np.testing.assert_allclose(
+                entry["latency_ms"]["model_graphs"]["mean"],
+                result.latency["model_graphs"].mean,
+                rtol=1e-6,
+                atol=1e-12,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

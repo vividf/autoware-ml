@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-import pytest
+import unittest
 
 from autoware_ml.utils.config.tests.config_roots import compose_task
 
@@ -27,11 +27,24 @@ BEVFUSION_CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config_name", BEVFUSION_CONFIGS)
-def test_fused_export_attention_is_gated_by_the_deploy_evaluation(config_name: str) -> None:
-    # The fused attention is only numerically safe where TensorRT fuses it; nothing at export
-    # time checks that, so a config that enables it must also score the deployed graphs.
-    cfg = compose_task(config_name)
-    if cfg.model.bbox_head.get("fuse_export_attention", False):
-        assert cfg.deploy.evaluation.enabled, f"{config_name}: fused attention without its gate"
-        assert cfg.deploy.evaluation.num_samples != 0
+class TestPostExportGates(unittest.TestCase):
+    """A config that enables an export option also enables the gate that checks it."""
+
+    def test_fused_export_attention_is_gated_by_the_deploy_evaluation(self) -> None:
+        """Test that a config with the fused attention scores its deployed graphs."""
+        # The fused attention is only numerically safe where TensorRT fuses it; nothing at export
+        # time checks that, so a config that enables it must also score the deployed graphs.
+        for config_name in BEVFUSION_CONFIGS:
+            with self.subTest(config_name=config_name):
+                cfg = compose_task(config_name)
+                if not cfg.model.bbox_head.get("fuse_export_attention", False):
+                    continue
+                self.assertTrue(
+                    cfg.deploy.evaluation.enabled,
+                    f"{config_name}: fused attention without its gate",
+                )
+                self.assertNotEqual(cfg.deploy.evaluation.num_samples, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

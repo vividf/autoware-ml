@@ -18,8 +18,9 @@
 
 from __future__ import annotations
 
+import unittest
+
 from omegaconf import OmegaConf
-import pytest
 from pydantic import ValidationError
 
 from autoware_ml.deployment.config import EvaluationConfig, PostExportConfig
@@ -45,67 +46,75 @@ _RAW = {
 }
 
 
-def test_round_trip_leaves_the_export_sections_alone() -> None:
-    cfg = PostExportConfig.from_deploy_cfg(_RAW)
-    assert cfg.verification.enabled and cfg.verification.scenarios[0].tolerance == 2.0
-    assert cfg.verification.tolerance == 0.01 and cfg.verification.num_verify_batches == 1
-    assert cfg.evaluation.num_samples == 10 and cfg.evaluation.split == "test"
-    assert [b for b, _ in cfg.evaluation.enabled_backends()] == [Backend.PYTORCH]
-    assert cfg.evaluation.backends[Backend.TENSORRT].device == "cuda:1"
-    assert cfg.any_enabled
+class TestPostExportConfig(unittest.TestCase):
+    """Unit tests for parsing the verification and evaluation sections of a deploy config."""
+
+    def test_round_trip_leaves_the_export_sections_alone(self) -> None:
+        cfg = PostExportConfig.from_deploy_cfg(_RAW)
+        self.assertTrue(cfg.verification.enabled)
+        self.assertEqual(cfg.verification.scenarios[0].tolerance, 2.0)
+        self.assertEqual(cfg.verification.tolerance, 0.01)
+        self.assertEqual(cfg.verification.num_verify_batches, 1)
+        self.assertEqual(cfg.evaluation.num_samples, 10)
+        self.assertEqual(cfg.evaluation.split, "test")
+        self.assertEqual([b for b, _ in cfg.evaluation.enabled_backends()], [Backend.PYTORCH])
+        self.assertEqual(cfg.evaluation.backends[Backend.TENSORRT].device, "cuda:1")
+        self.assertTrue(cfg.any_enabled)
+
+    def test_absent_sections_are_all_defaults_and_nothing_is_enabled(self) -> None:
+        cfg = PostExportConfig.from_deploy_cfg({"onnx": {}, "tensorrt": {}})
+        self.assertFalse(cfg.verification.enabled)
+        self.assertFalse(cfg.evaluation.enabled)
+        self.assertFalse(cfg.any_enabled)
+        self.assertEqual(PostExportConfig.from_deploy_cfg(None).verification.scenarios, ())
+
+    def test_unknown_keys_are_rejected_with_the_config_path(self) -> None:
+        cases = [
+            ({"verification": {"tolerence": 1.0}}, "verification.tolerence"),
+            ({"evaluation": {"samples": 3}}, "evaluation.samples"),
+            (
+                {"evaluation": {"backends": {"onnx": {"devcie": "cuda"}}}},
+                "evaluation.backends.onnx.devcie",
+            ),
+        ]
+        for raw, where in cases:
+            with self.subTest(where=where):
+                with self.assertRaisesRegex(ValidationError, where):
+                    PostExportConfig.from_deploy_cfg(raw)
+
+    def test_unknown_evaluation_backend_and_split_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "tensorflow"):
+            PostExportConfig.from_deploy_cfg({"evaluation": {"backends": {"tensorflow": {}}}})
+        with self.assertRaisesRegex(ValidationError, "evaluation.split"):
+            PostExportConfig.from_deploy_cfg({"evaluation": {"split": "train"}})
+        self.assertEqual(
+            PostExportConfig.from_deploy_cfg({"evaluation": {"split": "val"}}).evaluation.split,
+            "val",
+        )
+
+    def test_a_non_mapping_section_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "verification"):
+            PostExportConfig.from_deploy_cfg({"verification": "yes"})
+
+    def test_the_deploy_config_itself_parses(self) -> None:
+        cfg = PostExportConfig.from_deploy_cfg(OmegaConf.create(_RAW))
+        self.assertEqual(cfg.evaluation.num_samples, 10)
 
 
-def test_evaluation_batch_size_defaults_to_one_frame_and_rejects_zero() -> None:
-    assert EvaluationConfig().batch_size == 1
-    assert EvaluationConfig(batch_size=4).batch_size == 4
-    with pytest.raises(ValidationError, match="batch_size"):
-        EvaluationConfig(batch_size=0)
+class TestEvaluationConfig(unittest.TestCase):
+    """Unit tests for the defaults and limits of the evaluation section."""
+
+    def test_evaluation_batch_size_defaults_to_one_frame_and_rejects_zero(self) -> None:
+        self.assertEqual(EvaluationConfig().batch_size, 1)
+        self.assertEqual(EvaluationConfig(batch_size=4).batch_size, 4)
+        with self.assertRaisesRegex(ValidationError, "batch_size"):
+            EvaluationConfig(batch_size=0)
+
+    def test_evaluation_thread_count_defaults_to_one_and_parses(self) -> None:
+        self.assertEqual(EvaluationConfig().cpu_threads, 1)
+        self.assertEqual(EvaluationConfig(cpu_threads=0).cpu_threads, 0)
+        self.assertEqual(EvaluationConfig(cpu_threads=8).cpu_threads, 8)
 
 
-def test_absent_sections_are_all_defaults_and_nothing_is_enabled() -> None:
-    cfg = PostExportConfig.from_deploy_cfg({"onnx": {}, "tensorrt": {}})
-    assert not cfg.verification.enabled and not cfg.evaluation.enabled
-    assert not cfg.any_enabled
-    assert PostExportConfig.from_deploy_cfg(None).verification.scenarios == ()
-
-
-@pytest.mark.parametrize(
-    ("raw", "where"),
-    [
-        ({"verification": {"tolerence": 1.0}}, "verification.tolerence"),
-        ({"evaluation": {"samples": 3}}, "evaluation.samples"),
-        (
-            {"evaluation": {"backends": {"onnx": {"devcie": "cuda"}}}},
-            "evaluation.backends.onnx.devcie",
-        ),
-    ],
-)
-def test_unknown_keys_are_rejected_with_the_config_path(raw, where) -> None:
-    with pytest.raises(ValidationError, match=where):
-        PostExportConfig.from_deploy_cfg(raw)
-
-
-def test_evaluation_thread_count_defaults_to_one_and_parses() -> None:
-    assert EvaluationConfig().cpu_threads == 1
-    assert EvaluationConfig(cpu_threads=0).cpu_threads == 0
-    assert EvaluationConfig(cpu_threads=8).cpu_threads == 8
-
-
-def test_unknown_evaluation_backend_and_split_are_rejected() -> None:
-    with pytest.raises(ValidationError, match="tensorflow"):
-        PostExportConfig.from_deploy_cfg({"evaluation": {"backends": {"tensorflow": {}}}})
-    with pytest.raises(ValidationError, match="evaluation.split"):
-        PostExportConfig.from_deploy_cfg({"evaluation": {"split": "train"}})
-    assert (
-        PostExportConfig.from_deploy_cfg({"evaluation": {"split": "val"}}).evaluation.split == "val"
-    )
-
-
-def test_a_non_mapping_section_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="verification"):
-        PostExportConfig.from_deploy_cfg({"verification": "yes"})
-
-
-def test_the_deploy_config_itself_parses() -> None:
-    cfg = PostExportConfig.from_deploy_cfg(OmegaConf.create(_RAW))
-    assert cfg.evaluation.num_samples == 10
+if __name__ == "__main__":
+    unittest.main()
