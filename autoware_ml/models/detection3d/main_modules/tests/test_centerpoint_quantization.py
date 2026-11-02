@@ -16,16 +16,20 @@
 
 from __future__ import annotations
 
-import pytest
+import importlib.util
+import unittest
+
 import torch
 
-pytest.importorskip("modelopt")
+from autoware_ml.quantization.config import QuantizationConfig
 
-from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
+MODELOPT_AVAILABLE = importlib.util.find_spec("modelopt") is not None
 
-from autoware_ml.models.detection3d.main_modules.centerpoint import CENTERPOINT_QUANT_RULES  # noqa: E402
-from autoware_ml.quantization.config import QuantizationConfig  # noqa: E402
-from autoware_ml.quantization.plan import prepare_quantized_tree  # noqa: E402
+if MODELOPT_AVAILABLE:
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    from autoware_ml.models.detection3d.main_modules.centerpoint import CENTERPOINT_QUANT_RULES
+    from autoware_ml.quantization.plan import prepare_quantized_tree
 
 _CONFIG = QuantizationConfig.from_dict(
     {
@@ -38,8 +42,9 @@ _CONFIG = QuantizationConfig.from_dict(
 
 
 def _build_model():
-    # Imported here: at module level pytest would collect the model tests a second time, and
-    # they would run with the ModelOpt module registry the quantization tests leave patched.
+    # Imported here: at module level the test loader would collect the model tests a second
+    # time, and they would run with the ModelOpt module registry the quantization tests leave
+    # patched.
     from autoware_ml.models.detection3d.main_modules.tests.test_centerpoint import (
         TestCenterPointDetection3DModel,
     )
@@ -55,45 +60,62 @@ def _prepared():
     return model, prepare_quantized_tree(model, _CONFIG)
 
 
-def test_rules_are_the_model_declaration() -> None:
-    model = _build_model()
-    assert model.build_quantization_rules() is CENTERPOINT_QUANT_RULES
-    assert set(CENTERPOINT_QUANT_RULES.quantize_submodules) == {
-        "pts_backbone",
-        "pts_neck",
-        "bbox_head",
-        "pts_voxel_encoder",
-    }
+@unittest.skipUnless(MODELOPT_AVAILABLE, "could not import 'modelopt'")
+class TestCenterPointQuantization(unittest.TestCase):
+    """CenterPoint's declared rules build a reproducible quantized tree of the declared towers."""
 
+    def test_rules_are_the_model_declaration(self) -> None:
+        model = _build_model()
+        self.assertIs(model.build_quantization_rules(), CENTERPOINT_QUANT_RULES)
+        self.assertEqual(
+            set(CENTERPOINT_QUANT_RULES.quantize_submodules),
+            {
+                "pts_backbone",
+                "pts_neck",
+                "bbox_head",
+                "pts_voxel_encoder",
+            },
+        )
 
-def test_same_plan_builds_identical_trees_and_records() -> None:
-    model_a, prepared_a = _prepared()
-    model_b, prepared_b = _prepared()
-    assert set(model_a.state_dict()) == set(model_b.state_dict())
-    assert prepared_a.placement_record.decisions == prepared_b.placement_record.decisions
-    assert len(prepared_a.placement_record) > 0
+    def test_same_plan_builds_identical_trees_and_records(self) -> None:
+        model_a, prepared_a = _prepared()
+        model_b, prepared_b = _prepared()
+        self.assertEqual(set(model_a.state_dict()), set(model_b.state_dict()))
+        self.assertEqual(
+            prepared_a.placement_record.decisions, prepared_b.placement_record.decisions
+        )
+        self.assertGreater(len(prepared_a.placement_record), 0)
 
+    def test_producer_state_dict_loads_strict_into_loader_tree(self) -> None:
+        producer, _ = _prepared()
+        loader, _ = _prepared()
+        incompatible = loader.load_state_dict(producer.state_dict(), strict=True)
+        self.assertFalse(incompatible.missing_keys)
+        self.assertFalse(incompatible.unexpected_keys)
 
-def test_producer_state_dict_loads_strict_into_loader_tree() -> None:
-    producer, _ = _prepared()
-    loader, _ = _prepared()
-    incompatible = loader.load_state_dict(producer.state_dict(), strict=True)
-    assert not incompatible.missing_keys and not incompatible.unexpected_keys
+    def test_prepare_folds_bn_and_quantizes_only_the_declared_towers(self) -> None:
+        before = set(_build_model().state_dict())
+        model, _ = _prepared()
+        after = set(model.state_dict())
+        self.assertTrue(any("running_mean" in key for key in before))
+        self.assertFalse(
+            any(key.startswith("pts_backbone") and "running_mean" in key for key in after)
+        )
+        self.assertTrue(
+            any(key.startswith("pts_backbone") and key.endswith("conv.bias") for key in after)
+        )
 
-
-def test_prepare_folds_bn_and_quantizes_only_the_declared_towers() -> None:
-    before = set(_build_model().state_dict())
-    model, _ = _prepared()
-    after = set(model.state_dict())
-    assert any("running_mean" in key for key in before)
-    assert not any(key.startswith("pts_backbone") and "running_mean" in key for key in after)
-    assert any(key.startswith("pts_backbone") and key.endswith("conv.bias") for key in after)
-
-    quantizers = [n for n, m in model.named_modules() if isinstance(m, TensorQuantizer)]
-    assert not any(n.startswith("pts_voxel_encoder") for n in quantizers), "skip_quantize subtree"
-    assert any(n.startswith("pts_backbone") for n in quantizers), (
-        "the backbone must carry quantizers"
-    )
-    assert all(
-        n.endswith(("input_quantizer", "weight_quantizer", "output_quantizer")) for n in quantizers
-    )
+        quantizers = [n for n, m in model.named_modules() if isinstance(m, TensorQuantizer)]
+        self.assertFalse(
+            any(n.startswith("pts_voxel_encoder") for n in quantizers), "skip_quantize subtree"
+        )
+        self.assertTrue(
+            any(n.startswith("pts_backbone") for n in quantizers),
+            "the backbone must carry quantizers",
+        )
+        self.assertTrue(
+            all(
+                n.endswith(("input_quantizer", "weight_quantizer", "output_quantizer"))
+                for n in quantizers
+            )
+        )

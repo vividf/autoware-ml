@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import unittest
 
 
 def _loaded_after(statement: str) -> list[str]:
@@ -37,23 +38,26 @@ def _loaded_after(statement: str) -> list[str]:
     return result.stdout.splitlines()[-2:]
 
 
-def test_importing_the_model_base_loads_neither_modelopt_nor_the_engine() -> None:
-    assert _loaded_after("import autoware_ml.models.module_base_model") == ["False", "False"]
+class TestImportBoundary(unittest.TestCase):
+    """Only the plan loads modelopt and the engine; the model base, rules and config do not."""
 
+    def test_importing_the_model_base_loads_neither_modelopt_nor_the_engine(self) -> None:
+        self.assertEqual(
+            _loaded_after("import autoware_ml.models.module_base_model"), ["False", "False"]
+        )
 
-def test_the_rules_and_config_modules_load_without_the_engine() -> None:
-    assert _loaded_after("from autoware_ml.quantization.rules import QuantRules") == [
-        "False",
-        "False",
-    ]
-    assert _loaded_after("from autoware_ml.quantization.config import QuantizationConfig") == [
-        "False",
-        "False",
-    ]
+    def test_the_rules_and_config_modules_load_without_the_engine(self) -> None:
+        self.assertEqual(
+            _loaded_after("from autoware_ml.quantization.rules import QuantRules"),
+            ["False", "False"],
+        )
+        self.assertEqual(
+            _loaded_after("from autoware_ml.quantization.config import QuantizationConfig"),
+            ["False", "False"],
+        )
 
-
-def test_the_plan_loads_the_engine() -> None:
-    assert _loaded_after("from autoware_ml.quantization.plan import prepare_quantized_tree") == [
-        "True",
-        "True",
-    ]
+    def test_the_plan_loads_the_engine(self) -> None:
+        self.assertEqual(
+            _loaded_after("from autoware_ml.quantization.plan import prepare_quantized_tree"),
+            ["True", "True"],
+        )
