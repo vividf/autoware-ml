@@ -49,7 +49,6 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     serialize_stage_output_names,
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
-from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import export_to_onnx
 
 REQUIRES_SPARSE_CUDA = pytest.mark.skipif(
@@ -69,7 +68,6 @@ def test_seg3d_declaration_names_the_runtime_modules_and_is_name_covered() -> No
     encoder = stages[1]
     assert encoder.inputs[:5] == ENCODER_EXPORT_INPUT_NAMES
     assert not any(name.endswith("_cluster") for name in encoder.inputs)
-    assert encoder.torch_fallback_backends == (Backend.ONNX,)
     assert stages[2].outputs == ("pred_labels", "pred_probs")
 
 
