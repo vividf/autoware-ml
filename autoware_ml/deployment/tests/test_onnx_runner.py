@@ -15,6 +15,10 @@
 
 """Unit tests for the ONNX Runtime runner."""
 
+from pathlib import Path
+import tempfile
+import unittest
+
 import numpy as np
 import onnx
 import onnxruntime as ort
@@ -51,17 +55,27 @@ def _gemm_graph(tmp_path, quantized: bool):
     return path
 
 
-def test_runner_disables_graph_optimizations_for_qdq_graphs(tmp_path) -> None:
-    runner = OnnxModuleRunner(_gemm_graph(tmp_path, quantized=True), torch.device("cpu"))
-    level = runner.session.get_session_options().graph_optimization_level
-    assert level == ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    outputs, _ = runner.run({"x": torch.arange(8, dtype=torch.float32).reshape(2, 4)})
-    assert torch.allclose(
-        outputs["y"], torch.arange(8, dtype=torch.float32).reshape(2, 4), atol=0.06
-    )
+class TestOnnxModuleRunner(unittest.TestCase):
+    """The ONNX Runtime runner turns graph optimizations off for Q/DQ graphs only."""
 
+    def setUp(self) -> None:
+        """Give each test its own directory for the ONNX file."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
 
-def test_runner_keeps_default_optimizations_for_plain_graphs(tmp_path) -> None:
-    runner = OnnxModuleRunner(_gemm_graph(tmp_path, quantized=False), torch.device("cpu"))
-    level = runner.session.get_session_options().graph_optimization_level
-    assert level == ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    def test_runner_disables_graph_optimizations_for_qdq_graphs(self) -> None:
+        runner = OnnxModuleRunner(_gemm_graph(self.tmp_path, quantized=True), torch.device("cpu"))
+        level = runner.session.get_session_options().graph_optimization_level
+        self.assertEqual(level, ort.GraphOptimizationLevel.ORT_DISABLE_ALL)
+        outputs, _ = runner.run({"x": torch.arange(8, dtype=torch.float32).reshape(2, 4)})
+        self.assertTrue(
+            torch.allclose(
+                outputs["y"], torch.arange(8, dtype=torch.float32).reshape(2, 4), atol=0.06
+            )
+        )
+
+    def test_runner_keeps_default_optimizations_for_plain_graphs(self) -> None:
+        runner = OnnxModuleRunner(_gemm_graph(self.tmp_path, quantized=False), torch.device("cpu"))
+        level = runner.session.get_session_options().graph_optimization_level
+        self.assertEqual(level, ort.GraphOptimizationLevel.ORT_ENABLE_ALL)
