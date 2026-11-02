@@ -20,8 +20,13 @@ import logging
 
 import numpy as np
 import onnx
-from onnx import TensorProto, helper
+from onnx import TensorProto, helper, numpy_helper
 
+from autoware_ml.ops.spconv.contract import (
+    IMPLICIT_GEMM_BIAS_SLOT,
+    IMPLICIT_GEMM_INPUTS,
+    IMPLICIT_GEMM_WEIGHT_SCALE_SLOT,
+)
 from autoware_ml.ops.spconv.onnx_fusion import (
     ACT_RELU,
     fuse_implicit_gemm_bias_activation,
@@ -57,6 +62,10 @@ def _attribute(node: onnx.NodeProto, name: str) -> int:
     return next(attribute.i for attribute in node.attribute if attribute.name == name)
 
 
+def _initializer(model: onnx.ModelProto, name: str) -> onnx.TensorProto:
+    return next(tensor for tensor in model.graph.initializer if tensor.name == name)
+
+
 def test_bias_and_relu_fold_into_the_plugin_node() -> None:
     model = _graph(
         _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
@@ -71,9 +80,52 @@ def test_bias_and_relu_fold_into_the_plugin_node() -> None:
     assert (fused_biases, fused_activations) == (1, 1)
     assert [node.op_type for node in model.graph.node] == ["ImplicitGemm"]
     gemm = model.graph.node[0]
-    assert list(gemm.input) == ["features", "w", "p", "m", "a", "bias"]
+    assert list(gemm.input) == [
+        "features",
+        "w",
+        "p",
+        "m",
+        "a",
+        "w.weight_scale",
+        "bias",
+    ]
     assert list(gemm.output) == ["activated"]
     assert _attribute(gemm, "act_type") == ACT_RELU
+
+
+def test_a_folded_bias_takes_the_seven_input_form() -> None:
+    model = _graph(
+        _implicit_gemm(["features", "cpe.0.weight", "p", "m", "a"], "gemm_out", "gemm"),
+        helper.make_node("Add", ["gemm_out", "bias"], ["biased"], name="add"),
+        outputs=["biased"],
+        initializers=["bias"],
+    )
+
+    fuse_implicit_gemm_bias_activation(model)
+
+    gemm = model.graph.node[0]
+    assert len(gemm.input) == IMPLICIT_GEMM_INPUTS
+    weight_scale = _initializer(model, gemm.input[IMPLICIT_GEMM_WEIGHT_SCALE_SLOT])
+    assert weight_scale.name == "cpe.0.weight_scale"
+    assert (weight_scale.data_type, list(weight_scale.dims)) == (TensorProto.FLOAT, [0])
+    assert gemm.input[IMPLICIT_GEMM_BIAS_SLOT] == "bias"
+
+
+def test_a_half_precision_bias_is_folded_as_fp32() -> None:
+    model = _graph(
+        _implicit_gemm(["features", "w", "p", "m", "a"], "gemm_out", "gemm"),
+        helper.make_node("Add", ["gemm_out", "bias"], ["biased"], name="add"),
+        outputs=["biased"],
+        initializers=[],
+    )
+    bias = np.array([0.5, -1.25, 2.0, 3.0], dtype=np.float16)
+    model.graph.initializer.append(numpy_helper.from_array(bias, "bias"))
+
+    fuse_implicit_gemm_bias_activation(model)
+
+    folded = _initializer(model, model.graph.node[0].input[IMPLICIT_GEMM_BIAS_SLOT])
+    assert folded.data_type == TensorProto.FLOAT
+    np.testing.assert_array_equal(numpy_helper.to_array(folded), bias.astype(np.float32))
 
 
 def test_bias_folds_without_an_activation() -> None:
@@ -158,5 +210,7 @@ def test_structurally_identical_nodes_are_removed_by_identity(tmp_path) -> None:
     fused = onnx.load(str(path))
     assert not [node for node in fused.graph.node if node.op_type == "Add"]
     gemms = [node for node in fused.graph.node if node.op_type == "ImplicitGemm"]
-    assert len(gemms) == 2 and all(len(node.input) == 6 for node in gemms)
+    assert len(gemms) == 2 and all(len(node.input) == IMPLICIT_GEMM_INPUTS for node in gemms)
+    # The twins share their weight, so they share the one empty weight scale too.
+    assert [tensor.name for tensor in fused.graph.initializer].count("w.weight_scale") == 1
     onnx.checker.check_model(fused)

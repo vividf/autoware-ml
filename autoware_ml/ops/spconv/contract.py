@@ -33,14 +33,18 @@ def qualified(op_type: str) -> str:
     return f"{AUTOWARE_DOMAIN}::{op_type}"
 
 
-#: ``ImplicitGemm`` inputs: features, weight, pair_fwd, pair_mask, mask_argsort and, in
-#: slot 5, the optional bias the fusion folds in.
-IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS = 5
-IMPLICIT_GEMM_BIAS_SLOT = 5
+#: ``ImplicitGemm`` inputs: features, weight, pair_fwd, pair_mask and mask_argsort. A node with
+#: a bias or quantization scales takes all seven: slot 5 the per-output-channel weight scale
+#: (FP32 ``[C_out]``, or ``[0]`` on a layer that is not quantized) and slot 6 the bias (FP32
+#: ``[C_out]``, or ``[0]``). spconv and t4sparse share this layout; the six-input bias form the
+#: spconv plugin also accepts is refused by t4sparse, so nothing here writes it.
+IMPLICIT_GEMM_BASE_INPUTS = 5
+IMPLICIT_GEMM_INPUTS = 7
+IMPLICIT_GEMM_WEIGHT_SCALE_SLOT = 5
+IMPLICIT_GEMM_BIAS_SLOT = 6
 
 #: ``ImplicitGemm`` attributes the ONNX passes write; the symbolics emit them by name.
 ACT_TYPE_ATTR = "act_type"
-PRECISION_ATTR = "precision"
 INPUT_SCALE_ATTR = "input_scale"
 OUTPUT_SCALE_ATTR = "output_scale"
 #: ``GetIndicePairsImplicitGemm`` attribute: whether the pair masks are argsorted.
@@ -49,7 +53,3 @@ DO_SORT_ATTR = "do_sort"
 #: ``ImplicitGemm.act_type`` values; the plugin mirrors cumm's ``tv::gemm::Activation``.
 ACT_NONE = 0
 ACT_RELU = 1
-
-#: ``ImplicitGemm.precision`` values (``ImplicitGemmParameters::precision``).
-PRECISION_FP = 0
-PRECISION_INT8 = 1
