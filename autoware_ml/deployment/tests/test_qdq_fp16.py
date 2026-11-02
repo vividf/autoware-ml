@@ -764,7 +764,8 @@ def test_cast_graph_to_fp16_keeps_a_float_range_fp32(tmp_path) -> None:
     onnx.checker.check_model(converted, full_check=True)
 
 
-def test_int8_implicit_gemm_scale_inputs_stay_fp32(tmp_path) -> None:
+def test_seven_input_implicit_gemm_scale_and_bias_stay_fp32(tmp_path) -> None:
+    # A folded bias (empty weight scale) as the plugins read it: slots 5 and 6 are FP32.
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [8, 4])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [8, 6])
     inits = [
@@ -772,27 +773,26 @@ def test_int8_implicit_gemm_scale_inputs_stay_fp32(tmp_path) -> None:
         helper.make_tensor("pairs", TensorProto.INT32, [27, 8], np.zeros((27, 8), np.int32)),
         helper.make_tensor("splits", TensorProto.INT32, [4], np.zeros(4, np.int32)),
         helper.make_tensor("argsort", TensorProto.INT32, [4], np.zeros(4, np.int32)),
-        helper.make_tensor("channel_scale", TensorProto.FLOAT, [6], np.full(6, 0.01, np.float32)),
+        helper.make_tensor("weight_scale", TensorProto.FLOAT, [0], np.zeros(0, np.float32)),
         helper.make_tensor("bias_raw", TensorProto.FLOAT, [6], np.ones(6, np.float32)),
         helper.make_tensor("two", TensorProto.FLOAT, [1], np.array([2.0], np.float32)),
     ]
     nodes = [
-        # bias_scaled comes from a sea node.
-        helper.make_node("Mul", ["bias_raw", "two"], ["bias_scaled"], name="mul"),
+        # The bias comes from a sea node.
+        helper.make_node("Mul", ["bias_raw", "two"], ["bias"], name="mul"),
         helper.make_node(
             "ImplicitGemm",
-            ["x", "w", "pairs", "splits", "argsort", "channel_scale", "bias_scaled"],
+            ["x", "w", "pairs", "splits", "argsort", "weight_scale", "bias"],
             ["y"],
             domain="autoware",
-            name="gemm_int8",
-            precision=1,
+            name="gemm",
         ),
     ]
-    graph = helper.make_graph(nodes, "int8_plugin", [x], [y], inits)
+    graph = helper.make_graph(nodes, "plugin", [x], [y], inits)
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
     )
-    path = tmp_path / "int8_plugin.onnx"
+    path = tmp_path / "plugin.onnx"
     onnx.save(model, str(path))
 
     cast_graph_to_fp16(path)
@@ -800,14 +800,14 @@ def test_int8_implicit_gemm_scale_inputs_stay_fp32(tmp_path) -> None:
     converted = onnx.load(str(path))
     dtypes = {i.name: i.data_type for i in converted.graph.initializer}
     assert dtypes["w"] == TensorProto.FLOAT16
-    assert dtypes["channel_scale"] == TensorProto.FLOAT
+    assert dtypes["weight_scale"] == TensorProto.FLOAT
     gemm = next(n for n in converted.graph.node if n.op_type == "ImplicitGemm")
     casts = {
         n.output[0]: next(a.i for a in n.attribute if a.name == "to")
         for n in converted.graph.node
         if n.op_type == "Cast"
     }
-    assert gemm.input[5] == "channel_scale"
+    assert gemm.input[5] == "weight_scale"
     assert casts[gemm.input[6]] == TensorProto.FLOAT
     assert casts[gemm.input[0]] == TensorProto.FLOAT16
 
