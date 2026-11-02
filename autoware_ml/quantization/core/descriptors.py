@@ -50,8 +50,8 @@ _CONV_TRANSPOSE2D_WEIGHT: Mapping[Precision, QuantizerAttributeConfig] = {
 }
 
 #: The weight is ``[C_out, k1, k2, k3, C_in]``, so ``axis=0`` gives the per-output-channel
-#: scales the ImplicitGemm plugin's ``channel_scale`` input takes. No FP8: the plugin has an
-#: INT8 path only.
+#: scales the ImplicitGemm plugin's ``weight_scale`` input (slot 5) takes. No FP8: the spconv
+#: plugin has an INT8 path only.
 _SPCONV_WEIGHT: Mapping[Precision, QuantizerAttributeConfig] = {
     Precision.INT8: QuantizerAttributeConfig(num_bits=8, axis=0),
 }
