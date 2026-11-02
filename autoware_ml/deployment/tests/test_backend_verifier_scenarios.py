@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
-import pytest
+import unittest
+
+import numpy as np
 from pydantic import ValidationError
 
 from autoware_ml.deployment.verification.backend_verifier import (
@@ -25,7 +27,9 @@ from autoware_ml.deployment.verification.backend_verifier import (
 )
 
 
-class TestVerificationScenario:
+class TestVerificationScenario(unittest.TestCase):
+    """Unit tests for parsing a verification scenario from its config mapping."""
+
     def test_valid_mapping(self):
         scenario = VerificationScenario.model_validate(
             {
@@ -33,18 +37,18 @@ class TestVerificationScenario:
                 "test": {"backend": "onnx", "device": "cuda"},
             }
         )
-        assert scenario.ref.backend == "pytorch"
-        assert scenario.ref.device == "cpu"
-        assert scenario.test.backend == "onnx"
-        assert scenario.test.device == "cuda"
-        assert scenario.tolerance is None
+        self.assertEqual(scenario.ref.backend, "pytorch")
+        self.assertEqual(scenario.ref.device, "cpu")
+        self.assertEqual(scenario.test.backend, "onnx")
+        self.assertEqual(scenario.test.device, "cuda")
+        self.assertIsNone(scenario.tolerance)
 
     def test_device_defaults_to_cuda(self):
         scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "tensorrt"}}
         )
-        assert scenario.ref.device == "cuda"
-        assert scenario.test.device == "cuda"
+        self.assertEqual(scenario.ref.device, "cuda")
+        self.assertEqual(scenario.test.device, "cuda")
 
     def test_per_scenario_tolerance_parsed_as_float(self):
         scenario = VerificationScenario.model_validate(
@@ -54,33 +58,32 @@ class TestVerificationScenario:
                 "tolerance": "0.001",
             }
         )
-        assert isinstance(scenario.tolerance, float)
-        assert scenario.tolerance == pytest.approx(0.001)
+        self.assertIsInstance(scenario.tolerance, float)
+        np.testing.assert_allclose(scenario.tolerance, 0.001, rtol=1e-6, atol=1e-12)
 
     def test_missing_tolerance_stays_none(self):
         scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "onnx"}}
         )
-        assert scenario.tolerance is None
+        self.assertIsNone(scenario.tolerance)
 
-    @pytest.mark.parametrize(
-        "raw",
-        [
+    def test_malformed_input_raises_value_error(self):
+        cases = [
             {},
             {"ref": {"backend": "pytorch"}},
             {"ref": {"device": "cuda"}, "test": {"backend": "onnx"}},
             {"ref": "pytorch", "test": "onnx"},
-        ],
-    )
-    def test_malformed_input_raises_value_error(self, raw):
-        with pytest.raises(ValidationError):
-            VerificationScenario.model_validate(raw)
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValidationError):
+                    VerificationScenario.model_validate(raw)
 
     def test_scenario_is_frozen(self):
         scenario = VerificationScenario.model_validate(
             {"ref": {"backend": "pytorch"}, "test": {"backend": "onnx"}}
         )
-        with pytest.raises(ValidationError):
+        with self.assertRaises(ValidationError):
             scenario.tolerance = 0.5
 
     def test_describe_names_backends_and_devices(self):
@@ -90,12 +93,14 @@ class TestVerificationScenario:
                 "test": {"backend": "onnx", "device": "cuda"},
             }
         )
-        assert scenario.describe() == "pytorch(cpu) vs onnx(cuda)"
+        self.assertEqual(scenario.describe(), "pytorch(cpu) vs onnx(cuda)")
 
 
-class TestDegenerateScenariosAreRejected:
+class TestDegenerateScenariosAreRejected(unittest.TestCase):
+    """Unit tests for refusing scenarios and runs that compare nothing."""
+
     def test_same_backend_and_device_is_refused(self):
-        with pytest.raises(ValidationError, match="with itself"):
+        with self.assertRaisesRegex(ValidationError, "with itself"):
             VerificationScenario.model_validate(
                 {
                     "ref": {"backend": "tensorrt", "device": "cuda"},
@@ -110,9 +115,14 @@ class TestDegenerateScenariosAreRejected:
                 "test": {"backend": "pytorch", "device": "cuda"},
             }
         )
-        assert scenario.ref.device == "cpu" and scenario.test.device == "cuda"
+        self.assertEqual(scenario.ref.device, "cpu")
+        self.assertEqual(scenario.test.device, "cuda")
 
     def test_verification_enabled_without_scenarios_raises(self):
         verifier = BackendVerifier(pipelines=None, tolerance=0.01)
-        with pytest.raises(ValueError, match="scenarios is empty"):
+        with self.assertRaisesRegex(ValueError, "scenarios is empty"):
             verifier.run(batches=[], scenarios=(), available_backends=set())
+
+
+if __name__ == "__main__":
+    unittest.main()

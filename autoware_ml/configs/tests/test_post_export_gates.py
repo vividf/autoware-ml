@@ -17,9 +17,10 @@
 
 from __future__ import annotations
 
+import unittest
+
 from hydra import compose, initialize_config_module
 from hydra.core.global_hydra import GlobalHydra
-import pytest
 
 from autoware_ml.configs.resolvers import register_config_resolvers
 
@@ -36,11 +37,23 @@ def _compose(config_name: str):
         return compose(config_name=config_name)
 
 
-@pytest.mark.parametrize("config_name", BEVFUSION_CONFIGS)
-def test_fused_export_attention_is_gated_by_the_deploy_evaluation(config_name: str) -> None:
-    # The fused attention is only numerically safe where TensorRT fuses it; nothing at export
-    # time checks that, so a config that enables it must also score the deployed graphs.
-    cfg = _compose(config_name)
-    if cfg.model.bbox_head.get("fuse_export_attention", False):
-        assert cfg.deploy.evaluation.enabled, f"{config_name}: fused attention without its gate"
-        assert cfg.deploy.evaluation.num_samples != 0
+class TestPostExportGates(unittest.TestCase):
+    """Unit tests for the deploy evaluation that guards an export option of a task config."""
+
+    def test_fused_export_attention_is_gated_by_the_deploy_evaluation(self) -> None:
+        for config_name in BEVFUSION_CONFIGS:
+            with self.subTest(config_name=config_name):
+                # The fused attention is only numerically safe where TensorRT fuses it; nothing at
+                # export time checks that, so a config that enables it must also score the
+                # deployed graphs.
+                cfg = _compose(config_name)
+                if cfg.model.bbox_head.get("fuse_export_attention", False):
+                    self.assertTrue(
+                        cfg.deploy.evaluation.enabled,
+                        f"{config_name}: fused attention without its gate",
+                    )
+                    self.assertNotEqual(cfg.deploy.evaluation.num_samples, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

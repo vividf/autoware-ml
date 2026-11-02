@@ -17,10 +17,13 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import unittest
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
-import pytest
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -128,74 +131,103 @@ def _loader(num_batches: int = 4, batch_size: int = 3) -> DataLoader:
     return DataLoader(items, batch_size=None)
 
 
-def test_pytorch_backend_scores_the_split_and_times_every_stage() -> None:
-    model = _Model().eval()
-    pipeline = StagedPipeline(
-        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
-    )
-    result = evaluate_backend(model, _loader(), pipeline, torch.device("cpu"), num_warmup=1)
+class TestEvaluateBackend(unittest.TestCase):
+    """Unit tests for scoring and timing one backend over a split."""
 
-    assert result.backend is Backend.PYTORCH and result.split == "test"
-    assert result.num_samples == 12
-    assert result.metrics == {"test/pytorch/toy/error": 0.0, "test/pytorch/toy/error_0m_50m": 0.0}
-    assert set(result.latency) == {"prep", "scale", MODEL_STAGE, "preprocess", "decode_and_metrics"}
-    assert result.headline_metrics == ("error",)
-    flat = flatten_results([result])
-    assert "latency/pytorch/model_graphs_mean_ms" in flat and flat["test/pytorch/toy/error"] == 0.0
+    def test_pytorch_backend_scores_the_split_and_times_every_stage(self) -> None:
+        model = _Model().eval()
+        pipeline = StagedPipeline(
+            model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        result = evaluate_backend(model, _loader(), pipeline, torch.device("cpu"), num_warmup=1)
+
+        self.assertIs(result.backend, Backend.PYTORCH)
+        self.assertEqual(result.split, "test")
+        self.assertEqual(result.num_samples, 12)
+        self.assertEqual(
+            result.metrics, {"test/pytorch/toy/error": 0.0, "test/pytorch/toy/error_0m_50m": 0.0}
+        )
+        self.assertEqual(
+            set(result.latency), {"prep", "scale", MODEL_STAGE, "preprocess", "decode_and_metrics"}
+        )
+        self.assertEqual(result.headline_metrics, ("error",))
+        flat = flatten_results([result])
+        self.assertIn("latency/pytorch/model_graphs_mean_ms", flat)
+        self.assertEqual(flat["test/pytorch/toy/error"], 0.0)
+
+    def test_num_samples_limits_at_batch_granularity_and_val_reports_under_val(self) -> None:
+        model = _Model().eval()
+        pipeline = StagedPipeline(
+            model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        result = evaluate_backend(
+            model, _loader(), pipeline, torch.device("cpu"), num_samples=4, stage=EvalStage.VAL
+        )
+        self.assertEqual(result.num_samples, 6)  # the limit is checked per batch of three
+        self.assertTrue(next(iter(result.metrics)).startswith("val/pytorch/"))
+
+    def test_zero_samples_is_an_error(self) -> None:
+        model = _Model().eval()
+        pipeline = StagedPipeline(
+            model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        with self.assertRaisesRegex(ValueError, "zero samples"):
+            evaluate_backend(model, _loader(num_batches=0), pipeline, torch.device("cpu"))
+
+    def test_a_missing_eval_key_names_the_model(self) -> None:
+        class _Broken(_Model):
+            def build_deployed_eval_output(self, batch_inputs, outputs):
+                return {"prediction": outputs["y"]}
+
+        model = _Broken().eval()
+        pipeline = StagedPipeline(
+            model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
+        )
+        with self.assertRaisesRegex(ValueError, "_Broken.build_deployed_eval_output"):
+            evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))
 
 
-def test_num_samples_limits_at_batch_granularity_and_val_reports_under_val() -> None:
-    model = _Model().eval()
-    pipeline = StagedPipeline(
-        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
-    )
-    result = evaluate_backend(
-        model, _loader(), pipeline, torch.device("cpu"), num_samples=4, stage=EvalStage.VAL
-    )
-    assert result.num_samples == 6  # the limit is checked per batch of three
-    assert next(iter(result.metrics)).startswith("val/pytorch/")
+class TestWriteResultsJson(unittest.TestCase):
+    """Unit tests for the results file the evaluation writes."""
+
+    def setUp(self) -> None:
+        """Give each test its own directory for the results file."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
+
+    def test_results_json_keeps_every_metric_and_nulls_non_finite_values(self) -> None:
+        result = EvaluationResult(
+            backend=Backend.TENSORRT,
+            device="cuda",
+            split="test",
+            metrics={
+                "test/tensorrt/det3d/mAP_car": 0.5,
+                "test/tensorrt/det3d/mAP_bus": float("nan"),
+            },
+            latency={MODEL_STAGE: LatencyStats.from_samples([2.0, 4.0])},
+            num_samples=2,
+        )
+        path = write_results_json([result], self.tmp_path / RESULTS_FILE_NAME)
+
+        def reject(constant: str) -> None:
+            self.fail(f"non-strict JSON constant {constant}")
+
+        (entry,) = json.loads(path.read_text(), parse_constant=reject)["results"]
+        self.assertEqual(
+            (entry["backend"], entry["split"], entry["num_samples"]), ("tensorrt", "test", 2)
+        )
+        self.assertEqual(
+            entry["metrics"],
+            {
+                "test/tensorrt/det3d/mAP_bus": None,
+                "test/tensorrt/det3d/mAP_car": 0.5,
+            },
+        )
+        np.testing.assert_allclose(
+            entry["latency_ms"][MODEL_STAGE]["mean"], 3.0, rtol=1e-6, atol=1e-12
+        )
 
 
-def test_zero_samples_is_an_error() -> None:
-    model = _Model().eval()
-    pipeline = StagedPipeline(
-        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
-    )
-    with pytest.raises(ValueError, match="zero samples"):
-        evaluate_backend(model, _loader(num_batches=0), pipeline, torch.device("cpu"))
-
-
-def test_a_missing_eval_key_names_the_model(tmp_path) -> None:
-    class _Broken(_Model):
-        def build_deployed_eval_output(self, batch_inputs, outputs):
-            return {"prediction": outputs["y"]}
-
-    model = _Broken().eval()
-    pipeline = StagedPipeline(
-        model.build_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
-    )
-    with pytest.raises(ValueError, match="_Broken.build_deployed_eval_output"):
-        evaluate_backend(model, _loader(), pipeline, torch.device("cpu"))
-
-
-def test_results_json_keeps_every_metric_and_nulls_non_finite_values(tmp_path) -> None:
-    result = EvaluationResult(
-        backend=Backend.TENSORRT,
-        device="cuda",
-        split="test",
-        metrics={"test/tensorrt/det3d/mAP_car": 0.5, "test/tensorrt/det3d/mAP_bus": float("nan")},
-        latency={MODEL_STAGE: LatencyStats.from_samples([2.0, 4.0])},
-        num_samples=2,
-    )
-    path = write_results_json([result], tmp_path / RESULTS_FILE_NAME)
-
-    def reject(constant: str) -> None:
-        pytest.fail(f"non-strict JSON constant {constant}")
-
-    (entry,) = json.loads(path.read_text(), parse_constant=reject)["results"]
-    assert (entry["backend"], entry["split"], entry["num_samples"]) == ("tensorrt", "test", 2)
-    assert entry["metrics"] == {
-        "test/tensorrt/det3d/mAP_bus": None,
-        "test/tensorrt/det3d/mAP_car": 0.5,
-    }
-    assert entry["latency_ms"][MODEL_STAGE]["mean"] == pytest.approx(3.0)
+if __name__ == "__main__":
+    unittest.main()
