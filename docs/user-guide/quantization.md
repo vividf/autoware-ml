@@ -118,8 +118,10 @@ self-describing like the PTQ one.
   (the first step of `prepare_quantized_tree`), so the quantized weight the graph carries
   is the one the scales were taken on.
 - **Sparse convolutions** (BEVFusion's encoder, PTv3's cpe convs) export as
-  `autoware::ImplicitGemm` plugin nodes; a calibrated one carries `precision=1` plus its
-  `channel_scale` / `bias_scaled` inputs instead of Q/DQ. See
+  `autoware::ImplicitGemm` plugin nodes. A calibrated one reads INT8 features from a
+  `QuantizeLinear` in front of it and carries INT8 filters, its per-channel `weight_scale`
+  (input 5), the bias (input 6), `input_scale` and `output_type = "f16"`; the plugin's
+  epilogue dequantizes, so no DequantizeLinear follows it. See
   [Deployment › Plugin graphs](deployment.md#plugin-graphs-sparse-convolutions).
 - **Precision.** Quantized graphs use `deploy.onnx.precision: fp16` with opset 19 (fp16-typed
   Q/DQ); the cast is island-aware, so Linear Q/DQ regions keep fp32 mini-islands where fp16
