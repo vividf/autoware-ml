@@ -12,22 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Switch exported ``autoware::ImplicitGemm`` nodes into the plugin's INT8 mode.
+"""Write the calibrated INT8 scales of the exported ``autoware::ImplicitGemm`` nodes.
 
-TensorRT does not fuse Q/DQ nodes into a plugin op, so the calibrated scales travel as
-plugin attributes and inputs instead. The node keeps its op type and gains
+A calibrated node takes the quantized row of the plugin contract that spconv's
+``autoware_tensorrt_plugins`` and t4sparse share (tier4/t4sparse#32):
 
-    precision = 1
-    input_scale = input_amax / 127                      (attribute, per tensor)
-    channel_scale = input_scale * weight_amax / 127     (6th input, per output channel)
-    bias_scaled = the folded bias                       (7th input, per output channel)
+    input 0      INT8, from a QuantizeLinear inserted in front of the node (scale input_scale)
+    input 1      INT8 filters, round(w / weight_scale[n]) clipped to +-127
+    input 5      weight_scale = weight_amax / 127, FP32 [C_out]
+    input 6      the folded bias, FP32 [C_out], or [0] without one
+    input_scale  input_amax / 127, the QuantizeLinear's scale
+    output_type  "f16"; no output_scale
 
-and the plugin quantizes features and weights itself, accumulates in INT32 and writes FP16
-(``ImplicitGemmPlugin::enqueueInt8`` in ``autoware_tensorrt_plugins``).
-
-``output_scale`` stays 1.0: the plugin expects ``channel_scale`` and ``bias_scaled`` divided
-by it and multiplies them back, so its value cancels. The ``s8s8f16`` epilogue never
-re-quantizes the output, so unlike AWML no activation-chain output scale is calibrated.
+The plugin accumulates in INT32 and writes ``act(input_scale * weight_scale[n] * acc +
+bias[n])`` in FP16: the dequantization is its epilogue, so no DequantizeLinear follows the
+node and no output scale is calibrated. TensorRT runs the FP16 -> INT8 conversion and can fuse
+it into the producer.
 
 A node becomes INT8 only when its PyTorch module carries a calibrated quantizer. A layer in
 ``quantization.skip_quantize`` has none and stays an FP16 node; it is skipped during PTQ as
@@ -43,20 +43,23 @@ from pathlib import Path
 
 import numpy as np
 import onnx
-from onnx import numpy_helper
+from onnx import TensorProto, helper, numpy_helper
 from torch import nn
 
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.contract import (
     AUTOWARE_DOMAIN,
-    IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
+    IMPLICIT_GEMM_BASE_INPUTS,
+    IMPLICIT_GEMM_BIAS_SLOT,
+    IMPLICIT_GEMM_INPUTS,
     IMPLICIT_GEMM_OP,
+    IMPLICIT_GEMM_WEIGHT_SCALE_SLOT,
     INPUT_SCALE_ATTR,
     OUTPUT_SCALE_ATTR,
-    PRECISION_ATTR,
-    PRECISION_INT8,
+    OUTPUT_TYPE_ATTR,
+    OUTPUT_TYPE_FP16,
 )
-from autoware_ml.ops.spconv.onnx_fusion import replace_attribute
+from autoware_ml.ops.spconv.onnx_fusion import replace_attribute, weight_scale_name
 
 if IS_SPCONV_AVAILABLE:
     from spconv.pytorch.conv import SparseConvolution
@@ -64,7 +67,6 @@ if IS_SPCONV_AVAILABLE:
 logger = logging.getLogger(__name__)
 
 _INT8_MAX = 127.0
-_SPARSE_INPUTS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 
 
 @dataclass(frozen=True)
@@ -78,11 +80,6 @@ class SparseLayerScales:
 
     input_scale: float
     weight_scale: np.ndarray
-
-    @property
-    def channel_scale(self) -> np.ndarray:
-        """The plugin's ``channel_scale`` input for an ``output_scale`` of 1."""
-        return (self.input_scale * self.weight_scale).astype(np.float32)
 
 
 def _amax_array(quantizer: nn.Module, what: str, stem: str) -> np.ndarray:
@@ -163,42 +160,99 @@ def _stem_of(initializer_name: str, stems: frozenset[str]) -> str | None:
     return matched[0]
 
 
+def _set_initializer(graph: onnx.GraphProto, name: str, values: np.ndarray) -> None:
+    """Write ``values`` as initializer ``name``, replacing one of that name."""
+    tensor = numpy_helper.from_array(values, name)
+    existing = next((init for init in graph.initializer if init.name == name), None)
+    if existing is None:
+        graph.initializer.append(tensor)
+    else:
+        existing.CopyFrom(tensor)
+
+
+def _drop_attribute(node: onnx.NodeProto, name: str) -> None:
+    kept = [attribute for attribute in node.attribute if attribute.name != name]
+    del node.attribute[:]
+    node.attribute.extend(kept)
+
+
+def _int8_filter_codes(filters: onnx.TensorProto, weight_scale: np.ndarray) -> np.ndarray:
+    """``round(w / weight_scale[n])`` clipped to +-127; axis 0 of the filter is ``C_out``."""
+    weights = numpy_helper.to_array(filters).astype(np.float32)
+    per_channel = weight_scale.astype(np.float32).reshape((-1,) + (1,) * (weights.ndim - 1))
+    return np.clip(np.rint(weights / per_channel), -_INT8_MAX, _INT8_MAX).astype(np.int8)
+
+
+def _folded_bias(
+    node: onnx.NodeProto, initializers: dict[str, onnx.TensorProto], out_channels: int
+) -> str | None:
+    """Name of the node's slot-6 bias, or ``None`` when it has no slot 6."""
+    if len(node.input) == IMPLICIT_GEMM_BASE_INPUTS:
+        return None
+    weight_scale = initializers.get(node.input[IMPLICIT_GEMM_WEIGHT_SCALE_SLOT])
+    if weight_scale is None or list(weight_scale.dims) != [0]:
+        raise ValueError(
+            f"Sparse INT8: {node.name!r} already carries a weight scale in input "
+            f"{IMPLICIT_GEMM_WEIGHT_SCALE_SLOT}; an exported node has an empty one."
+        )
+    bias = initializers.get(node.input[IMPLICIT_GEMM_BIAS_SLOT])
+    if bias is None or bias.data_type != TensorProto.FLOAT:
+        raise ValueError(
+            f"Sparse INT8: {node.name!r} input {IMPLICIT_GEMM_BIAS_SLOT} is not an FP32 bias "
+            "initializer."
+        )
+    if list(bias.dims) not in ([out_channels], [0]):
+        raise ValueError(
+            f"Sparse INT8: {node.name!r} bias has shape {list(bias.dims)} for {out_channels} "
+            "output channels."
+        )
+    return bias.name
+
+
 def quantize_implicit_gemm_nodes(
     model: onnx.ModelProto, scales: dict[str, SparseLayerScales]
 ) -> tuple[int, int]:
-    """Switch every calibrated ``ImplicitGemm`` node in ``model`` into INT8 mode, in place.
+    """Rewrite every calibrated ``ImplicitGemm`` node into the contract's INT8 row, in place.
 
-    Run it after the bias/activation fusion, if the stage has one: a folded bias becomes
-    ``bias_scaled``.
+    Run it after the bias/activation fusion, if the stage has one: a folded bias stays in
+    input 6. Each converted node gets its own QuantizeLinear, placed right before it.
 
     Returns:
         ``(converted, kept_fp)`` node counts.
 
     Raises:
-        ValueError: When a node's scales do not match its filter, or a calibrated layer has
-            no node in the graph.
+        ValueError: When a node is not in a contract form, its scales do not match its
+            filter, two nodes share a quantized filter, or a calibrated layer has no node in
+            the graph.
     """
     graph = model.graph
     initializers = {initializer.name: initializer for initializer in graph.initializer}
     stems = frozenset(scales)
     converted: set[str] = set()
     kept_fp = 0
+    nodes: list[onnx.NodeProto] = []
 
     for node in graph.node:
         if node.op_type != IMPLICIT_GEMM_OP or node.domain != AUTOWARE_DOMAIN:
+            nodes.append(node)
             continue
-        if len(node.input) < _SPARSE_INPUTS:
+        if len(node.input) not in (IMPLICIT_GEMM_BASE_INPUTS, IMPLICIT_GEMM_INPUTS):
             raise ValueError(
-                f"Sparse INT8: {node.name!r} has {len(node.input)} inputs; an ImplicitGemm "
-                "node carries at least the five sparse tensors."
+                f"Sparse INT8: {node.name!r} has {len(node.input)} inputs; the plugin contract "
+                f"has {IMPLICIT_GEMM_BASE_INPUTS} or {IMPLICIT_GEMM_INPUTS}."
             )
         stem = _stem_of(node.input[1], stems)
         if stem is None:
             kept_fp += 1
+            nodes.append(node)
             continue
+        if stem in converted:
+            raise ValueError(
+                f"Sparse INT8: {node.name!r} shares the filter of {stem!r} with another node; "
+                "a quantized filter must belong to one node."
+            )
 
         layer = scales[stem]
-        channel_scale = layer.channel_scale
         filters = initializers.get(node.input[1])
         if filters is None:
             raise ValueError(
@@ -206,50 +260,56 @@ def quantize_implicit_gemm_nodes(
                 "is not an initializer — the weight must be constant to be quantized."
             )
         out_channels = filters.dims[0]
-        if channel_scale.size != out_channels:
+        if layer.weight_scale.size != out_channels:
             raise ValueError(
-                f"Sparse INT8: {stem!r} has {channel_scale.size} channel scales but its "
+                f"Sparse INT8: {stem!r} has {layer.weight_scale.size} weight scales but its "
                 f"filter has {out_channels} output channels."
             )
+        bias = _folded_bias(node, initializers, out_channels)
 
-        # The plugin adds bias_scaled after the scaled accumulation, so with an output_scale
-        # of 1 it is the folded bias as is.
-        if len(node.input) > _SPARSE_INPUTS:
-            bias_initializer = initializers.get(node.input[_SPARSE_INPUTS])
-            if bias_initializer is None:
-                raise ValueError(
-                    f"Sparse INT8: {node.name!r} has a fused bias input "
-                    f"{node.input[_SPARSE_INPUTS]!r} that is not an initializer."
-                )
-            bias = numpy_helper.to_array(bias_initializer).astype(np.float32).reshape(-1)
-            if bias.size != out_channels:
-                raise ValueError(
-                    f"Sparse INT8: {node.name!r} fused bias has {bias.size} values for "
-                    f"{out_channels} output channels."
-                )
-        else:
-            bias = np.zeros(out_channels, dtype=np.float32)
-
-        # The plugin reads both as float*; the later fp16 cast keeps these slots fp32
-        # (IMPLICIT_GEMM_FP32_INPUT_SLOTS).
-        channel_scale_name = f"{stem.replace('.', '_')}_channel_scale"
-        bias_scaled_name = f"{stem.replace('.', '_')}_bias_scaled"
-        graph.initializer.append(
-            numpy_helper.from_array(channel_scale.astype(np.float32), name=channel_scale_name)
+        filters.CopyFrom(
+            numpy_helper.from_array(_int8_filter_codes(filters, layer.weight_scale), filters.name)
         )
-        graph.initializer.append(numpy_helper.from_array(bias, name=bias_scaled_name))
+        weight_scale = weight_scale_name(node)
+        _set_initializer(graph, weight_scale, layer.weight_scale.astype(np.float32))
+        if bias is None:
+            bias = f"{node.input[1].removesuffix('.weight')}.no_bias"
+            _set_initializer(graph, bias, np.zeros(0, np.float32))
+        del node.input[IMPLICIT_GEMM_BASE_INPUTS:]
+        node.input.extend([weight_scale, bias])
 
-        del node.input[_SPARSE_INPUTS:]
-        node.input.extend([channel_scale_name, bias_scaled_name])
-        replace_attribute(node, PRECISION_ATTR, PRECISION_INT8)
-        replace_attribute(node, INPUT_SCALE_ATTR, float(layer.input_scale))
-        replace_attribute(node, OUTPUT_SCALE_ATTR, 1.0)
+        # The fp16 cast stores the Quantize scale in fp16, and the plugin has to dequantize
+        # with the value TensorRT quantized with, so both carry the fp16-rounded scale.
+        input_scale = float(np.float16(layer.input_scale))
+        prefix = node.input[1].removesuffix(".weight")
+        scale, zero_point, quantized = (
+            f"{prefix}.input_scale",
+            f"{prefix}.input_zero_point",
+            f"{prefix}.input_int8",
+        )
+        _set_initializer(graph, scale, np.array(input_scale, np.float32))
+        _set_initializer(graph, zero_point, np.array(0, np.int8))
+        nodes.append(
+            helper.make_node(
+                "QuantizeLinear",
+                [node.input[0], scale, zero_point],
+                [quantized],
+                name=f"{node.name}/QuantizeLinear",
+            )
+        )
+        node.input[0] = quantized
+
+        replace_attribute(node, INPUT_SCALE_ATTR, input_scale)
+        replace_attribute(node, OUTPUT_TYPE_ATTR, OUTPUT_TYPE_FP16)
+        # The exporter writes output_scale = 1.0; the INT8 row must not carry one.
+        _drop_attribute(node, OUTPUT_SCALE_ATTR)
+        nodes.append(node)
         converted.add(stem)
         logger.debug(
-            "Sparse INT8: %s -> precision=1 input_scale=%.6f channel_scale[%d]",
+            "Sparse INT8: %s -> input_scale=%.6g weight_scale[%d]",
             stem,
-            layer.input_scale,
-            channel_scale.size,
+            input_scale,
+            out_channels,
         )
 
     unmatched = sorted(stems - converted)
@@ -259,6 +319,8 @@ def quantize_implicit_gemm_nodes(
             f"the exported graph: {unmatched[:5]}. The tower would deploy in FP16 while the "
             "checkpoint claims INT8."
         )
+    del graph.node[:]
+    graph.node.extend(nodes)
     return len(converted), kept_fp
 
 
@@ -277,8 +339,7 @@ def sparse_int8_transform(onnx_path: str | Path, *, module: nn.Module) -> Path:
     converted, kept_fp = quantize_implicit_gemm_nodes(model, scales)
     onnx.save(model, str(onnx_path))
     logger.info(
-        "Sparse INT8 in %s: %d ImplicitGemm node(s) switched to the plugin's INT8 mode, "
-        "%d kept FP16.",
+        "Sparse INT8 in %s: %d ImplicitGemm node(s) quantized, %d kept FP16.",
         onnx_path.name,
         converted,
         kept_fp,

@@ -21,7 +21,7 @@ import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from autoware_ml.ops.spconv.contract import PRECISION_INT8
+from autoware_ml.ops.spconv.onnx_fusion import fuse_implicit_gemm_bias_activation
 from autoware_ml.ops.spconv.onnx_int8 import (
     SparseLayerScales,
     quantize_implicit_gemm_nodes,
@@ -32,101 +32,133 @@ _C_IN = 2
 
 
 def _attributes(node: onnx.NodeProto) -> dict[str, object]:
-    return {
-        attribute.name: (attribute.i if attribute.type == attribute.INT else attribute.f)
-        for attribute in node.attribute
-    }
+    return {attribute.name: helper.get_attribute_value(attribute) for attribute in node.attribute}
+
+
+def _initializers(model: onnx.ModelProto) -> dict[str, np.ndarray]:
+    return {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
+
+
+def _weights(seed: int = 0) -> np.ndarray:
+    return np.random.default_rng(seed).normal(size=(_C_OUT, 3, 3, 3, _C_IN)).astype(np.float32)
 
 
 def _graph(*, stems: list[str], with_bias: bool = True) -> onnx.ModelProto:
-    """A graph with one ImplicitGemm per stem, shaped like the exported sparse tower."""
+    """One exported ImplicitGemm per stem (plus a bias Add), run through the bias fusion."""
     nodes: list[onnx.NodeProto] = []
     initializers: list[onnx.TensorProto] = []
     for index, stem in enumerate(stems):
         weight_name = f"extractor.pts_middle_encoder.{stem}.weight"
-        inputs = [f"features_{index}", weight_name, "pair", "mask", "argsort"]
-        initializers.append(
-            numpy_helper.from_array(
-                np.zeros((_C_OUT, 3, 3, 3, _C_IN), dtype=np.float16), name=weight_name
-            )
-        )
-        if with_bias:
-            bias_name = f"extractor.pts_middle_encoder.{stem}.bias"
-            inputs.append(bias_name)
-            initializers.append(
-                numpy_helper.from_array(np.arange(_C_OUT, dtype=np.float16) + 1, name=bias_name)
-            )
+        initializers.append(numpy_helper.from_array(_weights(index), name=weight_name))
         node = helper.make_node(
             "ImplicitGemm",
-            inputs,
-            [f"out_{index}"],
+            [f"features_{index}", weight_name, "pair", "mask", "argsort"],
+            [f"gemm_{index}" if with_bias else f"out_{index}"],
             name=f"/{stem}/ImplicitGemm",
             domain="autoware",
         )
-        node.attribute.append(helper.make_attribute("act_type", 1))
+        node.attribute.extend(
+            [helper.make_attribute("act_type", 0), helper.make_attribute("output_scale", 1.0)]
+        )
         nodes.append(node)
+        if with_bias:
+            bias_name = f"extractor.pts_middle_encoder.{stem}.bias"
+            initializers.append(
+                numpy_helper.from_array(np.arange(_C_OUT, dtype=np.float32) + 1, name=bias_name)
+            )
+            nodes.append(helper.make_node("Add", [f"gemm_{index}", bias_name], [f"out_{index}"]))
     graph = helper.make_graph(
         nodes,
         "sparse",
         [
-            helper.make_tensor_value_info(f"features_{i}", TensorProto.FLOAT16, ["n", _C_IN])
+            helper.make_tensor_value_info(f"features_{i}", TensorProto.FLOAT, ["n", _C_IN])
             for i in range(len(stems))
+        ]
+        + [
+            helper.make_tensor_value_info(name, TensorProto.INT32, ["k"])
+            for name in ("pair", "mask", "argsort")
         ],
         [
-            helper.make_tensor_value_info(f"out_{i}", TensorProto.FLOAT16, ["n", _C_OUT])
+            helper.make_tensor_value_info(f"out_{i}", TensorProto.FLOAT, ["n", _C_OUT])
             for i in range(len(stems))
         ],
         initializer=initializers,
     )
-    return helper.make_model(graph)
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+    )
+    fuse_implicit_gemm_bias_activation(model)
+    return model
 
 
 def _scales(input_scale: float = 0.04) -> SparseLayerScales:
     return SparseLayerScales(
         input_scale=input_scale,
-        weight_scale=np.array([0.01, 0.02, 0.03], dtype=np.float32),
+        weight_scale=np.abs(_weights()).reshape(_C_OUT, -1).max(axis=1) / 127.0,
     )
 
 
-def test_calibrated_node_takes_the_plugin_int8_contract():
+def _gemm(model: onnx.ModelProto) -> onnx.NodeProto:
+    return next(node for node in model.graph.node if node.op_type == "ImplicitGemm")
+
+
+def test_calibrated_node_takes_the_contract_int8_row():
     model = _graph(stems=["conv_input.0"])
     layer = _scales()
 
     converted, kept_fp = quantize_implicit_gemm_nodes(model, {"conv_input.0": layer})
 
     assert (converted, kept_fp) == (1, 0)
-    node = model.graph.node[0]
+    node = _gemm(model)
     assert len(node.input) == 7
     attributes = _attributes(node)
-    assert attributes["precision"] == PRECISION_INT8
-    assert attributes["input_scale"] == pytest.approx(layer.input_scale)
-    # The fused activation must survive the rewrite.
-    assert attributes["act_type"] == 1
-    initializers = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
-    channel_scale = initializers[node.input[5]]
-    bias_scaled = initializers[node.input[6]]
-    assert channel_scale.dtype == np.float32 and bias_scaled.dtype == np.float32
-    np.testing.assert_allclose(channel_scale, layer.input_scale * layer.weight_scale, rtol=1e-6)
-    np.testing.assert_allclose(bias_scaled, [1.0, 2.0, 3.0])
+    input_scale = float(np.float16(layer.input_scale))
+    assert attributes["input_scale"] == pytest.approx(input_scale)
+    assert attributes["output_type"] == b"f16"
+    assert "output_scale" not in attributes
+    assert "precision" not in attributes
+    assert attributes["act_type"] == 0
+
+    quantize = model.graph.node[0]
+    assert quantize.op_type == "QuantizeLinear"
+    assert list(quantize.output) == [node.input[0]]
+    assert quantize.input[0] == "features_0"
+    initializers = _initializers(model)
+    assert initializers[quantize.input[1]] == pytest.approx(input_scale)
+    assert initializers[quantize.input[2]].dtype == np.int8
+
+    filters = initializers[node.input[1]]
+    assert filters.dtype == np.int8 and np.abs(filters).max() == 127
+    weight_scale = initializers[node.input[5]]
+    assert weight_scale.dtype == np.float32
+    np.testing.assert_array_equal(weight_scale, layer.weight_scale.astype(np.float32))
+    # The folded bias stays where the fusion put it, in real units.
+    assert node.input[6] == "extractor.pts_middle_encoder.conv_input.0.bias"
+    np.testing.assert_array_equal(initializers[node.input[6]], [1.0, 2.0, 3.0])
+    onnx.checker.check_model(model)
 
 
-def test_output_scale_cancels_out_of_the_plugin_arithmetic():
-    """``output_scale`` cancels in the plugin, which is why the graph pins it to 1."""
-    layer = _scales()
-    accumulator = np.array([100.0, -50.0, 25.0], dtype=np.float32)  # INT32 GEMM output
-    bias = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+def test_the_plugin_epilogue_gives_back_the_convolution():
+    """``input_scale * weight_scale[n] * acc + bias[n]`` over the written codes."""
+    model = _graph(stems=["conv_input.0"])
+    quantize_implicit_gemm_nodes(model, {"conv_input.0": _scales()})
+    node = _gemm(model)
+    initializers = _initializers(model)
+    input_scale = _attributes(node)["input_scale"]
+    filter_codes = initializers[node.input[1]].astype(np.float32)
+    weight_scale = initializers[node.input[5]]
 
-    def plugin_output(output_scale: float) -> np.ndarray:
-        channel_scale = layer.channel_scale / output_scale
-        bias_scaled = bias / output_scale
-        # ImplicitGemmPlugin::enqueueInt8 (quantize_features.cu).
-        gemm_scale = channel_scale * output_scale
-        gemm_bias = bias_scaled * output_scale
-        weight_scale = channel_scale * output_scale / layer.input_scale
-        np.testing.assert_allclose(weight_scale, layer.weight_scale, rtol=1e-6)
-        return accumulator * gemm_scale + gemm_bias
+    # The codes and the slot-5 scales give back the weights to within half a step.
+    per_channel = weight_scale.reshape(-1, 1, 1, 1, 1)
+    assert np.all(np.abs(filter_codes * per_channel - _weights()) <= per_channel / 2 + 1e-7)
 
-    np.testing.assert_allclose(plugin_output(1.0), plugin_output(0.017), rtol=1e-6)
+    # One output point that sees every tap: the convolution is a dot product over k^3 * C_in.
+    features = np.random.default_rng(1).uniform(-2.0, 2.0, size=(27, _C_IN)).astype(np.float32)
+    feature_codes = np.clip(np.rint(features / input_scale), -128, 127)
+    accumulator = np.einsum("nkc,kc->n", filter_codes.reshape(_C_OUT, 27, _C_IN), feature_codes)
+    plugin = input_scale * weight_scale * accumulator + initializers[node.input[6]]
+    reference = np.einsum("nkc,kc->n", _weights().reshape(_C_OUT, 27, _C_IN), features) + [1, 2, 3]
+    np.testing.assert_allclose(plugin, reference, rtol=0.03)
 
 
 def test_uncalibrated_nodes_stay_floating_point():
@@ -137,19 +169,31 @@ def test_uncalibrated_nodes_stay_floating_point():
     )
 
     assert (converted, kept_fp) == (1, 1)
-    kept = model.graph.node[0]
-    assert len(kept.input) == 6
-    assert "precision" not in _attributes(kept)
+    kept = next(node for node in model.graph.node if node.name == "/conv_input.0/ImplicitGemm")
+    assert len(kept.input) == 7
+    assert _initializers(model)[kept.input[5]].shape == (0,)
+    assert "input_scale" not in _attributes(kept)
+    assert _initializers(model)[kept.input[1]].dtype == np.float32
 
 
-def test_node_without_a_folded_bias_gets_zeros():
+def test_node_without_a_folded_bias_gets_an_empty_one():
     model = _graph(stems=["conv_out.0"], with_bias=False)
 
     quantize_implicit_gemm_nodes(model, {"conv_out.0": _scales()})
 
-    node = model.graph.node[0]
-    initializers = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
-    np.testing.assert_array_equal(initializers[node.input[6]], np.zeros(_C_OUT, dtype=np.float32))
+    node = _gemm(model)
+    assert len(node.input) == 7
+    bias = _initializers(model)[node.input[6]]
+    assert bias.dtype == np.float32 and bias.shape == (0,)
+
+
+def test_six_inputs_are_not_a_contract_form():
+    model = _graph(stems=["conv_input.0"])
+    node = _gemm(model)
+    del node.input[5]
+
+    with pytest.raises(ValueError, match="has 6 inputs"):
+        quantize_implicit_gemm_nodes(model, {"conv_input.0": _scales()})
 
 
 def test_a_calibrated_layer_with_no_node_is_an_error():
@@ -159,9 +203,9 @@ def test_a_calibrated_layer_with_no_node_is_an_error():
         quantize_implicit_gemm_nodes(model, {"conv_input.0": _scales(), "missing.0": _scales()})
 
 
-def test_channel_scale_must_match_the_filter():
+def test_weight_scale_must_match_the_filter():
     model = _graph(stems=["conv_input.0"])
     wrong = SparseLayerScales(input_scale=0.04, weight_scale=np.array([0.01], dtype=np.float32))
 
-    with pytest.raises(ValueError, match="channel scales"):
+    with pytest.raises(ValueError, match="weight scales"):
         quantize_implicit_gemm_nodes(model, {"conv_input.0": wrong})

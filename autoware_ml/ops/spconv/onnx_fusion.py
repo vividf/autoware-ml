@@ -51,7 +51,7 @@ def _is_standard_op(node: onnx.NodeProto, op_type: str) -> bool:
     return node.op_type == op_type and node.domain in _STANDARD_DOMAINS
 
 
-def replace_attribute(node: onnx.NodeProto, name: str, value: int | float) -> None:
+def replace_attribute(node: onnx.NodeProto, name: str, value: int | float | str) -> None:
     """Set ``name`` on ``node``, replacing an existing attribute of that name."""
     kept = [attribute for attribute in node.attribute if attribute.name != name]
     del node.attribute[:]
