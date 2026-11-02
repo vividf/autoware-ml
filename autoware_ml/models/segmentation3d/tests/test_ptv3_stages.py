@@ -50,6 +50,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     serialize_stage_output_names,
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.ops.spconv.contract import IMPLICIT_GEMM_INPUTS
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import apply_onnx_transforms, export_to_onnx
 
@@ -125,7 +126,9 @@ class TestSeg3dStageGraph(unittest.TestCase):
             # The cpe convolutions have a bias; the stage transform folds it into the plugin node.
             gemm_nodes = [node for node in graph.node if node.op_type == "ImplicitGemm"]
             self.assertTrue(gemm_nodes, name)
-            self.assertTrue(all(len(node.input) == 6 for node in gemm_nodes), name)
+            self.assertTrue(
+                all(len(node.input) == IMPLICIT_GEMM_INPUTS for node in gemm_nodes), name
+            )
 
     def test_seg3d_head_stage_emits_the_head_graph_names(self) -> None:
         model = build_seg3d_model().cuda().eval()

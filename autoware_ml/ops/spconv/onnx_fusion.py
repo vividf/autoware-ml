@@ -14,9 +14,11 @@
 
 """Fold the bias ``Add`` and ``Relu`` after each ``autoware::ImplicitGemm`` into the node.
 
-TensorRT cannot fuse standard ops into a plugin node, but the plugin applies a bias
-(optional sixth input) and an activation (``act_type``) itself. Only the exported graph
-changes; the PyTorch modules keep the explicit bias add and ReLU.
+TensorRT cannot fuse standard ops into a plugin node, but the plugin applies a bias and an
+activation (``act_type``) itself. A folded node takes the seven-input form of the contract
+(:mod:`autoware_ml.ops.spconv.contract`): an empty weight scale in slot 5 and the bias, as
+FP32, in slot 6. Only the exported graph changes; the PyTorch modules keep the explicit bias
+add and ReLU.
 """
 
 from __future__ import annotations
@@ -24,20 +26,20 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import numpy as np
 import onnx
-from onnx import helper
+from onnx import TensorProto, helper, numpy_helper
 
 from autoware_ml.ops.spconv.contract import (
     ACT_RELU,
     ACT_TYPE_ATTR,
     AUTOWARE_DOMAIN,
-    IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS,
+    IMPLICIT_GEMM_BASE_INPUTS,
     IMPLICIT_GEMM_OP,
 )
 
 logger = logging.getLogger(__name__)
 
-_INPUTS_WITHOUT_BIAS = IMPLICIT_GEMM_INPUTS_WITHOUT_BIAS
 _STANDARD_DOMAINS = ("", "ai.onnx")
 
 
@@ -56,19 +58,43 @@ def _set_attribute(node: onnx.NodeProto, name: str, value: int) -> None:
     node.attribute.append(helper.make_attribute(name, value))
 
 
+def weight_scale_name(gemm: onnx.NodeProto) -> str:
+    """Slot-5 initializer name of ``gemm``, after its weight: ``<module>.weight_scale``."""
+    return f"{gemm.input[1].removesuffix('.weight')}.weight_scale"
+
+
+def _fp32_bias(graph: onnx.GraphProto, bias: onnx.TensorProto) -> str:
+    """Name of an FP32 copy of ``bias``: both plugins read slot 6 as FP32."""
+    if bias.data_type == TensorProto.FLOAT:
+        return bias.name
+    name = f"{bias.name}.fp32"
+    if not any(initializer.name == name for initializer in graph.initializer):
+        values = numpy_helper.to_array(bias).astype(np.float32)
+        graph.initializer.append(numpy_helper.from_array(values, name))
+    return name
+
+
+def _empty_weight_scale(graph: onnx.GraphProto, gemm: onnx.NodeProto) -> str:
+    """Name of a zero-length FP32 weight scale for ``gemm``: the layer is not quantized."""
+    name = weight_scale_name(gemm)
+    if not any(initializer.name == name for initializer in graph.initializer):
+        graph.initializer.append(numpy_helper.from_array(np.zeros(0, np.float32), name))
+    return name
+
+
 def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int]:
     """Fold trailing bias adds and ReLUs into ``autoware::ImplicitGemm`` nodes, in place.
 
     Each ``ImplicitGemm -> Add(bias initializer) [-> Relu]`` chain whose intermediate values
-    feed only the next node becomes one ``ImplicitGemm`` with the bias as its sixth input and,
-    with the ReLU, ``act_type = ACT_RELU``. Only this order folds: the plugin computes
-    ``relu(gemm(x) + b)``.
+    feed only the next node becomes one seven-input ``ImplicitGemm`` (empty weight scale, FP32
+    bias) and, with the ReLU, ``act_type = ACT_RELU``. Only this order folds: the plugin
+    computes ``relu(gemm(x) + b)``.
 
     Returns:
         Number of folded biases and number of folded activations.
     """
     graph = model.graph
-    initializers = {initializer.name for initializer in graph.initializer}
+    initializers = {initializer.name: initializer for initializer in graph.initializer}
     consumers: dict[str, list[onnx.NodeProto]] = {}
     for node in graph.node:
         for tensor in node.input:
@@ -80,7 +106,7 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
     fused_activations = 0
 
     for gemm in graph.node:
-        if not _is_implicit_gemm(gemm) or len(gemm.input) != _INPUTS_WITHOUT_BIAS:
+        if not _is_implicit_gemm(gemm) or len(gemm.input) != IMPLICIT_GEMM_BASE_INPUTS:
             continue
 
         gemm_output = gemm.output[0]
@@ -94,7 +120,7 @@ def fuse_implicit_gemm_bias_activation(model: onnx.ModelProto) -> tuple[int, int
         if bias is None or len(add.input) != 2:
             continue
 
-        gemm.input.append(bias)
+        gemm.input.extend([_empty_weight_scale(graph, gemm), _fp32_bias(graph, initializers[bias])])
         fused_biases += 1
         last, last_output = add, add.output[0]
 
@@ -146,7 +172,7 @@ def fuse_sparse_graph(onnx_path: str | Path) -> Path:
     unfused = sum(
         1
         for node in model.graph.node
-        if _is_implicit_gemm(node) and len(node.input) == _INPUTS_WITHOUT_BIAS
+        if _is_implicit_gemm(node) and len(node.input) == IMPLICIT_GEMM_BASE_INPUTS
     )
     if unfused:
         logger.warning(
