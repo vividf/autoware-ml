@@ -212,6 +212,11 @@ deploy:
     plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
 ```
 
+A plugin node with a bias or quantization scales has seven inputs: the five sparse
+tensors, then a per-channel `weight_scale` and the `bias`, both FP32 and zero-length when
+absent (`autoware_ml/ops/spconv/contract.py`). spconv's plugin and t4sparse read this
+layout alike, so one exported graph builds against either library.
+
 The Docker image builds the plugin (`docker/tensorrt_plugins/`, see its README for a
 rebuild against another `autoware_universe` branch). ONNX Runtime cannot run plugin
 nodes, so such stages declare `torch_fallback_backends=(Backend.ONNX,)`: the `onnx`
