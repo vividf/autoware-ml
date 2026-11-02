@@ -21,12 +21,12 @@ assumes a default), so a dropped attribute would otherwise only show in a Tensor
 from __future__ import annotations
 
 import inspect
+import unittest
 
-import pytest
+from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 
-pytest.importorskip("spconv", reason="the export symbolics import spconv")
-
-from autoware_ml.ops.spconv import contract, sparse_functional  # noqa: E402
+if IS_SPCONV_AVAILABLE:
+    from autoware_ml.ops.spconv import contract, sparse_functional
 
 
 def _emitted_attributes(symbolic) -> set[str]:
@@ -40,34 +40,43 @@ def _emitted_attributes(symbolic) -> set[str]:
     }
 
 
-def test_get_indice_pairs_implicit_gemm_emits_the_plugin_field_set() -> None:
-    expected = {
-        "batch_size",
-        "spatial_shape",
-        "algo",
-        "ksize",
-        "stride",
-        "padding",
-        "dilation",
-        "out_padding",
-        "subm",
-        "transpose",
-        "is_train",
-        contract.DO_SORT_ATTR,
-    }
-    assert _emitted_attributes(sparse_functional.GetIndicePairsImplicitGemm.symbolic) == expected
+@unittest.skipUnless(IS_SPCONV_AVAILABLE, "the export symbolics import spconv")
+class TestPluginFieldSet(unittest.TestCase):
+    """Each sparse export symbolic emits the attribute set the runtime plugin reads."""
+
+    def test_get_indice_pairs_implicit_gemm_emits_the_plugin_field_set(self) -> None:
+        expected = {
+            "batch_size",
+            "spatial_shape",
+            "algo",
+            "ksize",
+            "stride",
+            "padding",
+            "dilation",
+            "out_padding",
+            "subm",
+            "transpose",
+            "is_train",
+            contract.DO_SORT_ATTR,
+        }
+        self.assertEqual(
+            _emitted_attributes(sparse_functional.GetIndicePairsImplicitGemm.symbolic), expected
+        )
+
+    def test_implicit_gemm_emits_the_plugin_field_set(self) -> None:
+        expected = {
+            "is_train",
+            "is_subm",
+            # Not a plugin field: the plugin's parser drops it.
+            "fp32_accum",
+            "act_alpha",
+            "act_beta",
+            contract.OUTPUT_SCALE_ATTR,
+            "output_add_scale",
+            contract.ACT_TYPE_ATTR,
+        }
+        self.assertEqual(_emitted_attributes(sparse_functional.ImplicitGemm.symbolic), expected)
 
 
-def test_implicit_gemm_emits_the_plugin_field_set() -> None:
-    expected = {
-        "is_train",
-        "is_subm",
-        # Not a plugin field: the plugin's parser drops it.
-        "fp32_accum",
-        "act_alpha",
-        "act_beta",
-        contract.OUTPUT_SCALE_ATTR,
-        "output_add_scale",
-        contract.ACT_TYPE_ATTR,
-    }
-    assert _emitted_attributes(sparse_functional.ImplicitGemm.symbolic) == expected
+if __name__ == "__main__":
+    unittest.main()
