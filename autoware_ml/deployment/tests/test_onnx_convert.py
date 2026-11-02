@@ -15,6 +15,10 @@
 
 """Unit tests for the fp16 conversion dispatch."""
 
+from pathlib import Path
+import tempfile
+import unittest
+
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
@@ -42,44 +46,58 @@ def _qdq_gemm_model() -> onnx.ModelProto:
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
 
 
-def test_fp16_conversion_routes_quantized_graphs_to_the_island_cast(tmp_path) -> None:
-    onnx_path = tmp_path / "qdq.onnx"
-    onnx.save(_qdq_gemm_model(), onnx_path.as_posix())
+class TestFp16ConversionDispatch(unittest.TestCase):
+    """The fp16 conversion sends quantized and plugin graphs to the island cast."""
 
-    convert_onnx_precision(onnx_path, OnnxPrecision.FP16)
+    def setUp(self) -> None:
+        """Give each test its own directory for the ONNX file."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
 
-    model = onnx.load(onnx_path.as_posix())
-    inits = {i.name: i for i in model.graph.initializer}
-    assert inits["s"].data_type == TensorProto.FLOAT
-    assert numpy_helper.to_array(inits["s"]) == np.float32(1e-4)
-    assert inits["w"].data_type == TensorProto.FLOAT
-    nodes = {n.name: n for n in model.graph.node}
-    assert nodes["gemm"].input[0] == nodes["dq"].output[0]
-    for value_info in list(model.graph.input) + list(model.graph.output):
-        assert value_info.type.tensor_type.elem_type == TensorProto.FLOAT
-    onnx.checker.check_model(model, full_check=True)
+    def test_fp16_conversion_routes_quantized_graphs_to_the_island_cast(self) -> None:
+        onnx_path = self.tmp_path / "qdq.onnx"
+        onnx.save(_qdq_gemm_model(), onnx_path.as_posix())
+
+        convert_onnx_precision(onnx_path, OnnxPrecision.FP16)
+
+        model = onnx.load(onnx_path.as_posix())
+        inits = {i.name: i for i in model.graph.initializer}
+        self.assertEqual(inits["s"].data_type, TensorProto.FLOAT)
+        self.assertEqual(numpy_helper.to_array(inits["s"]), np.float32(1e-4))
+        self.assertEqual(inits["w"].data_type, TensorProto.FLOAT)
+        nodes = {n.name: n for n in model.graph.node}
+        self.assertEqual(nodes["gemm"].input[0], nodes["dq"].output[0])
+        for value_info in list(model.graph.input) + list(model.graph.output):
+            self.assertEqual(value_info.type.tensor_type.elem_type, TensorProto.FLOAT)
+        onnx.checker.check_model(model, full_check=True)
+
+    def test_fp16_conversion_routes_plugin_graphs_to_the_island_cast(self) -> None:
+        weight = numpy_helper.from_array(np.ones(4, dtype=np.float32), name="w")
+        graph = helper.make_graph(
+            [
+                helper.make_node("PluginOp", ["x", "w"], ["mid"], domain="autoware", name="plugin"),
+                helper.make_node("Relu", ["mid"], ["out"], name="relu"),
+            ],
+            "plugin",
+            inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])],
+            outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 4])],
+            initializer=[weight],
+        )
+        model = helper.make_model(
+            graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
+        )
+        onnx_path = self.tmp_path / "plugin.onnx"
+        onnx.save(model, onnx_path.as_posix())
+
+        convert_onnx_precision(onnx_path, OnnxPrecision.FP16)
+
+        converted = onnx.load(onnx_path.as_posix())
+        self.assertEqual(
+            {i.name: i.data_type for i in converted.graph.initializer}["w"], TensorProto.FLOAT16
+        )
+        self.assertEqual(converted.graph.output[0].type.tensor_type.elem_type, TensorProto.FLOAT)
 
 
-def test_fp16_conversion_routes_plugin_graphs_to_the_island_cast(tmp_path) -> None:
-    weight = numpy_helper.from_array(np.ones(4, dtype=np.float32), name="w")
-    graph = helper.make_graph(
-        [
-            helper.make_node("PluginOp", ["x", "w"], ["mid"], domain="autoware", name="plugin"),
-            helper.make_node("Relu", ["mid"], ["out"], name="relu"),
-        ],
-        "plugin",
-        inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])],
-        outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 4])],
-        initializer=[weight],
-    )
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("autoware", 1)]
-    )
-    onnx_path = tmp_path / "plugin.onnx"
-    onnx.save(model, onnx_path.as_posix())
-
-    convert_onnx_precision(onnx_path, OnnxPrecision.FP16)
-
-    converted = onnx.load(onnx_path.as_posix())
-    assert {i.name: i.data_type for i in converted.graph.initializer}["w"] == TensorProto.FLOAT16
-    assert converted.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
+if __name__ == "__main__":
+    unittest.main()
