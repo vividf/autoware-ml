@@ -15,7 +15,7 @@
 """Write the calibrated INT8 scales of the exported ``autoware::ImplicitGemm`` nodes.
 
 A calibrated node takes the quantized row of the plugin contract that spconv's
-``autoware_tensorrt_plugins`` and t4sparse share (tier4/t4sparse#32):
+``autoware_tensorrt_plugins`` and t4sparse share:
 
     input 0      INT8, from a QuantizeLinear inserted in front of the node (scale input_scale)
     input 1      INT8 filters, round(w / weight_scale[n]) clipped to +-127
