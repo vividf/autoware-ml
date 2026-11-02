@@ -634,6 +634,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             graph.onnx_dynamic_axes,
             {name: {0: "voxels_num"} for name in ("voxels", "coors", "num_points_per_voxel")},
         )
+        self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
         """Test that a multi-sample batch is refused instead of exporting only its first sample."""

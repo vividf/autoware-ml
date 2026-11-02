@@ -74,6 +74,7 @@ class TestSeg3dStageGraph(unittest.TestCase):
         encoder = stages[1]
         self.assertEqual(encoder.inputs[:5], ENCODER_EXPORT_INPUT_NAMES)
         self.assertFalse(any(name.endswith("_cluster") for name in encoder.inputs))
+        self.assertEqual(encoder.torch_fallback_backends, (Backend.ONNX,))
         self.assertEqual(stages[2].outputs, ("pred_labels", "pred_probs"))
 
     def test_seg3d_export_specs_are_derived_and_keep_the_split_contract(self) -> None:
