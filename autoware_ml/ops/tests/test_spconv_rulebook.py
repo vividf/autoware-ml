@@ -17,15 +17,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
+import unittest
 
 import onnx
-import pytest
 import torch
 from onnx import TensorProto, helper
 
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
-
-pytestmark = pytest.mark.skipif(not IS_SPCONV_AVAILABLE, reason="spconv is not installed")
 
 if IS_SPCONV_AVAILABLE:
     from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import SparseEncoder
@@ -77,119 +77,157 @@ def _voxels(encoder: SparseEncoder, count: int, device: str) -> tuple[torch.Tens
     return features.to(device), coords.to(device)
 
 
-def test_downsample_stages_cascade_the_spatial_shape_in_forward_order():
-    stages = _encoder().downsample_stages()
+@unittest.skipUnless(IS_SPCONV_AVAILABLE, "spconv is not installed")
+class TestDownsampleStages(unittest.TestCase):
+    """The encoder's down-sampling stages and the graph inputs they name."""
 
-    assert [stage.indice_key for stage in stages] == [
-        "spconv1",
-        "spconv2",
-        "spconv3",
-        "spconv_down2",
-    ]
-    assert [stage.spatial_shape for stage in stages] == [
-        (64, 64, 32),
-        (32, 32, 16),
-        (16, 16, 8),
-        (8, 8, 3),
-    ]
-    assert stages[-1].kernel_size == (1, 1, 3) and stages[-1].kernel_volume == 3
-    assert stages[-1].out_spatial_shape == (8, 8, 1)
+    def test_downsample_stages_cascade_the_spatial_shape_in_forward_order(self):
+        stages = _encoder().downsample_stages()
 
+        self.assertEqual(
+            [stage.indice_key for stage in stages],
+            [
+                "spconv1",
+                "spconv2",
+                "spconv3",
+                "spconv_down2",
+            ],
+        )
+        self.assertEqual(
+            [stage.spatial_shape for stage in stages],
+            [
+                (64, 64, 32),
+                (32, 32, 16),
+                (16, 16, 8),
+                (8, 8, 3),
+            ],
+        )
+        self.assertEqual(stages[-1].kernel_size, (1, 1, 3))
+        self.assertEqual(stages[-1].kernel_volume, 3)
+        self.assertEqual(stages[-1].out_spatial_shape, (8, 8, 1))
 
-def test_graph_input_names_and_axes_follow_the_runtime_contract():
-    stages = _encoder().downsample_stages()
+    def test_graph_input_names_and_axes_follow_the_runtime_contract(self):
+        stages = _encoder().downsample_stages()
 
-    names = rulebook_input_names(stages)
-    assert len(names) == 4 * len(stages)
-    assert names[:4] == (
-        "rulebook/spconv1/out_indices",
-        "rulebook/spconv1/pair_fwd",
-        "rulebook/spconv1/pair_mask",
-        "rulebook/spconv1/mask_argsort",
-    )
-    axes = rulebook_dynamic_axes(stages)
-    # pair_fwd is [kernel_volume, count]; the other three are count-first.
-    assert axes["rulebook/spconv1/pair_fwd"] == {1: "spconv1_num"}
-    assert axes["rulebook/spconv1/out_indices"] == {0: "spconv1_num"}
+        names = rulebook_input_names(stages)
+        self.assertEqual(len(names), 4 * len(stages))
+        self.assertEqual(
+            names[:4],
+            (
+                "rulebook/spconv1/out_indices",
+                "rulebook/spconv1/pair_fwd",
+                "rulebook/spconv1/pair_mask",
+                "rulebook/spconv1/mask_argsort",
+            ),
+        )
+        axes = rulebook_dynamic_axes(stages)
+        # pair_fwd is [kernel_volume, count]; the other three are count-first.
+        self.assertEqual(axes["rulebook/spconv1/pair_fwd"], {1: "spconv1_num"})
+        self.assertEqual(axes["rulebook/spconv1/out_indices"], {0: "spconv1_num"})
 
-
-def test_metadata_carries_the_geometry_and_the_coordinate_order(tmp_path):
-    encoder = _encoder()
-    stages = encoder.downsample_stages()
-    path = tmp_path / "sparse.onnx"
-    graph = helper.make_graph(
-        [helper.make_node("Identity", ["x"], ["y"])],
-        "g",
-        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
-        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
-    )
-    model = helper.make_model(graph)
-    onnx.helper.set_model_props(model, {"unrelated": "kept"})
-    onnx.save(model, str(path))
-
-    embed_rulebook_metadata(
-        path, stages=stages, coors_permutation=encoder.coors_permutation, do_sort=True
-    )
-
-    props = {prop.key: prop.value for prop in onnx.load(str(path)).metadata_props}
-    assert props["unrelated"] == "kept"
-    recorded = json.loads(props[STAGES_METADATA_KEY])
-    assert [entry["onnx_base"] for entry in recorded] == [stage.onnx_base for stage in stages]
-    assert recorded[0] == {
-        "onnx_base": "rulebook/spconv1",
-        "algo": int(stages[0].algo.value),
-        "ksize": [3, 3, 3],
-        "stride": [2, 2, 2],
-        "padding": [1, 1, 1],
-        "dilation": [1, 1, 1],
-        "spatial_shape": [64, 64, 32],
-    }
-    assert json.loads(props[COORS_PERMUTATION_METADATA_KEY]) == [1, 2, 0]
-    assert json.loads(props[DO_SORT_METADATA_KEY]) is True
+    def test_every_slot_has_a_name(self):
+        stage = _encoder().downsample_stages()[0]
+        self.assertEqual(
+            stage.input_names, tuple(stage.input_name(slot) for slot in RULEBOOK_SLOTS)
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown rulebook slot"):
+            stage.input_name("pair_bwd")
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="spconv kernels need CUDA")
-def test_precomputed_rulebooks_reproduce_the_in_graph_result():
-    encoder = _encoder().cuda()
-    exported = encoder.prepare_for_export()
-    features, coords = _voxels(encoder, 3000, "cuda")
-    stages = exported.downsample_stages()
+@unittest.skipUnless(IS_SPCONV_AVAILABLE, "spconv is not installed")
+class TestRulebookMetadata(unittest.TestCase):
+    """The ONNX metadata the runtime reads the rulebook geometry from."""
 
-    rulebooks = precompute_rulebooks(
-        exported.conv_coords(coords), 1, stages, do_sort=exported.export_do_sort
-    )
-    seeded = {stage.indice_key: rulebook_indice_data(stage, rulebooks) for stage in stages}
-    with torch.no_grad():
-        reference = exported(features, coords, 1)
-        with_rulebooks = exported(features, coords, 1, precomputed_rulebooks=seeded)
+    def setUp(self) -> None:
+        """Give each test its own directory for the ONNX file."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
 
-    assert set(rulebooks) == set(rulebook_input_names(stages))
-    for stage in stages:
-        count = rulebooks[stage.input_name("out_indices")].shape[0]
-        assert rulebooks[stage.input_name("pair_fwd")].shape == (stage.kernel_volume, count)
-        assert rulebooks[stage.input_name("pair_mask")].shape == (count, 1)
-        assert rulebooks[stage.input_name("mask_argsort")].shape == (count,)
-    torch.testing.assert_close(with_rulebooks, reference, rtol=0, atol=0)
+    def test_metadata_carries_the_geometry_and_the_coordinate_order(self):
+        encoder = _encoder()
+        stages = encoder.downsample_stages()
+        path = self.tmp_path / "sparse.onnx"
+        graph = helper.make_graph(
+            [helper.make_node("Identity", ["x"], ["y"])],
+            "g",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+        )
+        model = helper.make_model(graph)
+        onnx.helper.set_model_props(model, {"unrelated": "kept"})
+        onnx.save(model, str(path))
+
+        embed_rulebook_metadata(
+            path, stages=stages, coors_permutation=encoder.coors_permutation, do_sort=True
+        )
+
+        props = {prop.key: prop.value for prop in onnx.load(str(path)).metadata_props}
+        self.assertEqual(props["unrelated"], "kept")
+        recorded = json.loads(props[STAGES_METADATA_KEY])
+        self.assertEqual(
+            [entry["onnx_base"] for entry in recorded], [stage.onnx_base for stage in stages]
+        )
+        self.assertEqual(
+            recorded[0],
+            {
+                "onnx_base": "rulebook/spconv1",
+                "algo": int(stages[0].algo.value),
+                "ksize": [3, 3, 3],
+                "stride": [2, 2, 2],
+                "padding": [1, 1, 1],
+                "dilation": [1, 1, 1],
+                "spatial_shape": [64, 64, 32],
+            },
+        )
+        self.assertEqual(json.loads(props[COORS_PERMUTATION_METADATA_KEY]), [1, 2, 0])
+        self.assertIs(json.loads(props[DO_SORT_METADATA_KEY]), True)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="spconv kernels need CUDA")
-def test_a_rulebook_for_the_wrong_geometry_is_rejected():
-    encoder = _encoder().cuda()
-    exported = encoder.prepare_for_export()
-    features, coords = _voxels(encoder, 500, "cuda")
-    stages = exported.downsample_stages()
-    rulebooks = precompute_rulebooks(
-        exported.conv_coords(coords), 1, stages, do_sort=exported.export_do_sort
-    )
-    # Hand stage 1's rulebook to stage 2's layer: different spatial shape.
-    swapped = {stages[1].indice_key: rulebook_indice_data(stages[0], rulebooks)}
+@unittest.skipUnless(IS_SPCONV_AVAILABLE, "spconv is not installed")
+class TestPrecomputedRulebooks(unittest.TestCase):
+    """Rulebooks computed outside the graph and handed to the exported encoder."""
 
-    with pytest.raises(ValueError, match="spatial_shape"), torch.no_grad():
-        exported(features, coords, 1, precomputed_rulebooks=swapped)
+    @unittest.skipUnless(torch.cuda.is_available(), "spconv kernels need CUDA")
+    def test_precomputed_rulebooks_reproduce_the_in_graph_result(self):
+        encoder = _encoder().cuda()
+        exported = encoder.prepare_for_export()
+        features, coords = _voxels(encoder, 3000, "cuda")
+        stages = exported.downsample_stages()
+
+        rulebooks = precompute_rulebooks(
+            exported.conv_coords(coords), 1, stages, do_sort=exported.export_do_sort
+        )
+        seeded = {stage.indice_key: rulebook_indice_data(stage, rulebooks) for stage in stages}
+        with torch.no_grad():
+            reference = exported(features, coords, 1)
+            with_rulebooks = exported(features, coords, 1, precomputed_rulebooks=seeded)
+
+        self.assertEqual(set(rulebooks), set(rulebook_input_names(stages)))
+        for stage in stages:
+            count = rulebooks[stage.input_name("out_indices")].shape[0]
+            self.assertEqual(
+                rulebooks[stage.input_name("pair_fwd")].shape, (stage.kernel_volume, count)
+            )
+            self.assertEqual(rulebooks[stage.input_name("pair_mask")].shape, (count, 1))
+            self.assertEqual(rulebooks[stage.input_name("mask_argsort")].shape, (count,))
+        torch.testing.assert_close(with_rulebooks, reference, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "spconv kernels need CUDA")
+    def test_a_rulebook_for_the_wrong_geometry_is_rejected(self):
+        encoder = _encoder().cuda()
+        exported = encoder.prepare_for_export()
+        features, coords = _voxels(encoder, 500, "cuda")
+        stages = exported.downsample_stages()
+        rulebooks = precompute_rulebooks(
+            exported.conv_coords(coords), 1, stages, do_sort=exported.export_do_sort
+        )
+        # Hand stage 1's rulebook to stage 2's layer: different spatial shape.
+        swapped = {stages[1].indice_key: rulebook_indice_data(stages[0], rulebooks)}
+
+        with self.assertRaisesRegex(ValueError, "spatial_shape"), torch.no_grad():
+            exported(features, coords, 1, precomputed_rulebooks=swapped)
 
 
-def test_every_slot_has_a_name():
-    stage = _encoder().downsample_stages()[0]
-    assert stage.input_names == tuple(stage.input_name(slot) for slot in RULEBOOK_SLOTS)
-    with pytest.raises(ValueError, match="Unknown rulebook slot"):
-        stage.input_name("pair_bwd")
+if __name__ == "__main__":
+    unittest.main()
