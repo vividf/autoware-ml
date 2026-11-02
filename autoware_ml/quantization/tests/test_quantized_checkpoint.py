@@ -16,7 +16,10 @@
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+import tempfile
+import unittest
+
 import torch
 from torch import nn
 
@@ -49,55 +52,67 @@ def _record(*modules: str) -> PlacementRecord:
     return record
 
 
-class TestDescriptionRoundTrip:
+class TestDescriptionRoundTrip(unittest.TestCase):
+    """A quantization description survives its checkpoint payload form."""
+
     def test_payload_round_trips_config_and_record(self):
         description = QuantizationDescription(
             config=_CONFIG, placement_record=_record("a.conv", "b.conv")
         )
         restored = QuantizationDescription.from_payload(description.to_payload())
-        assert restored.config == _CONFIG
-        assert restored.placement_record.decisions == description.placement_record.decisions
-
-
-class TestCheckpointFiles:
-    def test_save_read_and_detect(self, tmp_path):
-        model = nn.Linear(2, 2)
-        description = QuantizationDescription(config=_CONFIG, placement_record=_record("a.conv"))
-        path = save_quantized_checkpoint(model, tmp_path / "ptq.ckpt", description)
-
-        checkpoint = torch.load(path, weights_only=False)
-        assert set(checkpoint) == {"state_dict", QUANTIZATION_KEY}
-        assert set(checkpoint["state_dict"]) == {"weight", "bias"}
-        restored = read_quantization(checkpoint)
-        assert restored.config == _CONFIG
-        assert (
-            read_quantization_from_file(path).placement_record.decisions
-            == description.placement_record.decisions
+        self.assertEqual(restored.config, _CONFIG)
+        self.assertEqual(
+            restored.placement_record.decisions, description.placement_record.decisions
         )
 
-    def test_fp_checkpoint_has_no_description(self, tmp_path):
-        path = tmp_path / "fp.ckpt"
-        torch.save({"state_dict": nn.Linear(2, 2).state_dict()}, path)
-        assert read_quantization_from_file(path) is None
-        assert find_quantization([path]) is None
 
-    def test_find_returns_the_single_quantized_checkpoint(self, tmp_path):
-        fp = tmp_path / "fp.ckpt"
+class TestCheckpointFiles(unittest.TestCase):
+    """Quantized checkpoints carry their description and can be told apart from FP ones."""
+
+    def setUp(self) -> None:
+        """Give each test its own directory for the checkpoint files."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
+
+    def test_save_read_and_detect(self):
+        model = nn.Linear(2, 2)
+        description = QuantizationDescription(config=_CONFIG, placement_record=_record("a.conv"))
+        path = save_quantized_checkpoint(model, self.tmp_path / "ptq.ckpt", description)
+
+        checkpoint = torch.load(path, weights_only=False)
+        self.assertEqual(set(checkpoint), {"state_dict", QUANTIZATION_KEY})
+        self.assertEqual(set(checkpoint["state_dict"]), {"weight", "bias"})
+        restored = read_quantization(checkpoint)
+        self.assertEqual(restored.config, _CONFIG)
+        self.assertEqual(
+            read_quantization_from_file(path).placement_record.decisions,
+            description.placement_record.decisions,
+        )
+
+    def test_fp_checkpoint_has_no_description(self):
+        path = self.tmp_path / "fp.ckpt"
+        torch.save({"state_dict": nn.Linear(2, 2).state_dict()}, path)
+        self.assertIsNone(read_quantization_from_file(path))
+        self.assertIsNone(find_quantization([path]))
+
+    def test_find_returns_the_single_quantized_checkpoint(self):
+        fp = self.tmp_path / "fp.ckpt"
         torch.save({"state_dict": {}}, fp)
         quantized = save_quantized_checkpoint(
             nn.Linear(2, 2),
-            tmp_path / "ptq.ckpt",
+            self.tmp_path / "ptq.ckpt",
             QuantizationDescription(config=_CONFIG, placement_record=_record()),
         )
         found = find_quantization([fp, quantized])
-        assert found is not None
-        assert found[0] == quantized
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], quantized)
 
-    def test_two_quantized_checkpoints_rejected(self, tmp_path):
+    def test_two_quantized_checkpoints_rejected(self):
         description = QuantizationDescription(config=_CONFIG, placement_record=_record())
-        a = save_quantized_checkpoint(nn.Linear(2, 2), tmp_path / "a.ckpt", description)
-        b = save_quantized_checkpoint(nn.Linear(2, 2), tmp_path / "b.ckpt", description)
-        with pytest.raises(ValueError, match="exactly one"):
+        a = save_quantized_checkpoint(nn.Linear(2, 2), self.tmp_path / "a.ckpt", description)
+        b = save_quantized_checkpoint(nn.Linear(2, 2), self.tmp_path / "b.ckpt", description)
+        with self.assertRaisesRegex(ValueError, "exactly one"):
             find_quantization([a, b])
 
     def test_attach_mimics_lightning_on_save_checkpoint(self):
@@ -105,14 +120,16 @@ class TestCheckpointFiles:
         attach_quantization(
             checkpoint, QuantizationDescription(config=_CONFIG, placement_record=_record("x"))
         )
-        assert read_quantization(checkpoint).placement_record.decisions[0].module == "x"
-        assert checkpoint["epoch"] == 3
+        self.assertEqual(read_quantization(checkpoint).placement_record.decisions[0].module, "x")
+        self.assertEqual(checkpoint["epoch"], 3)
 
 
-class TestRecordVerify:
+class TestRecordVerify(unittest.TestCase):
+    """A placement record verifies against a matching one and raises on drift."""
+
     def test_matching_record_passes(self):
         _record("a.conv").verify_matches(_record("a.conv"), source="test")
 
     def test_drift_raises(self):
-        with pytest.raises(RuntimeError, match="drift"):
+        with self.assertRaisesRegex(RuntimeError, "drift"):
             _record("b.conv").verify_matches(_record("a.conv"), source="test")

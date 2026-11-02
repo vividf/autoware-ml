@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import pytest
+import unittest
 
 from torch import nn
 
@@ -33,21 +33,23 @@ def _tiny_model() -> nn.Module:
     return model
 
 
-class TestExpandSkipQuantize:
+class TestExpandSkipQuantize(unittest.TestCase):
+    """Each ``skip_quantize`` pattern expands to the module names it covers."""
+
     def test_bare_name_expands_to_subtree(self):
         skip = expand_skip_quantize(_tiny_model(), ["pts_voxel_encoder"], log=False)
-        assert "pts_voxel_encoder" in skip
-        assert "pts_voxel_encoder.0" in skip
+        self.assertIn("pts_voxel_encoder", skip)
+        self.assertIn("pts_voxel_encoder.0", skip)
 
     def test_glob_pattern_matches(self):
         skip = expand_skip_quantize(_tiny_model(), ["pts_backbone.block*"], log=False)
-        assert "pts_backbone.block" in skip
-        assert "pts_backbone.block.0" in skip
-        assert "pts_backbone.conv1" not in skip
+        self.assertIn("pts_backbone.block", skip)
+        self.assertIn("pts_backbone.block.0", skip)
+        self.assertNotIn("pts_backbone.conv1", skip)
 
     def test_zero_match_is_an_error(self):
-        with pytest.raises(ValueError, match="does_not_exist"):
+        with self.assertRaisesRegex(ValueError, "does_not_exist"):
             expand_skip_quantize(_tiny_model(), ["does_not_exist*"], log=True)
 
     def test_empty_patterns_yield_empty_set(self):
-        assert expand_skip_quantize(_tiny_model(), [], log=False) == set()
+        self.assertEqual(expand_skip_quantize(_tiny_model(), [], log=False), set())

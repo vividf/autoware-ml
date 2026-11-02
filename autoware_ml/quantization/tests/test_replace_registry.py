@@ -16,18 +16,28 @@
 
 from __future__ import annotations
 
-import pytest
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("modelopt")
+import torch
+import torch.nn.functional as F
+from torch import nn
 
-import torch.nn.functional as F  # noqa: E402
-from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
-from modelopt.torch.quantization.tensor_quant import fake_tensor_quant  # noqa: E402
-from torch import nn  # noqa: E402
+from autoware_ml.quantization.config import Precision
 
-from autoware_ml.quantization.config import Precision  # noqa: E402
-from autoware_ml.quantization.core.replace import replace_quantizable_modules  # noqa: E402
+MODELOPT_AVAILABLE = importlib.util.find_spec("modelopt") is not None
+ONNX_AVAILABLE = importlib.util.find_spec("onnx") is not None
+
+if MODELOPT_AVAILABLE:
+    from modelopt.torch.quantization.nn import TensorQuantizer
+    from modelopt.torch.quantization.tensor_quant import fake_tensor_quant
+
+    from autoware_ml.quantization.core.replace import replace_quantizable_modules
+
+if ONNX_AVAILABLE:
+    import onnx
 
 
 class _Net(nn.Module):
@@ -62,54 +72,73 @@ def _fq(t: torch.Tensor, q: TensorQuantizer) -> torch.Tensor:
     return fake_tensor_quant(t, q._amax, None, 8, 0, False)
 
 
-class TestReplaceOnRegistry:
+@unittest.skipUnless(MODELOPT_AVAILABLE, "could not import 'modelopt'")
+class TestReplaceOnRegistry(unittest.TestCase):
+    """Modules convert in place to modelopt's quantized classes and quantize as by hand."""
+
+    def setUp(self) -> None:
+        """Give each test its own directory for the ONNX file."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
+
     def test_conversion_is_in_place_and_keeps_type_identity(self):
         torch.manual_seed(0)
         net = _Net().eval()
         conv, up, linear = net.conv, net.up, net.linear
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
-        assert net.conv is conv and net.up is up and net.linear is linear
-        assert isinstance(net.conv, nn.Conv2d) and isinstance(net.linear, nn.Linear)
-        assert type(net.conv).__name__ == "QuantConv2d"
-        assert type(net.up).__name__ == "QuantConvTranspose2d"
-        assert type(net.linear).__name__ == "QuantLinear"
+        self.assertIs(net.conv, conv)
+        self.assertIs(net.up, up)
+        self.assertIs(net.linear, linear)
+        self.assertIsInstance(net.conv, nn.Conv2d)
+        self.assertIsInstance(net.linear, nn.Linear)
+        self.assertEqual(type(net.conv).__name__, "QuantConv2d")
+        self.assertEqual(type(net.up).__name__, "QuantConvTranspose2d")
+        self.assertEqual(type(net.linear).__name__, "QuantLinear")
 
     def test_descriptors_follow_the_framework_tables(self):
         net = _Net().eval()
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
-        assert net.conv.input_quantizer._calibrator.__class__.__name__ == "HistogramCalibrator"
-        assert net.conv.input_quantizer.axis is None
-        assert net.conv.weight_quantizer.axis == 0
-        assert net.up.weight_quantizer.axis is None
-        assert net.linear.weight_quantizer.axis == 0
+        self.assertEqual(
+            net.conv.input_quantizer._calibrator.__class__.__name__, "HistogramCalibrator"
+        )
+        self.assertIsNone(net.conv.input_quantizer.axis)
+        self.assertEqual(net.conv.weight_quantizer.axis, 0)
+        self.assertIsNone(net.up.weight_quantizer.axis)
+        self.assertEqual(net.linear.weight_quantizer.axis, 0)
         net2 = _Net().eval()
         replace_quantizable_modules(
             net2, kinds=("conv",), precision=Precision.INT8, calibrator="max"
         )
-        assert net2.conv.input_quantizer._calibrator.__class__.__name__ == "MaxCalibrator"
+        self.assertEqual(net2.conv.input_quantizer._calibrator.__class__.__name__, "MaxCalibrator")
         # FP8 (E4M3) always calibrates with max, whatever the request.
         net3 = _Net().eval()
         replace_quantizable_modules(
             net3, kinds=("linear",), precision=Precision.FP8, calibrator="histogram"
         )
-        assert net3.linear.weight_quantizer.num_bits == (4, 3)
-        assert net3.linear.input_quantizer._calibrator.__class__.__name__ == "MaxCalibrator"
+        self.assertEqual(net3.linear.weight_quantizer.num_bits, (4, 3))
+        self.assertEqual(
+            net3.linear.input_quantizer._calibrator.__class__.__name__, "MaxCalibrator"
+        )
 
     def test_state_dict_uses_modelopt_names_and_only_after_calibration(self):
         torch.manual_seed(0)
         net = _Net().eval()
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
-        assert not [k for k in net.state_dict() if "quantizer" in k]
+        self.assertFalse([k for k in net.state_dict() if "quantizer" in k])
         _calibrate_max(net, torch.randn(2, 3, 8, 8))
         keys = sorted(k for k in net.state_dict() if "quantizer" in k)
-        assert keys == [
-            "conv.input_quantizer._amax",
-            "conv.weight_quantizer._amax",
-            "linear.input_quantizer._amax",
-            "linear.weight_quantizer._amax",
-            "up.input_quantizer._amax",
-            "up.weight_quantizer._amax",
-        ]
+        self.assertEqual(
+            keys,
+            [
+                "conv.input_quantizer._amax",
+                "conv.weight_quantizer._amax",
+                "linear.input_quantizer._amax",
+                "linear.weight_quantizer._amax",
+                "up.input_quantizer._amax",
+                "up.weight_quantizer._amax",
+            ],
+        )
 
     def test_forward_equals_hand_fake_quant_and_weights_stay_clean(self):
         torch.manual_seed(0)
@@ -135,17 +164,17 @@ class TestReplaceOnRegistry:
             )
             h = _fq(h.mean((2, 3)), net.linear.input_quantizer)
             want = F.linear(h, _fq(ref.linear.weight, net.linear.weight_quantizer), ref.linear.bias)
-        assert torch.equal(got, want)
-        assert torch.equal(net.conv.weight, ref.conv.weight)
+        self.assertTrue(torch.equal(got, want))
+        self.assertTrue(torch.equal(net.conv.weight, ref.conv.weight))
 
     def test_skip_names_and_kinds_are_honored(self):
         net = _Net().eval()
         replace_quantizable_modules(
             net, kinds=("conv",), skip_names={"up"}, precision=Precision.INT8
         )
-        assert hasattr(net.conv, "weight_quantizer")
-        assert not hasattr(net.up, "weight_quantizer")
-        assert not hasattr(net.linear, "weight_quantizer")
+        self.assertTrue(hasattr(net.conv, "weight_quantizer"))
+        self.assertFalse(hasattr(net.up, "weight_quantizer"))
+        self.assertFalse(hasattr(net.linear, "weight_quantizer"))
 
     def test_second_pass_is_a_noop(self):
         net = _Net().eval()
@@ -156,7 +185,9 @@ class TestReplaceOnRegistry:
             precision=Precision.INT8,
             on_replace=lambda n, o, m: seen.append((n, o)),
         )
-        assert seen == [("conv", "Conv2d"), ("up", "ConvTranspose2d"), ("linear", "Linear")]
+        self.assertEqual(
+            seen, [("conv", "Conv2d"), ("up", "ConvTranspose2d"), ("linear", "Linear")]
+        )
         again = []
         replace_quantizable_modules(
             net,
@@ -164,19 +195,20 @@ class TestReplaceOnRegistry:
             precision=Precision.INT8,
             on_replace=lambda n, o, m: again.append(n),
         )
-        assert again == []
+        self.assertEqual(again, [])
 
-    def test_onnx_export_emits_qdq(self, tmp_path):
-        onnx = pytest.importorskip("onnx")
+    @unittest.skipUnless(ONNX_AVAILABLE, "could not import 'onnx'")
+    def test_onnx_export_emits_qdq(self):
         torch.manual_seed(0)
         net = _Net().eval()
         replace_quantizable_modules(net, kinds=("conv", "linear"), precision=Precision.INT8)
         x = torch.randn(1, 3, 8, 8)
         _calibrate_max(net, x)
-        path = tmp_path / "net.onnx"
+        path = self.tmp_path / "net.onnx"
         torch.onnx.export(net, x, str(path), opset_version=17, dynamo=False)
         ops = [node.op_type for node in onnx.load(str(path)).graph.node]
-        assert ops.count("QuantizeLinear") == 6 and ops.count("DequantizeLinear") == 6
+        self.assertEqual(ops.count("QuantizeLinear"), 6)
+        self.assertEqual(ops.count("DequantizeLinear"), 6)
 
     def test_calibrated_state_dict_loads_into_a_fresh_tree(self):
         torch.manual_seed(0)
@@ -186,5 +218,8 @@ class TestReplaceOnRegistry:
         fresh = _Net().eval()
         replace_quantizable_modules(fresh, kinds=("conv", "linear"), precision=Precision.INT8)
         result = fresh.load_state_dict(net.state_dict(), strict=False)
-        assert result.unexpected_keys == [] and result.missing_keys == []
-        assert torch.equal(fresh.conv.input_quantizer._amax, net.conv.input_quantizer._amax)
+        self.assertEqual(result.unexpected_keys, [])
+        self.assertEqual(result.missing_keys, [])
+        self.assertTrue(
+            torch.equal(fresh.conv.input_quantizer._amax, net.conv.input_quantizer._amax)
+        )
