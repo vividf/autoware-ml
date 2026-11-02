@@ -19,9 +19,10 @@ the input quantizer has to reach ``input.features``. ``QuantLinearConvBase`` pro
 so a converted sparse convolution has the same quantizer ``state_dict`` keys as any other
 quantized module.
 
-The deployed sparse tower is not Q/DQ: the ``autoware::ImplicitGemm`` plugin quantizes from
-per-layer scales derived from the ``amax`` calibrated here. The fake quantization calibrates
-those scales and shows the engine's INT8 accuracy on the PyTorch backend; it is not exported.
+The export does not trace these quantizers: the sparse INT8 pass writes the ``amax``
+calibrated here into the ``autoware::ImplicitGemm`` node (a QuantizeLinear in front, INT8
+filters, per-channel scales). The fake quantization calibrates those scales and shows the
+engine's INT8 accuracy on the PyTorch backend.
 """
 
 from __future__ import annotations
@@ -41,20 +42,29 @@ SPCONV_QUANT_REGISTERED = False
 if IS_SPCONV_AVAILABLE:  # pragma: no branch - environment-dependent
     from spconv.pytorch.conv import SparseConvolution
 
-    @QuantModuleRegistry.register({SparseConvolution: "spconv.SparseConvolution"})
+    from autoware_ml.ops.submanifold_conv_spconv import SpconvSubMConv3d
+
+    @QuantModuleRegistry.register(
+        {
+            SparseConvolution: "spconv.SparseConvolution",
+            SpconvSubMConv3d: "autoware_ml.SpconvSubMConv3d",
+        }
+    )
     class _QuantSparseConvolution(QuantLinearConvBase):
         """Sparse convolution with a quantized input and weight.
 
-        Registered for ``SparseConvolution``; modelopt's registry also converts the subclasses
-        that inherit its forward (``SubMConv3d``, ``SparseConv3d``, ...).
+        modelopt's registry converts a subclass of a registered class only when it inherits
+        that class's forward: ``SubMConv3d`` and ``SparseConv3d`` come with
+        ``SparseConvolution``, but ``SpconvSubMConv3d`` overrides forward (autocast off,
+        features in the weight dtype) and is registered by name.
         """
 
         def forward(self, input: Any, *args: Any, **kwargs: Any) -> Any:
-            """Quantize ``input.features`` and the weight, then run the sparse convolution."""
+            """Quantize ``input.features`` and the weight, then run the module's own forward."""
             quantized = input.replace_feature(self.input_quantizer(input.features))
             # Inside quantize_weight(), the dynamic `weight` attribute returns the
             # fake-quantized tensor.
             with self.quantize_weight():
-                return SparseConvolution.forward(self, quantized, *args, **kwargs)
+                return self.original_cls.forward(self, quantized, *args, **kwargs)
 
     SPCONV_QUANT_REGISTERED = True
