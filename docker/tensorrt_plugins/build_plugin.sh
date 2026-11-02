@@ -17,9 +17,10 @@
 set -euo pipefail
 
 PLUGINS_REPO="${PLUGINS_REPO:-https://github.com/vividf/autoware.universe.git}"
-# Pinned to a plugin revision that reads the do_sort attribute and sizes its index buffers
-# for 512k input voxels (autoware_universe#13300); bump deliberately.
-PLUGINS_REF="${PLUGINS_REF:-a5ac4b5e0d5e26c94b1e86dc31c8689daa81672b}"
+# Pinned to a plugin revision that reads the do_sort attribute, sizes its index buffers for
+# 512k input voxels (autoware_universe#13300) and reads the seven-input ImplicitGemm form
+# shared with t4sparse; bump deliberately.
+PLUGINS_REF="${PLUGINS_REF:-d075742c046bb120a77a7c123c86e4097a95f663}"
 PLUGINS_SRC="${PLUGINS_SRC:-}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/plugins}"
 BUILD_DIR="${BUILD_DIR:-/tmp/autoware_trt_plugins_build}"
@@ -160,6 +161,14 @@ else
         git -C "$CLONE_DIR" checkout -q FETCH_HEAD
     fi
     PLUGIN_SRC_DIR="$CLONE_DIR/perception/autoware_tensorrt_plugins"
+fi
+
+# A folded bias gives ImplicitGemm the seven-input form of the contract shared with t4sparse,
+# whose epilogue kernels CMakeLists.txt compiles; an older source tree cannot read it.
+if [ ! -f "$PLUGIN_SRC_DIR/src/implicit_gemm_ops/epilogue_constants.cu" ]; then
+    log "ERROR: source has no src/implicit_gemm_ops/epilogue_constants.cu: it predates the"
+    log "       seven-input ImplicitGemm form the export writes. Build the pinned PLUGINS_REF."
+    exit 1
 fi
 
 # The exported graphs carry the `do_sort` attribute on GetIndicePairsImplicitGemm; a source

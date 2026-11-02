@@ -105,6 +105,7 @@ add_library(cuda_ops SHARED
   "${PLUGIN_SRC_DIR}/src/multi_scale_deform_attn_ops/ms_deform_attn_kernel.cu"
   "${PLUGIN_SRC_DIR}/src/rotate_ops/rotate_kernel.cu"
   "${PLUGIN_SRC_DIR}/src/select_and_pad_ops/select_and_pad_kernel.cu"
+  "${PLUGIN_SRC_DIR}/src/implicit_gemm_ops/epilogue_constants.cu"
 )
 
 set_target_properties(cuda_ops PROPERTIES

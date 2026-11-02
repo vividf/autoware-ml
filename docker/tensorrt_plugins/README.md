@@ -52,7 +52,7 @@ Without `PLUGINS_SRC` the script fetches the `PLUGINS_REPO` / `PLUGINS_REF` pinn
 top of `build_plugin.sh` (a commit SHA); override them, with a branch, tag or SHA, to build
 a different source (a feature branch for an A/B build, say).
 
-## Three traps worth knowing
+## Four traps worth knowing
 
 1. **Header/runtime version match.** The pip TensorRT wheels ship libraries but no C++
    headers, and Ubuntu's `libnvinfer-dev` is usually a different major.minor. Building
@@ -70,6 +70,11 @@ a different source (a feature branch for an A/B build, say).
    process on a denser frame (`alloc failed, tensor size too small`), which reads like a
    memory problem, not a version one; PTv3 multi-sweep frames reach ~290k voxels. The
    pinned revision includes #13300.
+4. **The seven-input form.** A folded bias makes `ImplicitGemm` a seven-input node: an
+   empty FP32 `weight_scale` in slot 5 and the FP32 bias in slot 6, the layout t4sparse
+   reads too (`autoware_ml/ops/spconv/contract.py`). Older plugin trees read only five or
+   six inputs; `build_plugin.sh` stops on a source without the form. An engine serialized
+   by another plugin revision is refused on load: rebuild it.
 
 ## CUDA architectures
 
