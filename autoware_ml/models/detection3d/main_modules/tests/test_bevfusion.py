@@ -79,6 +79,7 @@ from autoware_ml.models.detection3d.view_transforms.depth_lss import DepthLSSTra
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.types.backend import Backend
 
 
 class _StubVoxelEncoder(nn.Module):
@@ -627,6 +628,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(model_output_names(stages), ("bbox_pred", "score", "label_pred"))
         # Dynamic axes come from deploy.onnx.modules.bevfusion_lidar, not the declaration.
         self.assertFalse(graph.onnx_dynamic_axes)
+        self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
         """Test that a multi-sample batch is refused instead of exporting only its first sample."""
