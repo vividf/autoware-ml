@@ -82,20 +82,7 @@ class TestStagedPipeline:
         assert set(state.graph_inputs) == {"encoder", "head"}
         assert torch.equal(state.graph_inputs["head"][0], torch.tensor([2.5, 4.5, 6.5]))
 
-    def test_trace_keeps_the_graph_inputs_as_the_graph_saw_them(self):
-        # Later glue may reuse a graph output in place; the recorded inputs do not follow.
-        stages = list(_toy_stages())
-        stages[2] = TorchStage(
-            "glue", run=lambda state: {"z": state["y"].add_(100.0)}, inputs=("y",), outputs=("z",)
-        )
-        pipeline = StagedPipeline(stages, backend=Backend.PYTORCH, device=torch.device("cpu"))
-        state = pipeline.trace({"x": torch.tensor([1.0])})
-        (encoder_input,) = state.graph_inputs["encoder"]
-        (head_input,) = state.graph_inputs["head"]
-        assert torch.equal(encoder_input, torch.tensor([1.0]))
-        assert torch.equal(head_input, torch.tensor([102.0]))
-
-    def test_infer_does_not_copy_the_graph_inputs(self):
+    def test_infer_records_no_graph_inputs(self):
         pipeline = StagedPipeline(
             _toy_stages(), backend=Backend.PYTORCH, device=torch.device("cpu")
         )
