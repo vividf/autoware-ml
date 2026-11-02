@@ -17,8 +17,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
 
-import pytest
 from omegaconf import OmegaConf
 
 from autoware_ml.scripts import quantize
@@ -28,51 +29,62 @@ class _ModelBuilt(Exception):
     pass
 
 
-def test_the_model_is_built_from_the_qat_schedule(monkeypatch) -> None:
-    # Shaped like the experiment configs: model.optimizer interpolates the top-level node,
-    # and the dynamic validation callback is registered.
-    cfg = OmegaConf.create(
-        {
-            "quantization": {
-                "enabled": True,
-                "mode": "qat",
-                "dry_run": True,
-                "qat": {"epochs": 2, "lr": 1.0e-5},
-            },
-            "optimizer": {"_target_": "torch.optim.AdamW", "_partial_": True, "lr": 1.0e-3},
-            "model": {
-                "_target_": "unused.Model",
-                "optimizer": "${optimizer}",
-                "scheduler": None,
-                "scheduler_config": None,
-            },
-            "trainer": {"max_epochs": 30, "devices": 4, "precision": "16-mixed"},
-            "callbacks": {"dynamic_validation": {"_target_": "unused.DynamicValidation"}},
-        }
-    )
-    seen = {}
+class TestRunQuantize(unittest.TestCase):
+    """``run_quantize`` builds the QAT model and trainer from the QAT schedule."""
 
-    def build_model(cfg, **kwargs):
-        seen["model"] = OmegaConf.to_container(cfg.model, resolve=True)
-        raise _ModelBuilt
+    def test_the_model_is_built_from_the_qat_schedule(self) -> None:
+        # Shaped like the experiment configs: model.optimizer interpolates the top-level node,
+        # and the dynamic validation callback is registered.
+        cfg = OmegaConf.create(
+            {
+                "quantization": {
+                    "enabled": True,
+                    "mode": "qat",
+                    "dry_run": True,
+                    "qat": {"epochs": 2, "lr": 1.0e-5},
+                },
+                "optimizer": {"_target_": "torch.optim.AdamW", "_partial_": True, "lr": 1.0e-3},
+                "model": {
+                    "_target_": "unused.Model",
+                    "optimizer": "${optimizer}",
+                    "scheduler": None,
+                    "scheduler_config": None,
+                },
+                "trainer": {"max_epochs": 30, "devices": 4, "precision": "16-mixed"},
+                "callbacks": {"dynamic_validation": {"_target_": "unused.DynamicValidation"}},
+            }
+        )
+        seen = {}
 
-    monkeypatch.setattr(quantize, "build_model", build_model)
-    monkeypatch.setattr(quantize, "build_data_preprocessor", lambda cfg: None)
-    monkeypatch.setattr(quantize, "log_configuration", lambda cfg: None)
-    monkeypatch.setattr(quantize, "restrict_console_logging_to_rank_zero", lambda: None)
-    monkeypatch.setattr(
-        quantize.HydraConfig,
-        "get",
-        staticmethod(lambda: SimpleNamespace(job=SimpleNamespace(config_name="tasks/unused"))),
-    )
+        def build_model(cfg, **kwargs):
+            seen["model"] = OmegaConf.to_container(cfg.model, resolve=True)
+            raise _ModelBuilt
 
-    with pytest.raises(_ModelBuilt):
-        quantize.run_quantize(cfg)
+        with (
+            patch.object(quantize, "build_model", build_model),
+            patch.object(quantize, "build_data_preprocessor", lambda cfg: None),
+            patch.object(quantize, "log_configuration", lambda cfg: None),
+            patch.object(quantize, "restrict_console_logging_to_rank_zero", lambda: None),
+            patch.object(
+                quantize.HydraConfig,
+                "get",
+                staticmethod(
+                    lambda: SimpleNamespace(job=SimpleNamespace(config_name="tasks/unused"))
+                ),
+            ),
+            self.assertRaises(_ModelBuilt),
+        ):
+            quantize.run_quantize(cfg)
 
-    assert seen["model"]["optimizer"]["lr"] == 1.0e-5
-    assert seen["model"]["optimizer"]["_target_"] == "torch.optim.AdamW"
-    assert seen["model"]["scheduler"] is not None
-    assert seen["model"]["scheduler_config"] is not None
-    assert cfg.trainer.max_epochs == 2 and cfg.trainer.devices == 1
-    assert cfg.callbacks.dynamic_validation is None
-    assert cfg.optimizer.lr == 1.0e-3
+        self.assertEqual(seen["model"]["optimizer"]["lr"], 1.0e-5)
+        self.assertEqual(seen["model"]["optimizer"]["_target_"], "torch.optim.AdamW")
+        self.assertIsNotNone(seen["model"]["scheduler"])
+        self.assertIsNotNone(seen["model"]["scheduler_config"])
+        self.assertEqual(cfg.trainer.max_epochs, 2)
+        self.assertEqual(cfg.trainer.devices, 1)
+        self.assertIsNone(cfg.callbacks.dynamic_validation)
+        self.assertEqual(cfg.optimizer.lr, 1.0e-3)
+
+
+if __name__ == "__main__":
+    unittest.main()

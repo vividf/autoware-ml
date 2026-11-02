@@ -17,8 +17,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-
-import pytest
+import unittest
 
 from autoware_ml.quantization.config import QuantizationConfig
 from autoware_ml.quantization.qat_callback import QATCallback
@@ -37,35 +36,44 @@ def _trainer(num_devices=1, world_size=1, precision="32-true", ckpt_path=None):
     )
 
 
-class TestQATCallbackBoundaries:
+class TestQATCallbackBoundaries(unittest.TestCase):
+    """``QATCallback`` refuses the configurations and trainers it does not support."""
+
     def test_requires_qat_mode(self):
         ptq_config = QuantizationConfig.from_dict(
             {"enabled": True, "mode": "ptq", "ptq": {"calibrate_samples": 4}}
         )
-        with pytest.raises(ValueError, match="mode='qat'"):
+        with self.assertRaisesRegex(ValueError, "mode='qat'"):
             QATCallback(ptq_config)
 
     def test_non_fit_stage_is_noop(self):
         callback = QATCallback(_QAT_CONFIG)
         callback.setup(_trainer(), pl_module=None, stage="validate")
-        assert callback._prepared is None
+        self.assertIsNone(callback._prepared)
 
     def test_rejects_multi_device(self):
         callback = QATCallback(_QAT_CONFIG)
-        with pytest.raises(RuntimeError, match="single-device"):
+        with self.assertRaisesRegex(RuntimeError, "single-device"):
             callback.setup(_trainer(num_devices=2), pl_module=None, stage="fit")
 
     def test_rejects_amp(self):
         callback = QATCallback(_QAT_CONFIG)
-        with pytest.raises(RuntimeError, match="32-true"):
+        with self.assertRaisesRegex(RuntimeError, "32-true"):
             callback.setup(_trainer(precision="16-mixed"), pl_module=None, stage="fit")
 
     def test_rejects_resume(self):
         callback = QATCallback(_QAT_CONFIG)
-        with pytest.raises(RuntimeError, match="resume"):
+        with self.assertRaisesRegex(RuntimeError, "resume"):
             callback.setup(_trainer(ckpt_path="/tmp/last.ckpt"), pl_module=None, stage="fit")
 
 
-def test_calibration_needs_the_prepared_tree():
-    with pytest.raises(RuntimeError, match="setup"):
-        QATCallback(_QAT_CONFIG).on_train_epoch_start(_trainer(), pl_module=None)
+class TestQATCallbackCalibration(unittest.TestCase):
+    """``QATCallback`` does not calibrate before ``setup('fit')`` prepared the tree."""
+
+    def test_calibration_needs_the_prepared_tree(self):
+        with self.assertRaisesRegex(RuntimeError, "setup"):
+            QATCallback(_QAT_CONFIG).on_train_epoch_start(_trainer(), pl_module=None)
+
+
+if __name__ == "__main__":
+    unittest.main()
