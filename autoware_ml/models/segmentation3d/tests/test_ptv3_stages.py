@@ -172,7 +172,9 @@ class TestDet3dStageGraph(unittest.TestCase):
         batch = build_inputs(device=torch.device("cuda"))
         specs = model.build_export_specs(batch)
         self.assertEqual(list(specs), ["ptv3_encoder", "ptv3_det3d_head"])
-        self.assertEqual(specs["ptv3_det3d_head"].output_names, list(model.export_output_names))
+        self.assertEqual(
+            specs["ptv3_det3d_head"].output_names, list(model.bbox_head.export_output_names)
+        )
 
         state = run_stages_in_torch(stages, batch, torch.device("cuda"))
         outputs = {name: state[name] for name in model_output_names(stages)}
