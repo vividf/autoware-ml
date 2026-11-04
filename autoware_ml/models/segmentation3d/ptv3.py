@@ -47,6 +47,17 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     build_seg3d_head_stage,
     split_block_parameters,
 )
+from autoware_ml.quantization.rules import QuantRules
+
+
+#: Linears follow ``default_precision`` (FP8 in the ``_fp8`` variant); the cpe sparse
+#: convolutions deploy as INT8 plugin nodes when quantized.
+PTV3_SEG_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "encoder": {"linear": None, "spconv": "int8"},
+        "seg3d_head": {"linear": None, "spconv": "int8"},
+    },
+)
 
 
 class PTv3Segmentation3DModel(PTv3BaseModel):
@@ -157,6 +168,10 @@ class PTv3Segmentation3DModel(PTv3BaseModel):
                 outputs.segmentation3d().logits, multi_task_batch_inputs
             )
         )
+
+    def build_quantization_rules(self) -> QuantRules:
+        """PTv3's quantizable towers (see :data:`PTV3_SEG_QUANT_RULES`)."""
+        return PTV3_SEG_QUANT_RULES
 
     def build_stages(self) -> Sequence[Stage]:
         """Declare ``serialize_points -> ptv3_encoder -> ptv3_seg3d_head``, the runtime's split."""

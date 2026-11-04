@@ -38,6 +38,7 @@ from autoware_ml.models.detection3d.tests.ptv3_detection3d_fixtures import (
     build_seg3d_model,
     build_trans_model,
 )
+from autoware_ml.models.segmentation3d.ptv3 import PTV3_SEG_QUANT_RULES
 from autoware_ml.models.segmentation3d.ptv3_base import (
     DET3D_HEAD_STAGE,
     ENCODER_EXPORT_INPUT_NAMES,
@@ -77,6 +78,7 @@ class TestSeg3dStageGraph(unittest.TestCase):
         self.assertFalse(any(name.endswith("_cluster") for name in encoder.inputs))
         self.assertEqual(encoder.torch_fallback_backends, (Backend.ONNX,))
         self.assertEqual(stages[2].outputs, ("pred_labels", "pred_probs"))
+        self.assertIs(model.build_quantization_rules(), PTV3_SEG_QUANT_RULES)
 
     def test_seg3d_export_specs_are_derived_and_keep_the_split_contract(self) -> None:
         model = build_seg3d_model().cuda().eval()
@@ -194,3 +196,32 @@ class TestDet3dStageGraph(unittest.TestCase):
         deployed = model.build_deployed_eval_output(batch, outputs)
         self.assertLessEqual({"predictions", "gt_boxes", "gt_labels"}, deployed.keys())
         self.assertEqual(len(deployed["predictions"]), 1)
+
+
+@unittest.skipUnless(IS_SPCONV_AVAILABLE, "the cpe convolutions are spconv modules")
+class TestQuantizedExportCopy(unittest.TestCase):
+    """The float export copy of a calibrated cpe convolution."""
+
+    def test_export_replacement_drops_quantizer_buffers_of_a_quantized_cpe_conv(self) -> None:
+        import spconv.pytorch as spconv
+
+        from autoware_ml.models.segmentation3d.encoders.ptv3 import (
+            ExportableSubMConv3d,
+            replace_submconv3d_for_export,
+        )
+
+        conv = spconv.SubMConv3d(4, 8, kernel_size=3, indice_key="cpe", bias=True)
+        # Stand-ins for the amax buffers modelopt's quantizers add to a calibrated conv.
+        conv.input_quantizer = torch.nn.Module()
+        conv.input_quantizer.register_buffer("_amax", torch.tensor(1.5))
+        conv.weight_quantizer = torch.nn.Module()
+        conv.weight_quantizer.register_buffer("_amax", torch.tensor(0.5))
+        holder = torch.nn.Sequential(conv)
+
+        replace_submconv3d_for_export(holder)
+
+        exported = holder[0]
+        self.assertIsInstance(exported, ExportableSubMConv3d)
+        self.assertTrue(torch.equal(exported.weight, conv.weight))
+        self.assertTrue(torch.equal(exported.bias, conv.bias))
+        self.assertFalse(any("quantizer" in key for key in exported.state_dict()))
