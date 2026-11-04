@@ -45,6 +45,10 @@ optimizer:
   lr: 1.0e-4
 
 model:
+  bbox_head:
+    # Export without the softmax max-subtraction so TensorRT fuses the decoder attention into
+    # one MHA kernel (0.68 -> 0.25 ms on this graph). Export only; the deploy evaluation gates it.
+    fuse_export_attention: true
   scheduler:
     warmup_epochs: 5
     decay_epochs: 45
