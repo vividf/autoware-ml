@@ -41,8 +41,9 @@ class RunState:
         batch: The preprocessed batch the run started from; only glue reads it.
         device: Device the graph stages run on.
         tensors: Tensors produced so far, by name.
-        graph_inputs: The positional inputs each graph stage ran on, by stage name. They
-            are the run-state tensors themselves: no stage modifies what it reads in place
+        graph_inputs: The positional inputs each graph stage ran on, by stage name, filled by
+            a tracing run (:meth:`StagedPipeline.trace`). They are the run-state tensors
+            themselves: no stage modifies what it reads in place
             (:func:`check_inputs_unmodified`), so they stay what the graph saw.
     """
 
@@ -124,6 +125,8 @@ class GraphStage:
         inputs: Run-state names fed to the module, in order; they are the ONNX input names.
         outputs: ONNX output names, in the module's return order. Those no later stage
             reads are the model outputs (:func:`model_output_names`).
+        torch_fallback_backends: Backends that run the PyTorch module instead of the
+            artifact, for graphs they cannot execute (plugin ops on ONNX Runtime).
         onnx_dynamic_axes: Axes dynamic by construction, ``{tensor: {dim: name}}``. They
             become the spec's ``dynamic_axes``; the module's config ``dynamic_axes`` apply
             only when the stage declares none.
@@ -133,6 +136,7 @@ class GraphStage:
     module: nn.Module
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
+    torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -315,52 +319,39 @@ def run_torch_stage(stage: TorchStage, state: RunState) -> dict[str, Any]:
     return {name: produced[name] for name in stage.outputs}
 
 
-def run_stages_in_torch(stages: Sequence[Stage], batch: Any, device: torch.device) -> RunState:
-    """Run every stage in PyTorch and return the filled run state.
+def run_graph_stage(stage: GraphStage, args: Sequence[Any]) -> dict[str, Any]:
+    """Call a graph stage's module and check its return against ``outputs``.
 
-    Export takes its trace inputs from ``RunState.graph_inputs``, filled by this run. A graph
-    stage gets its ``inputs`` as positional arguments and returns one tensor per ``outputs``
-    name, in order. Modules run in their current mode; export switches them to eval first.
+    Every PyTorch run of a graph stage goes through here.
 
     Raises:
-        TypeError: When a graph stage gets a non-tensor input or returns a mapping or a
-            non-tensor, or a glue stage returns something other than a mapping.
-        ValueError: When a stage returns other names, or another number of tensors, than
-            it declares, or modifies an input in place.
+        TypeError: When the module returns a mapping or a non-tensor.
+        ValueError: When the number of tensors differs from ``outputs``, or the module
+            modifies an input in place.
     """
-    stages = validate_stages(stages)
-    state = RunState(batch=batch, device=device)
-    with torch.no_grad():
-        for stage in stages:
-            if isinstance(stage, TorchStage):
-                state.add(run_torch_stage(stage, state))
-                continue
-            args = graph_input_tensors(stage, state)
-            state.graph_inputs[stage.name] = args
-            inputs = dict(zip(stage.inputs, args))
-            versions = _tensor_versions(inputs)
-            raw = stage.module(*args)
-            check_inputs_unmodified(stage, inputs, versions)
-            if isinstance(raw, Mapping):
-                # len() and zip() would accept a dict and name the outputs by its keys.
-                raise TypeError(
-                    f"GraphStage {stage.name!r} returned a mapping; a graph stage returns "
-                    f"its tensors positionally, in the order of outputs {list(stage.outputs)}."
-                )
-            if isinstance(raw, torch.Tensor):
-                raw = (raw,)
-            if len(raw) != len(stage.outputs):
-                raise ValueError(
-                    f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
-                    f"outputs {list(stage.outputs)}."
-                )
-            # The exporter flattens a nested tuple into extra outputs and drops Python values,
-            # so neither would match the declared names.
-            others = sorted({type(value).__name__ for value in raw if not torch.is_tensor(value)})
-            if others:
-                raise TypeError(
-                    f"GraphStage {stage.name!r} returned {others} among its outputs; a graph "
-                    f"stage returns one tensor per declared output {list(stage.outputs)}."
-                )
-            state.add(dict(zip(stage.outputs, raw)))
-    return state
+    inputs = dict(zip(stage.inputs, args))
+    versions = _tensor_versions(inputs)
+    raw = stage.module(*args)
+    check_inputs_unmodified(stage, inputs, versions)
+    if isinstance(raw, Mapping):
+        # len() and zip() would accept a dict and name the outputs by its keys.
+        raise TypeError(
+            f"GraphStage {stage.name!r} returned a mapping; a graph stage returns "
+            f"its tensors positionally, in the order of outputs {list(stage.outputs)}."
+        )
+    if isinstance(raw, torch.Tensor):
+        raw = (raw,)
+    if len(raw) != len(stage.outputs):
+        raise ValueError(
+            f"GraphStage {stage.name!r} returned {len(raw)} tensor(s) but declares "
+            f"outputs {list(stage.outputs)}."
+        )
+    # The exporter flattens a nested tuple into extra outputs and drops Python values,
+    # so neither would match the declared names.
+    others = sorted({type(value).__name__ for value in raw if not torch.is_tensor(value)})
+    if others:
+        raise TypeError(
+            f"GraphStage {stage.name!r} returned {others} among its outputs; a graph "
+            f"stage returns one tensor per declared output {list(stage.outputs)}."
+        )
+    return dict(zip(stage.outputs, raw))
