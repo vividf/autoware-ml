@@ -63,6 +63,19 @@ deploy:
           class_names: ${database.taxonomy.segmentation3d.class_names}
   tensorrt:
     enabled: false
+  # The pytorch reference runs the export modules (shuffle_orders off), so the raw outputs
+  # are comparable across backends.
+  verification:
+    # Gates pred_probs; pred_labels, an int argmax, is gated on the share of flipped labels
+    # (5 %). Measured on the j6gen2 checkpoint exported in fp16: max_diff 0.0217 (mean 4e-5,
+    # 0.03 % of the labels flipped at near-ties), mIoU equal; 0.1 leaves ~4x headroom.
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.1 }
+  evaluation:
+    backends:
+      # Plugin ops have no ONNX Runtime implementation, so this column would repeat PyTorch's.
+      onnx: { enabled: false }
+
 
 model:
   _target_: autoware_ml.models.segmentation3d.ptv3.PTv3Segmentation3DModel

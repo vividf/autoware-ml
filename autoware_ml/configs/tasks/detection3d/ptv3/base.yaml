@@ -77,6 +77,14 @@ deploy:
           attention_node_name_substring: /bbox_head/decoder
   tensorrt:
     enabled: false
+  # No verification: as in BEVFusion, the TransFusion head outputs per query after its
+  # top-k, so the raw outputs do not line up by position across backends. Compare the
+  # backends by evaluation mAP instead.
+  evaluation:
+    backends:
+      # Plugin ops have no ONNX Runtime implementation, so this column would repeat PyTorch's.
+      onnx: { enabled: false }
+
 
 model:
   _target_: autoware_ml.models.detection3d.ptv3.PTv3Detection3DModel

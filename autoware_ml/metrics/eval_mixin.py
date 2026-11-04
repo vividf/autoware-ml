@@ -16,10 +16,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import torch.nn as nn
+from torch import nn
 
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.metrics.base import EvalStage, MetricSuite
+from autoware_ml.metrics.reporting import check_required_keys, collect_suite_results
 
 
 class MetricEvalMixin:
@@ -90,6 +91,23 @@ class MetricEvalMixin:
     def _stage_metrics(self, stage: EvalStage) -> nn.ModuleList:
         return self._metrics_by_stage[stage.value]
 
+    def clone_metrics(self, stage: EvalStage) -> list[MetricSuite]:
+        """Return fresh clones of the suites that report at ``stage``, with empty state.
+
+        Deployment evaluation needs one accumulator per backend, apart from the suites of the
+        Lightning lifecycle.
+
+        Args:
+            stage: Evaluation stage whose suites to clone.
+
+        Returns:
+            Suites bound to ``stage``.
+        """
+        clones = [self._stage_clone(metric, stage) for metric in self._stage_metrics(stage)]
+        for clone in clones:
+            clone.reset()
+        return clones
+
     def on_validation_epoch_start(self) -> None:
         """Reset the validation metric state for a fresh epoch."""
         for metric in self._stage_metrics(EvalStage.VAL):
@@ -145,30 +163,17 @@ class MetricEvalMixin:
         )
         eval_out = self.build_eval_output(batch, raw_outputs)
         if batch_idx == 0:
-            self._check_required_keys(list(metrics), eval_out)
+            check_required_keys(
+                metrics, eval_out, producer=f"{type(self).__name__}.build_eval_output"
+            )
         for metric in metrics:
             metric.update(eval_out)
 
-    def _check_required_keys(self, metrics: list, eval_out: Mapping[str, Any]) -> None:
-        for metric in metrics:
-            missing = [key for key in metric.required_keys() if key not in eval_out]
-            if missing:
-                raise ValueError(
-                    f"Metric {type(metric).__name__!r} needs {missing}, not produced by "
-                    f"{type(self).__name__}.build_eval_output."
-                )
-
     def _log_metrics(self, stage: EvalStage) -> None:
         metrics = self._stage_metrics(stage)
-        report: dict[str, float] = {}
-        for metric in metrics:
-            for name, value in metric.result(stage).items():
-                key = f"{stage.value}/{metric.prefix}/{name}"
-                if key in report:
-                    raise ValueError(
-                        f"Two metrics log the same key {key!r}. Set a distinct prefix."
-                    )
-                report[key] = value
+        report = collect_suite_results(
+            metrics, stage, key_of=lambda prefix, name: f"{stage.value}/{prefix}/{name}"
+        )
         if not report:
             return
         # Values are already global and identical on every rank after sync, so no sync_dist.
