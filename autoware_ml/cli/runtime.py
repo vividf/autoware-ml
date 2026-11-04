@@ -235,8 +235,10 @@ def prepare_runtime_environment(
         parent_run_id = None
         extra_tags = None
         if checkpoint_paths:
-            if stage != "deploy":
-                raise ValueError("Multi-checkpoint runtime lineage is only supported for deploy.")
+            if stage not in ("deploy", "quantize"):
+                raise ValueError(
+                    "Multi-checkpoint runtime lineage is only supported for deploy and quantize."
+                )
             parent_run_id, source_checkpoints = resolve_deploy_lineage(checkpoint_paths)
             source_run_ids = [
                 source["run_id"] for source in source_checkpoints if source["run_id"] is not None

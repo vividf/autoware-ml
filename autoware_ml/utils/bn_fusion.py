@@ -74,6 +74,11 @@ def fuse_bn_weights(
 def fuse_conv_bn(conv: nn.Module, bn: nn.Module):
     """Fold ``bn`` into ``conv`` in place; ``bn`` must then be replaced by an identity."""
     assert not conv.training and not bn.training, "Fusion only works in eval mode"
+    if bn.running_mean is None or bn.running_var is None:
+        raise ValueError(
+            f"Cannot fold {type(bn).__name__} without running statistics "
+            "(track_running_stats=False): there is nothing to fold into the convolution."
+        )
 
     # The only transposed type in _CONV_TO_BN.
     is_transposed = isinstance(conv, nn.ConvTranspose2d)

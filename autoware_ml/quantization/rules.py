@@ -1,0 +1,68 @@
+# Copyright 2026 TIER IV, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""A model's quantization declaration.
+
+Every model imports this module, so it must not import modelopt or
+:mod:`autoware_ml.quantization.core`; those load with :mod:`autoware_ml.quantization.plan`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from autoware_ml.quantization.config import VALID_MODULE_KINDS, Precision
+
+
+@dataclass(frozen=True)
+class QuantRules:
+    """A model's quantization declaration: which submodules carry which quantizable kinds.
+
+    The kinds are architecture facts, so they live in code; the config's ``skip_quantize``
+    only subtracts from them.
+
+    Attributes:
+        quantize_submodules: Dotted submodule path -> module kinds to replace inside it,
+            either ``("conv", "linear")`` at the config's ``default_precision``, or
+            ``{"conv": "int8", "linear": "fp8"}`` with a precision per kind (``None`` for
+            the default). A path the model does not have is an error.
+    """
+
+    quantize_submodules: Mapping[str, tuple[str, ...] | Mapping[str, str | None]]
+
+    def __post_init__(self) -> None:
+        for submodule_name, kinds in self.quantize_submodules.items():
+            unknown = set(kinds) - set(VALID_MODULE_KINDS)
+            if unknown:
+                raise ValueError(
+                    f"QuantRules submodule {submodule_name!r} declares unknown module kind(s) "
+                    f"{sorted(unknown)}; valid kinds: {list(VALID_MODULE_KINDS)}."
+                )
+            if isinstance(kinds, Mapping):
+                for precision_name in kinds.values():
+                    if precision_name is not None:
+                        Precision(precision_name)  # raises ValueError on an unknown precision
+
+    def resolved_kinds(
+        self, submodule_name: str, default_precision: Precision
+    ) -> Mapping[str, Precision]:
+        """Return the submodule's kinds with their precision, ``default_precision`` if unset."""
+        kinds = self.quantize_submodules[submodule_name]
+        if isinstance(kinds, Mapping):
+            return {
+                kind: (Precision(name) if name is not None else default_precision)
+                for kind, name in kinds.items()
+            }
+        return {kind: default_precision for kind in kinds}
