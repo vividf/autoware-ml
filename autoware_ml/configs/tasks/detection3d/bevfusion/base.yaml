@@ -67,6 +67,9 @@ deploy:
           indices: { 0: num_kept }
   tensorrt:
     enabled: false
+    # Implements the lidar graph's autoware:: sparse-convolution ops; built by the image
+    # (docker/tensorrt_plugins/README.md).
+    plugin_libraries: [/opt/plugins/libautoware_tensorrt_plugins.so]
   # No verification: the graph keeps the top num_proposals queries and the zero-padded
   # heatmap borders produce many ties, so backends pick different near-zero-score proposals
   # and the raw outputs do not line up by position (measured: high-score proposals agree to

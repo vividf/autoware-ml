@@ -25,6 +25,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import lightning as L
@@ -50,6 +51,9 @@ class ExportSpec:
         output_names: Names of the exported output tensors, in order.
         dynamic_axes: Optional legacy ONNX dynamic-axis mapping generated with
             the export arguments. Used only when exporting with ``dynamo=False``.
+        onnx_transforms: Rewrites of the exported ``.onnx``, run in order before any
+            config-driven graph modifier or precision cast; each takes the path and
+            returns the path it wrote.
     """
 
     module: torch.nn.Module
@@ -57,6 +61,7 @@ class ExportSpec:
     input_names: list[str]
     output_names: list[str]
     dynamic_axes: dict[str, dict[int, str]] | None = None
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed.
@@ -73,6 +78,17 @@ class ExportSpec:
             )
         if not self.output_names:
             raise ValueError("The export spec names no outputs.")
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run ``transforms`` over the exported file in order and return the resulting path."""
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
 
 def validate_cuda_available() -> None:
