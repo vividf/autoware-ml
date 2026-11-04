@@ -37,8 +37,9 @@ from autoware_ml.types.backend import Backend
 from autoware_ml.deployment.backends.tensorrt_builder import build_engine_from_config
 from autoware_ml.utils.mlflow_helpers import get_git_sha
 from autoware_ml.utils.onnx_meta import stamp_onnx_meta
+from autoware_ml.deployment.onnx.convert import convert_onnx_precision
+from autoware_ml.deployment.onnx.qdq import fold_qdq_params
 from autoware_ml.utils.onnx_precision import (
-    convert_onnx_precision,
     resolve_onnx_precision,
     should_convert_precision,
     validate_module_onnx_precision,
@@ -119,6 +120,8 @@ class DeploymentExport:
             if should_export_stage(self.deploy_cfg.onnx):
                 validate_module_onnx_precision(export_spec.module, module_onnx_cfg)
                 export_to_onnx(export_spec, module_onnx_cfg, module_onnx_path)
+                # A no-op for graphs without Q/DQ.
+                fold_qdq_params(module_onnx_path)
                 # Before the config-driven modifiers and the precision cast: stage
                 # rewrites pattern-match the raw fp32 export.
                 module_onnx_path = apply_onnx_transforms(
