@@ -432,16 +432,35 @@ def segmentation3d_eval_output(
     Returns:
         ``{"seg3d_frames": [...]}`` keyed for the segmentation suites.
     """
+    return segmentation3d_eval_output_from_scores(
+        seg3d_logits.argmax(dim=1), torch.softmax(seg3d_logits, dim=1), batch_inputs
+    )
+
+
+def segmentation3d_eval_output_from_scores(
+    pred_labels: torch.Tensor, scores: torch.Tensor, batch_inputs: ModelBatchInputs
+) -> dict[str, Any]:
+    """Same as :func:`segmentation3d_eval_output`, from per-voxel labels and softmax scores.
+
+    These are what the deployed segmentation graph emits (``pred_labels`` / ``pred_probs``).
+
+    Args:
+        pred_labels: Predicted class of every voxel.
+        scores: Softmax scores of every voxel.
+        batch_inputs: Model inputs with the points, the voxels and the point labels.
+
+    Returns:
+        ``{"seg3d_frames": [...]}`` keyed for the segmentation suites.
+    """
     point_batch, voxels_data, label_batch = voxelized_points(batch_inputs)
     points = point_batch.points
     point_voxel_indices = voxels_data.point_voxel_indices
     scored = current_frame_mask(points) & assigned_point_mask(point_voxel_indices)
-    point_logits = gather_point_logits(seg3d_logits, point_voxel_indices, scored)
     return segmentation3d_frames_eval_output(
         coord=points[scored, :3],
-        pred_labels=point_logits.argmax(dim=1),
+        pred_labels=gather_point_logits(pred_labels.long(), point_voxel_indices, scored),
         target_labels=_point_labels(label_batch).long()[scored],
-        scores=torch.softmax(point_logits, dim=1),
+        scores=gather_point_logits(scores, point_voxel_indices, scored),
         frame_ids=point_batch.batch_indices.long()[scored],
         num_frames=point_batch.batch_size,
         batch_inputs=batch_inputs,
