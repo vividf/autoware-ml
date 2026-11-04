@@ -81,6 +81,7 @@ from autoware_ml.models.detection3d.view_transforms.depth_lss import DepthLSSTra
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
+from autoware_ml.ops.spconv.rulebook import embed_rulebook_metadata, rulebook_input_names
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
@@ -674,6 +675,75 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
                 for m in model.lidar_network.pts_middle_encoder.modules()
             )
         )
+
+    @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
+    def test_rulebook_precompute_is_an_opt_in_that_adds_a_glue_stage_and_graph_inputs(
+        self,
+    ) -> None:
+        """
+        Test that opting into the rulebook precompute adds the glue stage, its outputs as graph
+        inputs with dynamic axes, and the metadata transform last.
+        """
+        model = self._build_rulebook_precompute_model()
+
+        stages = validate_stages(model.build_stages())
+        self.assertEqual(
+            [stage.name for stage in stages],
+            ["fetch_voxels", "precompute_rulebooks", "bevfusion_lidar"],
+        )
+        graph = stages[2]
+        export_encoder = graph.module.model.lidar_network.pts_middle_encoder
+        expected = rulebook_input_names(export_encoder.downsample_stages())
+        self.assertTrue(expected)
+        self.assertEqual(tuple(stages[1].outputs), expected)
+        self.assertEqual(tuple(graph.inputs[3:]), expected)
+        self.assertEqual(set(graph.onnx_dynamic_axes), set(graph.inputs))
+        self.assertIs(graph.onnx_transforms[-1].func, embed_rulebook_metadata)
+        self.assertEqual(
+            graph.onnx_transforms[-1].keywords["stages"], export_encoder.downsample_stages()
+        )
+        plain = validate_stages(self.model.eval().build_stages())
+        self.assertEqual([stage.name for stage in plain], ["fetch_voxels", "bevfusion_lidar"])
+        self.assertEqual(dict(plain[1].onnx_dynamic_axes), {})
+
+    @unittest.skipUnless(
+        IS_SPCONV_AVAILABLE and torch.cuda.is_available(), "spconv kernels need CUDA"
+    )
+    def test_precomputed_rulebooks_leave_the_graph_outputs_unchanged(self) -> None:
+        """Test that precomputed rulebooks leave the packed outputs bit-identical."""
+        model = self._build_rulebook_precompute_model()
+        batch_inputs = self._build_single_sample_batch_inputs()
+
+        with_rulebooks = StagedPipeline(model.build_stages(), Backend.PYTORCH, self.device).trace(
+            batch_inputs
+        )
+        model.lidar_network.pts_middle_encoder.export_precompute_rulebooks = False
+        plain = StagedPipeline(model.build_stages(), Backend.PYTORCH, self.device).trace(
+            batch_inputs
+        )
+
+        for key in ("bbox_pred", "score", "label_pred"):
+            torch.testing.assert_close(with_rulebooks[key], plain[key], rtol=0, atol=0)
+
+    def _build_rulebook_precompute_model(self) -> BEVFusionDetection3DModel:
+        """Build a lidar-only model whose sparse encoder precomputes rulebooks.
+
+        One submanifold stage, so ``conv_out`` is the only down-sampling layer; its
+        ``(1, 1, 3)`` kernel collapses the three z cells and keeps the 16x16 BEV grid the
+        backbone and head are built for.
+        """
+        lidar_network = self._build_lidar_network()
+        lidar_network.pts_middle_encoder = SparseEncoder(
+            in_channels=self.middle_channels,
+            sparse_shape=[*self.bev_shape, 3],
+            base_channels=8,
+            encoder_channels=((8, 8),),
+            encoder_paddings=((0, 0),),
+            output_channels=self.middle_channels,
+            dense_output_shapes=[*self.bev_shape, 1],
+            export_precompute_rulebooks=True,
+        ).to(self.device)
+        return self._build_model(lidar_network=lidar_network, camera_network=None).eval()
 
     def test_quantization_rules_are_the_model_declaration(self) -> None:
         """Test that the rules name the lidar branch's towers by their dotted paths."""

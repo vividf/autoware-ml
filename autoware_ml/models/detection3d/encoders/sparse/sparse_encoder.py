@@ -26,7 +26,7 @@ The sparse grid order is ``(Y, X, Z)`` (= the``SparseEncoder`` "(H, W, D)") so t
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 
 from jaxtyping import Float32
@@ -34,9 +34,11 @@ import torch
 import torch.nn as nn
 from spconv.pytorch import SparseConvTensor, SparseSequential, SubMConv3d, SparseConv3d
 from spconv.pytorch.conv import SparseConvolution
+from spconv.pytorch.core import ImplicitGemmIndiceData
 from spconv.pytorch.modules import SparseModule
 
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
+from autoware_ml.ops.spconv.rulebook import DownsampleStage, downsample_stages
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 from autoware_ml.utils.bn_fusion import fuse_model_bn
 
@@ -207,6 +209,10 @@ class SparseEncoder(BEVMiddleEncoder):
             on a Blackwell workstation (BEVFusion j6gen2, 100 frames, FP16 dense + FP32
             sparse) sorting is faster, 6.70 vs 7.13 ms/frame, while other targets can be
             faster without it. Export copy only; training uses spconv's default.
+        export_precompute_rulebooks: Whether the deployed graph takes the down-sampling
+            rulebooks as inputs (``rulebook/<indice_key>/<slot>``) instead of generating
+            them, removing the data-dependent shapes TensorRT synchronizes on. The runtime
+            then has to supply them.
     """
 
     def __init__(
@@ -226,10 +232,12 @@ class SparseEncoder(BEVMiddleEncoder):
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
         export_do_sort: bool = True,
+        export_precompute_rulebooks: bool = False,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
         self.export_do_sort = export_do_sort
+        self.export_precompute_rulebooks = export_precompute_rulebooks
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
@@ -307,11 +315,29 @@ class SparseEncoder(BEVMiddleEncoder):
         """Reorder ``[batch, z, y, x]`` voxel coordinates into the convolutions' column order."""
         return coords[:, list(self.CONV_COORDS_PERMUTATION)].contiguous().int()
 
+    @property
+    def coors_permutation(self) -> tuple[int, ...]:
+        """For each convolution spatial column, its column in the graph's ``[z, y, x]`` ``coors``.
+
+        The runtime rebuilds the convolution coordinates from ``coors`` with it.
+        """
+        return tuple(column - 1 for column in self.CONV_COORDS_PERMUTATION[1:])
+
+    def downsample_stages(self) -> tuple[DownsampleStage, ...]:
+        """Describe the down-sampling layers whose rulebooks deployment precomputes.
+
+        The spatial shapes cascade in forward order, which is the registration order
+        ``modules()`` yields for this encoder.
+        """
+        layers = [module for module in self.modules() if isinstance(module, SparseConvolution)]
+        return downsample_stages(layers, self.sparse_shape)
+
     def forward(
         self,
         voxel_features: Float32[torch.Tensor, "num_voxels num_voxel_channels"],
         coords: Float32[torch.Tensor, "num_voxels 4"],
         batch_size: int,
+        precomputed_rulebooks: Mapping[str, ImplicitGemmIndiceData] | None = None,
     ) -> torch.Tensor:
         """Encode voxel features into a dense BEV map.
 
@@ -321,6 +347,9 @@ class SparseEncoder(BEVMiddleEncoder):
             coords: Voxel coordinates of shape in `[batch_idx, z, y, x]`. coords must be in this
                 order to align with autoware.
             batch_size: Number of samples in the batch.
+            precomputed_rulebooks: Down-sampling rulebooks by indice key, generated outside
+                the graph (:mod:`autoware_ml.ops.spconv.rulebook`). Seeded into the indice
+                cache so those layers reuse them instead of generating their own.
 
         Returns:
             Dense BEV feature map of shape
@@ -328,6 +357,8 @@ class SparseEncoder(BEVMiddleEncoder):
         """
         coords = self.conv_coords(coords)
         sp_tensor = SparseConvTensor(voxel_features, coords, self.sparse_shape, batch_size)
+        if precomputed_rulebooks:
+            sp_tensor.indice_dict.update(precomputed_rulebooks)
         x = self.conv_input(sp_tensor)
         x = self.encoder_layers(x)
         out = self.conv_out(x)
