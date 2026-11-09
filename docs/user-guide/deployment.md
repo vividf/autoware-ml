@@ -218,7 +218,8 @@ runs the stages once on the example batch in eval mode, and returns one export
 spec per `GraphStage`, traced on the tensors the glue produced. No stage may
 modify an input in place, since other stages read the same tensors; a run
 rejects a stage that does. The model outputs are the graph outputs no later
-stage reads, so a declaration ends with a `GraphStage`.
+stage reads, so a declaration ends with a `GraphStage`; PyTorch post-processing
+of the deployed outputs belongs in `build_deployed_eval_output()`.
 
 ## Optional Graph Modification
 

@@ -290,6 +290,11 @@ class TestModelsWithoutStageGraph(unittest.TestCase):
         self.assertEqual(list(specs), ["end_to_end"])
         self.assertEqual(specs["end_to_end"].input_names, ["x"])
 
+    def test_scoring_deployed_outputs_needs_the_model_mapping(self) -> None:
+        """Test that scoring deployed outputs fails for a model that does not map them."""
+        with self.assertRaisesRegex(NotImplementedError, "_PlainModel does not implement"):
+            _PlainModel().build_deployed_eval_output({}, {})
+
 
 if __name__ == "__main__":
     unittest.main()
