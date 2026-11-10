@@ -8,6 +8,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from autoware_ml.deployment.stages import (
+    GraphStage,
+    model_output_names,
+    run_stages_in_torch,
+    validate_stages,
+)
+
 from autoware_ml.dataclasses.batch.segmentation3d import Segmentation3DGTBatch
 from autoware_ml.dataclasses.geometry.voxels import VoxelsData
 from autoware_ml.dataclasses.models.detection3d.head_outputs import Detection3DHeadOutputs
@@ -33,25 +40,16 @@ from autoware_ml.models.detection3d.tests.ptv3_detection3d_fixtures import (
 )
 from autoware_ml.models.multi.ptv3_det3d_seg3d import PTv3Det3DSeg3DModel
 from autoware_ml.models.segmentation3d.encoders.voxel import SweepSplitVoxelFeatureEncoder
-from autoware_ml.models.segmentation3d.ptv3_base import seg3d_head_export_input_names
+from autoware_ml.models.segmentation3d.ptv3_base import (
+    DET3D_HEAD_STAGE,
+    ENCODER_STAGE,
+    SEG3D_HEAD_STAGE,
+    SERIALIZE_STAGE,
+    seg3d_head_export_input_names,
+)
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.utils.checkpoints import apply_matching_weights
-
-EXPECTED_PTV3_INPUT_NAMES = [
-    "voxels",
-    "num_points_per_voxel",
-    "grid_coord",
-    "patch_order",
-    "serialized_inverse",
-    "serialized_pooling_0_indices",
-    "serialized_pooling_0_indptr",
-    "serialized_pooling_0_cluster",
-    "serialized_pooling_0_head_indices",
-    "serialized_pooling_0_grid_coord",
-    "serialized_pooling_0_patch_order",
-    "serialized_pooling_0_serialized_inverse",
-]
 
 JOINT_EXPORT_OUTPUT_NAMES = [
     "pred_labels",
@@ -279,13 +277,15 @@ def _build_det3d_seg3d_model() -> PTv3Det3DSeg3DModel:
     not IS_SPCONV_AVAILABLE or not torch.cuda.is_available(),
     reason="PTv3 sparse-convolution export tests require CUDA spconv",
 )
-def test_ptv3_transhead_det3d_seg3d_export_uses_named_joint_outputs(tmp_path: Path) -> None:
+def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_encoder(
+    tmp_path: Path,
+) -> None:
+    """On the single-task models' weights, each head graph matches that model's own graph."""
     segmentation3d_checkpoint = _save_segmentation3d_checkpoint(tmp_path)
     detection3d_model = build_trans_model(freeze_encoder=True)
     apply_matching_weights(detection3d_model, (segmentation3d_checkpoint,))
     detection3d_checkpoint = tmp_path / "ptv3_trans_detection3d.ckpt"
     _save_detection3d_checkpoint(detection3d_checkpoint, detection3d_model)
-
     model = _build_det3d_seg3d_model().cuda()
     apply_matching_weights(
         model,
@@ -294,23 +294,37 @@ def test_ptv3_transhead_det3d_seg3d_export_uses_named_joint_outputs(tmp_path: Pa
         device=torch.device("cuda"),
         set_eval=True,
     )
+    seg_model = build_seg3d_model().cuda().eval()
+    apply_matching_weights(
+        seg_model, (segmentation3d_checkpoint,), map_location=torch.device("cuda")
+    )
+    detection3d_model = detection3d_model.cuda().eval()
+
+    stages = validate_stages(model.build_stages())
+    assert [s.name for s in stages] == [
+        SERIALIZE_STAGE,
+        ENCODER_STAGE,
+        SEG3D_HEAD_STAGE,
+        DET3D_HEAD_STAGE,
+    ]
+    assert list(model_output_names(stages)) == JOINT_EXPORT_OUTPUT_NAMES
+    seg_stage, det_stage = stages[2], stages[3]
+    assert isinstance(seg_stage, GraphStage) and seg_stage.outputs == ("pred_labels", "pred_probs")
+    assert det_stage.outputs == tuple(JOINT_EXPORT_OUTPUT_NAMES[2:])
+    assert not set(det_stage.inputs) & set(seg_stage.outputs)
 
     batch = build_inputs(device=torch.device("cuda"))
-    spec = model.build_export_spec(batch)
-    outputs = spec.module(*spec.args)
+    joint = run_stages_in_torch(stages, batch, torch.device("cuda"))
+    seg_only = run_stages_in_torch(seg_model.build_stages(), batch, torch.device("cuda"))
+    det_only = run_stages_in_torch(detection3d_model.build_stages(), batch, torch.device("cuda"))
+    assert torch.equal(joint["pred_labels"], seg_only["pred_labels"])
+    torch.testing.assert_close(joint["pred_probs"], seg_only["pred_probs"])
+    for name in JOINT_EXPORT_OUTPUT_NAMES[2:]:
+        torch.testing.assert_close(joint[name], det_only[name], msg=name)
 
-    assert spec.input_names == EXPECTED_PTV3_INPUT_NAMES
-    assert spec.dynamic_axes is not None
-    assert spec.dynamic_axes["pred_probs"] == {0: "num_voxels"}
-    assert spec.dynamic_axes["serialized_pooling_0_serialized_inverse"] == {
-        1: "serialized_pooling_0_out_voxels"
-    }
-    assert spec.output_names == JOINT_EXPORT_OUTPUT_NAMES
-    assert len(outputs) == 11
-    assert outputs[0].dtype == torch.long
-    assert outputs[1].shape[1] == 3
-    assert outputs[2].shape[:2] == (1, 2)
-    assert outputs[4].dtype == torch.long
+    specs = model.build_export_specs(batch)
+    assert list(specs) == [ENCODER_STAGE, SEG3D_HEAD_STAGE, DET3D_HEAD_STAGE]
+    assert specs[DET3D_HEAD_STAGE].output_names == JOINT_EXPORT_OUTPUT_NAMES[2:]
 
 
 @pytest.mark.skipif(
