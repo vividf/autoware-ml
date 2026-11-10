@@ -46,6 +46,7 @@ from autoware_ml.models.detection3d.encoders.pillars.pillar_feature_net import P
 from autoware_ml.models.detection3d.encoders.pillars.point_pillar_scatter import PointPillarsScatter
 from autoware_ml.models.detection3d.heads.centerhead import CenterHead
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.quantization.rules import QuantRules
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -98,6 +99,16 @@ class _CenterPointBackboneNeckHeadExportWrapper(nn.Module):
         bev_features = self.backbone(spatial_features)
         bev_features = self.neck(bev_features)
         return self.bbox_head(bev_features).export_tensors(self.output_names)
+
+
+CENTERPOINT_QUANT_RULES = QuantRules(
+    quantize_submodules={
+        "pts_backbone": ("conv", "linear"),
+        "pts_neck": ("conv",),
+        "bbox_head": ("conv",),
+        "pts_voxel_encoder": ("linear",),
+    },
+)
 
 
 class CenterPointDetection3DModel(ModuleBaseModel):
@@ -243,6 +254,10 @@ class CenterPointDetection3DModel(ModuleBaseModel):
             "CenterPoint deployment uses split modules; build_export_specs() derives them "
             "from deploy_graphs()."
         )
+
+    def build_quantization_rules(self) -> QuantRules:
+        """CenterPoint's quantizable submodules (see :data:`CENTERPOINT_QUANT_RULES`)."""
+        return CENTERPOINT_QUANT_RULES
 
     def deploy_graphs(self) -> Sequence[GraphStage]:
         """Declare the two graphs the Autoware runtime loads, named like its artifacts.
