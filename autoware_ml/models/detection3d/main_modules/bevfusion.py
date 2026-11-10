@@ -58,6 +58,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers impo
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -552,6 +553,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
                     "coors": {0: "voxels_num"},
                     "num_points_per_voxel": {0: "voxels_num"},
                 },
+                torch_fallback_backends=(Backend.ONNX,),
             ),
         )
 

@@ -22,11 +22,11 @@ import unittest
 import torch
 from torch import nn
 
+from autoware_ml.deployment.pipeline import DeployedPipeline
 from autoware_ml.deployment.stages import (
     DeployedModel,
     GraphStage,
     artifact_path,
-    run_deployment_in_torch,
     validate_graphs,
 )
 from autoware_ml.types.backend import Backend
@@ -80,10 +80,10 @@ def _toy_forward(batch, graphs):
 
 
 def _run(forward=_toy_forward, graphs=None, x=None):
-    return run_deployment_in_torch(
-        DeployedModel(_toy_graphs() if graphs is None else graphs, forward),
-        {"x": torch.tensor([1.0]) if x is None else x},
-        torch.device("cpu"),
+    """Trace the deployment on the pytorch backend and return the run."""
+    deployment = DeployedModel(_toy_graphs() if graphs is None else graphs, forward)
+    return DeployedPipeline(deployment, Backend.PYTORCH, torch.device("cpu")).trace(
+        {"x": torch.tensor([1.0]) if x is None else x}
     )
 
 
@@ -149,7 +149,7 @@ class TestGraphDeclaration(unittest.TestCase):
             DeployedModel((encoder, encoder), _toy_forward)
 
 
-class TestRunDeploymentInTorch(unittest.TestCase):
+class TestRunInTorch(unittest.TestCase):
     """Unit tests for running a deployment in PyTorch and its runtime checks."""
 
     def test_runs_the_function_and_returns_its_outputs(self) -> None:

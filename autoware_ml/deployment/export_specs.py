@@ -20,7 +20,9 @@ from typing import Any
 
 import torch
 
-from autoware_ml.deployment.stages import DeployedModel, GraphStage, run_deployment_in_torch
+from autoware_ml.deployment.pipeline import DeployedPipeline
+from autoware_ml.deployment.stages import DeployedModel, GraphStage
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 
 
@@ -37,6 +39,8 @@ def export_spec_for_graph(stage: GraphStage, args: tuple[torch.Tensor, ...]) -> 
         else None
     )
     return ExportSpec(
+        # BatchNorm stays a graph node (see utils/bn_fusion.py); a path that needs folded
+        # weights folds its own copy before it gets here.
         module=stage.module,
         args=args,
         input_names=list(stage.inputs),
@@ -48,7 +52,7 @@ def export_spec_for_graph(stage: GraphStage, args: tuple[torch.Tensor, ...]) -> 
 def build_export_specs_from_deployment(
     deployment: DeployedModel, batch: Any, device: torch.device
 ) -> dict[str, ExportSpec]:
-    """Run the deployed function once and return ``{graph name: ExportSpec}`` per graph.
+    """Trace the deployed function once in PyTorch and return ``{graph name: ExportSpec}`` per graph.
 
     The graph modules are switched to eval first. An export wrapper starts in training
     mode, and ``torch.onnx.export`` restores the module's mode recursively when it is done:
@@ -62,7 +66,7 @@ def build_export_specs_from_deployment(
     """
     for stage in deployment.graphs:
         stage.module.eval()
-    run = run_deployment_in_torch(deployment, batch, device)
+    run = DeployedPipeline(deployment, Backend.PYTORCH, device).trace(batch)
     return {
         stage.name: export_spec_for_graph(stage, run.graph_inputs[stage.name])
         for stage in deployment.graphs
