@@ -44,7 +44,8 @@ from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.segmentation3d.head_outputs import Segmentation3DHeadOutputs
-from autoware_ml.deployment.stages import Stage
+from autoware_ml.deployment.deployed import Graphs
+from autoware_ml.deployment.stages import GraphStage, Stage
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
 from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.ptv3 import PTv3Det3DBEVNeck, build_det3d_head_stage
@@ -59,10 +60,14 @@ from autoware_ml.models.segmentation3d.heads.ptv3 import (
 )
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.models.segmentation3d.ptv3_base import (
+    DET3D_HEAD_STAGE,
     SEG3D_HEAD_OUTPUT_NAMES,
+    SEG3D_HEAD_STAGE,
     PTv3BaseModel,
-    build_ptv3_stages,
+    build_encoder_stage,
     build_seg3d_head_stage,
+    build_serialize_stage,
+    ptv3_deployed_forward,
     split_block_parameters,
 )
 
@@ -350,14 +355,30 @@ class PTv3Det3DSeg3DModel(PTv3BaseModel):
         Raises:
             ValueError: If the geometry was not configured.
         """
+        return (build_serialize_stage(self), *self.deploy_graphs())
+
+    def deploy_graphs(self) -> tuple[GraphStage, ...]:
+        """Declare ``ptv3_encoder``, ``ptv3_seg3d_head`` and ``ptv3_det3d_head``, the runtime's graphs.
+
+        Raises:
+            ValueError: If the geometry was not configured.
+        """
         if self.grid_size is None or self.point_cloud_range is None:
             raise ValueError(
                 "grid_size and point_cloud_range must be provided at construction time to deploy."
             )
-        return build_ptv3_stages(
-            self,
+        return (
+            build_encoder_stage(self),
             build_seg3d_head_stage(self, self.seg3d_head),
             build_det3d_head_stage(self, self.bev_neck, self.bbox_head),
+        )
+
+    def deployed_forward(
+        self, multi_task_batch_inputs: ModelBatchInputs, graphs: Graphs
+    ) -> Mapping[str, torch.Tensor]:
+        """Serialize the points, run the encoder, then the seg head and the det head."""
+        return ptv3_deployed_forward(
+            self, multi_task_batch_inputs, graphs, SEG3D_HEAD_STAGE, DET3D_HEAD_STAGE
         )
 
 

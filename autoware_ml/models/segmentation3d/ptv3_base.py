@@ -13,7 +13,8 @@ from torch.onnx.operators import shape_as_tensor
 
 from autoware_ml.dataclasses.geometry.voxels import VoxelsData
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
-from autoware_ml.deployment.stages import GraphStage, RunState, Stage, TorchStage
+from autoware_ml.deployment.deployed import Graphs
+from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.models.segmentation3d.encoders.ptv3 import (
     Block,
@@ -789,58 +790,78 @@ def serialize_stage_output_names(num_poolings: int) -> tuple[str, ...]:
     return tuple(names)
 
 
-def build_serialize_stage(model: PTv3BaseModel) -> TorchStage:
-    """Build the glue stage: serialize the voxel batch and precompute every pooling tensor.
+def serialize_points(
+    model: PTv3BaseModel, batch: ModelBatchInputs, device: torch.device
+) -> dict[str, torch.Tensor]:
+    """Serialize the voxel batch and precompute every pooling tensor, as the runtime does.
 
-    It reads the batch like :meth:`PTv3BaseModel.encode_batch` and writes the inputs of every
-    PTv3 graph, including heads the model does not have.
+    It reads the batch like :meth:`PTv3BaseModel.encode_batch` and returns the inputs of every
+    PTv3 graph by name, including heads the model does not have.
     """
     num_poolings = len(model.encoder.stride)
     _, serialization_depth = export_geometry(model)
     patch_sizes = export_patch_sizes(model)
+    voxels_data, time_lag_column = model.voxel_inputs(batch)
+    voxels, num_points = voxels_data.voxels, voxels_data.num_points
+    model.validate_voxel_inputs(voxels, voxels_data.num_dropped_voxels, time_lag_column)
+    encoder_inputs = model.build_encoder_inputs(voxels, num_points, voxels_data.batch_xyz_coords())
+    require_single_sample_export_batch(encoder_inputs)
+    depth = serialization_depth.to(device)
+    point, _ = serialize_point_cloud_batch(encoder_inputs, model.EXPORT_ORDER, depth)
+    metadata = build_serialized_pooling_metadata(
+        point["grid_coord"],
+        point["serialized_code"],
+        point["serialized_order"],
+        model.encoder.stride,
+        patch_sizes,
+    )
+    produced: dict[str, torch.Tensor] = {
+        "voxels": voxels,
+        "num_points_per_voxel": num_points,
+        "grid_coord": encoder_inputs["grid_coord"],
+        "patch_order": build_patch_order(point["serialized_order"], patch_sizes[0]),
+        "serialized_inverse": point["serialized_inverse"],
+    }
+    for stage_index, meta in enumerate(metadata):
+        for field in ENCODER_EXPORT_POOLING_FIELDS:
+            produced[f"serialized_pooling_{stage_index}_{field}"] = getattr(meta, field)
+        # The heads read the cluster under the name of their input.
+        produced[f"pooling_cluster_{stage_index}"] = meta.cluster
+    # The detection head reads the skip stage's grid coordinates.
+    skip_stage = num_poolings - 1
+    produced[f"point_grid_coord_{skip_stage}"] = (
+        encoder_inputs["grid_coord"] if skip_stage == 0 else metadata[skip_stage - 1].grid_coord
+    )
+    return produced
 
-    def serialize_points(state: RunState) -> dict[str, torch.Tensor]:
-        voxels_data, time_lag_column = model.voxel_inputs(state.batch)
-        voxels, num_points = voxels_data.voxels, voxels_data.num_points
-        model.validate_voxel_inputs(voxels, voxels_data.num_dropped_voxels, time_lag_column)
-        encoder_inputs = model.build_encoder_inputs(
-            voxels, num_points, voxels_data.batch_xyz_coords()
-        )
-        require_single_sample_export_batch(encoder_inputs)
-        depth = serialization_depth.to(state.device)
-        point, _ = serialize_point_cloud_batch(encoder_inputs, model.EXPORT_ORDER, depth)
-        metadata = build_serialized_pooling_metadata(
-            point["grid_coord"],
-            point["serialized_code"],
-            point["serialized_order"],
-            model.encoder.stride,
-            patch_sizes,
-        )
-        produced: dict[str, torch.Tensor] = {
-            "voxels": voxels,
-            "num_points_per_voxel": num_points,
-            "grid_coord": encoder_inputs["grid_coord"],
-            "patch_order": build_patch_order(point["serialized_order"], patch_sizes[0]),
-            "serialized_inverse": point["serialized_inverse"],
-        }
-        for stage_index, meta in enumerate(metadata):
-            for field in ENCODER_EXPORT_POOLING_FIELDS:
-                produced[f"serialized_pooling_{stage_index}_{field}"] = getattr(meta, field)
-            # The heads read the cluster under the name of their input.
-            produced[f"pooling_cluster_{stage_index}"] = meta.cluster
-        # The detection head reads the skip stage's grid coordinates.
-        skip_stage = num_poolings - 1
-        produced[f"point_grid_coord_{skip_stage}"] = (
-            encoder_inputs["grid_coord"] if skip_stage == 0 else metadata[skip_stage - 1].grid_coord
-        )
-        return produced
 
+def build_serialize_stage(model: PTv3BaseModel) -> TorchStage:
+    """Build the glue stage of the stage list: :func:`serialize_points` on the run state."""
     return TorchStage(
         SERIALIZE_STAGE,
-        run=serialize_points,
+        run=lambda state: serialize_points(model, state.batch, state.device),
         inputs=(),
-        outputs=serialize_stage_output_names(num_poolings),
+        outputs=serialize_stage_output_names(len(model.encoder.stride)),
     )
+
+
+def ptv3_deployed_forward(
+    model: PTv3BaseModel, batch: ModelBatchInputs, graphs: Graphs, *head_names: str
+) -> dict[str, torch.Tensor]:
+    """PROTOTYPE: the deployed PTv3 inference in the function form.
+
+    Serialize the points, run the encoder graph, then each head graph on the tensors it
+    declares. The heads do not read each other; the model outputs are the heads' outputs, in
+    the order the heads are given.
+    """
+    tensors = serialize_points(model, batch, graphs.device)
+    encoder = graphs[ENCODER_STAGE]
+    tensors.update(encoder(**{name: tensors[name] for name in encoder.inputs}))
+    outputs: dict[str, torch.Tensor] = {}
+    for head_name in head_names:
+        head = graphs[head_name]
+        outputs.update(head(**{name: tensors[name] for name in head.inputs}))
+    return outputs
 
 
 def build_encoder_stage(model: PTv3BaseModel) -> GraphStage:

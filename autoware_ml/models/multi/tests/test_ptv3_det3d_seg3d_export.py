@@ -13,6 +13,7 @@ from autoware_ml.deployment.stages import (
     model_output_names,
     validate_stages,
 )
+from autoware_ml.deployment.deployed import DeployedModel, DeployedPipeline
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.types.backend import Backend
 
@@ -340,6 +341,25 @@ def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_enc
     torch.testing.assert_close(joint["pred_probs"], seg_only["pred_probs"])
     for name in JOINT_EXPORT_OUTPUT_NAMES[2:]:
         torch.testing.assert_close(joint[name], det_only[name], msg=name)
+
+    # PROTOTYPE: the function form runs the same graphs on the same tensors.
+    declaration = model.deployment_declaration()
+    assert isinstance(declaration, DeployedModel)
+    deployed_pipeline = DeployedPipeline(declaration, Backend.PYTORCH, torch.device("cuda"))
+    deployed = deployed_pipeline.infer(batch)
+    assert list(deployed.output_names) == JOINT_EXPORT_OUTPUT_NAMES
+    assert torch.equal(deployed.outputs["pred_labels"], joint["pred_labels"])
+    for name in JOINT_EXPORT_OUTPUT_NAMES[1:]:
+        torch.testing.assert_close(deployed.outputs[name], joint[name], msg=name)
+    deployed_inputs = deployed_pipeline.trace(batch)
+    for stage in stages[1:]:
+        assert len(deployed_inputs[stage.name]) == len(stage.inputs)
+        for name, ours in zip(stage.inputs, deployed_inputs[stage.name]):
+            theirs = joint[name]
+            if theirs.is_floating_point():
+                torch.testing.assert_close(ours, theirs, msg=f"{stage.name}:{name}")
+            else:
+                assert torch.equal(ours, theirs), f"{stage.name}:{name}"
 
     specs = model.build_export_specs(batch)
     assert list(specs) == [ENCODER_STAGE, SEG3D_HEAD_STAGE, DET3D_HEAD_STAGE]
