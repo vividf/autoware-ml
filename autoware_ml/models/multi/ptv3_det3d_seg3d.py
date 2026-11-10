@@ -35,7 +35,10 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from autoware_ml.dataclasses.batch.detection3d import Detection3DGTBatch
-from autoware_ml.dataclasses.models.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.dataclasses.models.detection3d.head_outputs import (
+    Detection3DHeadOutputs,
+    TransFusionHeadOutputs,
+)
 from autoware_ml.dataclasses.models.detection3d.predictions import Detection3DSamplePredictions
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
@@ -50,11 +53,13 @@ from autoware_ml.models.segmentation3d.encoders.voxel import VoxelFeatureEncoder
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3Seg3DDecoderHead,
     segmentation3d_eval_output,
+    segmentation3d_eval_output_from_scores,
     segmentation3d_point_loss,
     segmentation3d_predict_outputs,
 )
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.models.segmentation3d.ptv3_base import (
+    SEG3D_HEAD_OUTPUT_NAMES,
     PTv3BaseModel,
     build_ptv3_stages,
     build_seg3d_head_stage,
@@ -289,25 +294,31 @@ class PTv3Det3DSeg3DModel(PTv3BaseModel):
         deadlocks under DDP when ranks see different seg/det frame mixes.
         Empty prediction + empty ground truth is metric-neutral.
         """
-        det3d_mask = self._detection3d_frame_mask(self._detection3d_gt_batch(batch))
-        predictions = list(
-            self.bbox_head.decode_outputs(outputs=outputs.detection3d()).detection3d_predictions
+        return _joint_eval_output(
+            self,
+            batch,
+            outputs.detection3d(),
+            segmentation3d_eval_output(outputs.segmentation3d().logits, batch),
         )
-        predictions = [
-            prediction
-            if flagged
-            else Detection3DSamplePredictions(
-                bboxes_3d=prediction.bboxes_3d[:0],
-                scores_3d=prediction.scores_3d[:0],
-                labels_3d=prediction.labels_3d[:0],
-            )
-            for prediction, flagged in zip(predictions, det3d_mask.tolist())
-        ]
-        eval_out = detection3d_eval_output(
-            ModelPredictions(detection3d_predictions=predictions), batch
+
+    def build_deployed_eval_output(
+        self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the two head graphs' tensors exactly like forward()'s outputs."""
+        det_tensors = {
+            name: tensor for name, tensor in outputs.items() if name not in SEG3D_HEAD_OUTPUT_NAMES
+        }
+        return _joint_eval_output(
+            self,
+            batch_inputs,
+            Detection3DHeadOutputs(
+                center_head_outputs=None,
+                transfusion_head_outputs=TransFusionHeadOutputs.from_export_tensors(det_tensors),
+            ),
+            segmentation3d_eval_output_from_scores(
+                outputs["pred_labels"], outputs["pred_probs"], batch_inputs
+            ),
         )
-        eval_out.update(segmentation3d_eval_output(outputs.segmentation3d().logits, batch))
-        return eval_out
 
     def decode_outputs(
         self, multi_task_batch_inputs: ModelBatchInputs, outputs: ModelOutputs
@@ -348,3 +359,29 @@ class PTv3Det3DSeg3DModel(PTv3BaseModel):
             build_seg3d_head_stage(self, self.seg3d_head),
             build_det3d_head_stage(self, self.bev_neck, self.bbox_head),
         )
+
+
+def _joint_eval_output(
+    model: PTv3Det3DSeg3DModel,
+    batch: ModelBatchInputs,
+    det3d_outputs: Detection3DHeadOutputs,
+    seg_eval_out: dict[str, Any],
+) -> dict[str, Any]:
+    """Decode the boxes, blank the frames without detection supervision, add the seg frames."""
+    det3d_mask = model._detection3d_frame_mask(model._detection3d_gt_batch(batch))
+    predictions = list(
+        model.bbox_head.decode_outputs(outputs=det3d_outputs).detection3d_predictions
+    )
+    predictions = [
+        prediction
+        if flagged
+        else Detection3DSamplePredictions(
+            bboxes_3d=prediction.bboxes_3d[:0],
+            scores_3d=prediction.scores_3d[:0],
+            labels_3d=prediction.labels_3d[:0],
+        )
+        for prediction, flagged in zip(predictions, det3d_mask.tolist())
+    ]
+    eval_out = detection3d_eval_output(ModelPredictions(detection3d_predictions=predictions), batch)
+    eval_out.update(seg_eval_out)
+    return eval_out

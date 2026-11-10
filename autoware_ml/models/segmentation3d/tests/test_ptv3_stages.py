@@ -24,10 +24,15 @@ import onnx
 import torch
 from omegaconf import OmegaConf
 
+from autoware_ml.dataclasses.models.detection3d.head_outputs import TransFusionHeadOutputs
+from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
+from autoware_ml.dataclasses.models.segmentation3d.head_outputs import Segmentation3DHeadOutputs
 from autoware_ml.deployment.stages import (
     TorchStage,
+    model_output_names,
     validate_stages,
 )
+from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.models.detection3d.tests.ptv3_detection3d_fixtures import (
     build_inputs,
     build_seg3d_model,
@@ -125,11 +130,42 @@ class TestSeg3dStageGraph(unittest.TestCase):
         self.assertGreaterEqual(set(stage.onnx_dynamic_axes), set(SEG3D_HEAD_OUTPUT_NAMES))
 
 
+class TestSeg3dDeployedEvalOutput(unittest.TestCase):
+    """The deployed graph outputs are scored like the model's own logits."""
+
+    def test_deployed_eval_output_scores_the_graph_outputs_like_the_logits(self) -> None:
+        torch.manual_seed(0)
+        model = build_seg3d_model().eval()
+        batch = build_inputs()
+        logits = torch.randn(batch.voxels_data.voxels.shape[0], 3)
+        reference = model.build_eval_output(
+            batch,
+            ModelOutputs(segmentation3d_head_outputs=Segmentation3DHeadOutputs(logits=logits)),
+        )
+        staged = model.build_deployed_eval_output(
+            batch, {"pred_labels": logits.argmax(dim=1), "pred_probs": logits.softmax(dim=1)}
+        )
+        self.assertEqual(len(reference["seg3d_frames"]), 1)
+        self.assertEqual(len(staged["seg3d_frames"]), 1)
+        for ref_frame, got_frame in zip(
+            reference["seg3d_frames"], staged["seg3d_frames"], strict=True
+        ):
+            self.assertEqual(set(ref_frame), set(got_frame))
+            for key, ref_value in ref_frame.items():
+                got_value = got_frame[key]
+                if isinstance(ref_value, torch.Tensor):
+                    torch.testing.assert_close(got_value, ref_value)
+                else:
+                    self.assertEqual(got_value, ref_value)
+        # The sweep point (time lag != 0) is not scored: 7 of the 8 fixture points.
+        self.assertEqual(staged["seg3d_frames"][0]["pred"].shape[0], 7)
+
+
 @REQUIRES_SPARSE_CUDA
 class TestDet3dStageGraph(unittest.TestCase):
-    """The detection model's stage graph and its specs."""
+    """The detection model's stage graph, its specs and its deployed evaluation output."""
 
-    def test_det3d_declaration_and_specs(self) -> None:
+    def test_det3d_declaration_specs_and_deployed_eval_output(self) -> None:
         model = build_trans_model().cuda().eval()
         stages = validate_stages(model.build_stages())
         self.assertEqual(
@@ -141,3 +177,17 @@ class TestDet3dStageGraph(unittest.TestCase):
         self.assertEqual(
             specs["ptv3_det3d_head"].output_names, list(model.bbox_head.export_output_names)
         )
+
+        state = StagedPipeline(stages, Backend.PYTORCH, torch.device("cuda")).trace(batch)
+        outputs = {name: state[name] for name in model_output_names(stages)}
+        rebuilt = TransFusionHeadOutputs.from_export_tensors(outputs)
+        for name, tensor in zip(outputs, rebuilt.export_tensors(list(outputs))):
+            self.assertTrue(torch.equal(tensor, outputs[name]), name)
+        deployed = model.build_deployed_eval_output(batch, outputs)
+        self.assertLessEqual({"predictions", "gt_boxes", "gt_labels"}, deployed.keys())
+        self.assertEqual(len(deployed["predictions"]), 1)
+
+        # A BEV neck that skips encoder levels leaves them among the model outputs.
+        with_unread_level = {**outputs, "point_feat_0": state["point_feat_0"]}
+        again = model.build_deployed_eval_output(batch, with_unread_level)
+        self.assertEqual(len(again["predictions"]), 1)
