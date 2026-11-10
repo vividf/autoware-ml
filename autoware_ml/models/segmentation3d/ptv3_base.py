@@ -25,6 +25,7 @@ from autoware_ml.models.segmentation3d.encoders.ptv3 import (
     collect_encoder_stage_points,
 )
 from autoware_ml.models.segmentation3d.encoders.voxel import VoxelFeatureEncoder
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.point_cloud.batching import batch_to_offset
 from autoware_ml.utils.point_cloud.structures import (
@@ -862,6 +863,8 @@ def build_encoder_stage(model: PTv3BaseModel) -> GraphStage:
         # The cpe sparse convolutions are autoware:: plugin ops: TensorRT runs them through the
         # autoware TensorRT plugin library, ONNX Runtime cannot.
         torch_fallback_backends=(Backend.ONNX,),
+        # The cpe convolutions have a bias; the plugin applies it itself.
+        onnx_transforms=(fuse_sparse_graph,),
     )
 
 
@@ -883,6 +886,7 @@ def build_seg3d_head_stage(model: PTv3BaseModel, seg3d_head: nn.Module) -> Graph
         outputs=output_names,
         onnx_dynamic_axes=dynamic_axes,
         torch_fallback_backends=(Backend.ONNX,),
+        onnx_transforms=(fuse_sparse_graph,),
     )
 
 
