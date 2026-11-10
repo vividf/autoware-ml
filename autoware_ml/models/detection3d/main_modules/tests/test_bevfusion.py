@@ -39,9 +39,10 @@ from autoware_ml.deployment.stages import (
     GraphStage,
     TorchStage,
     model_output_names,
-    run_stages_in_torch,
     validate_stages,
 )
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.types.backend import Backend
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_attention import (
@@ -632,6 +633,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
             graph.onnx_dynamic_axes,
             {name: {0: "voxels_num"} for name in ("voxels", "coors", "num_points_per_voxel")},
         )
+        self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
 
     def test_stage_graph_refuses_a_multi_sample_batch(self) -> None:
         """Test that a multi-sample batch is refused instead of exporting only its first sample."""
@@ -655,7 +657,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         stages = self.model.build_stages()
         assert stages is not None
 
-        state = run_stages_in_torch(stages, batch_inputs, self.device)
+        state = StagedPipeline(stages, Backend.PYTORCH, self.device).trace(batch_inputs)
         specs = self.model.build_export_specs(batch_inputs)
         with torch.no_grad():
             bbox_pred, score, label_pred = specs["bevfusion_lidar"].module(

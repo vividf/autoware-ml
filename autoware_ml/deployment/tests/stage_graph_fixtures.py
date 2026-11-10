@@ -22,7 +22,9 @@ import unittest
 
 import torch
 
-from autoware_ml.deployment.stages import RunState, Stage, model_output_names, run_stages_in_torch
+from autoware_ml.deployment.pipeline import StagedPipeline
+from autoware_ml.deployment.stages import RunState, Stage, model_output_names
+from autoware_ml.types.backend import Backend
 
 
 class StageGraphRun(NamedTuple):
@@ -77,7 +79,7 @@ def assert_stage_graph_reproduces_forward(
         set(names),
         "forward_tensors must name exactly the model outputs of the stage graph.",
     )
-    state = run_stages_in_torch(stages, batch, device)
+    state = StagedPipeline(stages, Backend.PYTORCH, device).trace(batch)
     for name in names:
         torch.testing.assert_close(
             state[name],

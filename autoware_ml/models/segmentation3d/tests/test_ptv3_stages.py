@@ -45,6 +45,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     serialize_stage_output_names,
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import export_to_onnx
 
 REQUIRES_SPARSE_CUDA = unittest.skipUnless(
@@ -68,6 +69,7 @@ class TestSeg3dStageGraph(unittest.TestCase):
         encoder = stages[1]
         self.assertEqual(encoder.inputs[:5], ENCODER_EXPORT_INPUT_NAMES)
         self.assertFalse(any(name.endswith("_cluster") for name in encoder.inputs))
+        self.assertEqual(encoder.torch_fallback_backends, (Backend.ONNX,))
         self.assertEqual(stages[2].outputs, ("pred_labels", "pred_probs"))
 
     def test_seg3d_export_specs_are_derived_and_keep_the_split_contract(self) -> None:
