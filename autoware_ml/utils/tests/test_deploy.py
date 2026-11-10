@@ -31,6 +31,7 @@ from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 import autoware_ml.utils.deploy as deploy
 from autoware_ml.utils.deploy import (
     ExportSpec,
+    apply_onnx_transforms,
     dynamic_shapes_from_spec,
     export_to_onnx,
     merge_module_onnx_cfg,
@@ -183,6 +184,24 @@ def test_normalize_dynamic_shapes_wraps_varargs_forward() -> None:
     dynamic_shapes = ({0: "dim0"}, {0: "dim1"})
 
     assert normalize_dynamic_shapes_for_model(_VarArgsModel(), dynamic_shapes) == (dynamic_shapes,)
+
+
+def test_apply_onnx_transforms_runs_in_order_and_follows_returned_paths(tmp_path: Path) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    def fuse(path: Path) -> Path:
+        calls.append(("fuse", path))
+        return path
+
+    def rewrite_elsewhere(path: Path) -> Path:
+        calls.append(("rewrite", path))
+        return path.with_name("rewritten.onnx")
+
+    start = tmp_path / "stage.onnx"
+    result = apply_onnx_transforms(start, (fuse, rewrite_elsewhere))
+    assert calls == [("fuse", start), ("rewrite", start)]
+    assert result == tmp_path / "rewritten.onnx"
+    assert apply_onnx_transforms(start, ()) == start
 
 
 def test_should_modify_graph_handles_none_and_config() -> None:

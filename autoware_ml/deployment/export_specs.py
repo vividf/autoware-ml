@@ -30,8 +30,9 @@ def export_spec_for_graph(stage: GraphStage, args: tuple[torch.Tensor, ...]) -> 
     """Build one graph's spec from the tensors it ran on.
 
     The trace inputs are ``args``, the tensors the deployed function passed the graph. The spec
-    takes the graph's declared input and output names. Its ``dynamic_axes`` are the graph's
-    ``onnx_dynamic_axes``, or ``None`` when the graph declares none.
+    takes the graph's declared input and output names and its ``onnx_transforms``. Its
+    ``dynamic_axes`` are the graph's ``onnx_dynamic_axes``, or ``None`` when the graph declares
+    none.
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -46,6 +47,7 @@ def export_spec_for_graph(stage: GraphStage, args: tuple[torch.Tensor, ...]) -> 
         input_names=list(stage.inputs),
         output_names=list(stage.outputs),
         dynamic_axes=dynamic_axes,
+        onnx_transforms=tuple(stage.onnx_transforms),
     )
 
 
