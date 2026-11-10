@@ -176,6 +176,8 @@ def main(cfg: DictConfig):
         set_eval=False,
         enforce_full_coverage=False,
         skip_mismatched_weights=bool(cfg.get("skip_mismatched_weights", False)),
+        # Training takes the FP model; a quantized checkpoint is trained with QAT instead.
+        allow_quantized_weights=False,
     )
 
     # Without a run context ModelCheckpoint keeps its configured ${hydra:run.dir}/checkpoints.
