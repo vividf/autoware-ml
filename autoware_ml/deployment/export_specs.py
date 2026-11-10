@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 
+from autoware_ml.deployment.deployed import DeployedModel, DeployedPipeline
 from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, RunState, Stage, graph_stages
 from autoware_ml.types.backend import Backend
@@ -30,10 +31,17 @@ from autoware_ml.utils.deploy import ExportSpec
 def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
     """Build one graph stage's spec from a completed run of the stage graph.
 
-    The trace inputs are the tensors the stage ran on (``state.graph_inputs``). The spec takes
-    the stage's declared input and output names and its ``onnx_transforms``. Its
-    ``dynamic_axes`` are the stage's ``onnx_dynamic_axes``, or ``None`` when the stage
-    declares none.
+    The trace inputs are the tensors the stage ran on (``state.graph_inputs``).
+    """
+    return export_spec_for_graph(stage, state.graph_inputs[stage.name])
+
+
+def export_spec_for_graph(stage: GraphStage, args: tuple[torch.Tensor, ...]) -> ExportSpec:
+    """Build one graph's spec from the tensors it ran on.
+
+    The spec takes the graph's declared input and output names and its ``onnx_transforms``.
+    Its ``dynamic_axes`` are the graph's ``onnx_dynamic_axes``, or ``None`` when it declares
+    none.
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in stage.onnx_dynamic_axes.items()}
@@ -44,7 +52,7 @@ def export_spec_for_stage(stage: GraphStage, state: RunState) -> ExportSpec:
         # BatchNorm stays a graph node (see utils/bn_fusion.py); a path that needs folded
         # weights folds its own copy before it gets here.
         module=stage.module,
-        args=state.graph_inputs[stage.name],
+        args=args,
         input_names=list(stage.inputs),
         output_names=list(stage.outputs),
         dynamic_axes=dynamic_axes,
@@ -73,4 +81,22 @@ def build_export_specs_from_stages(
     state = pipeline.trace(batch)
     return {
         stage.name: export_spec_for_stage(stage, state) for stage in graph_stages(pipeline.stages)
+    }
+
+
+def build_export_specs_from_deployed(
+    declaration: DeployedModel, batch: Any, device: torch.device
+) -> dict[str, ExportSpec]:
+    """PROTOTYPE: run ``deployed_forward`` once in PyTorch and return one spec per graph.
+
+    The function form of :func:`build_export_specs_from_stages`: the graphs record the
+    tensors ``deployed_forward`` called them with.
+    """
+    pipeline = DeployedPipeline(declaration, Backend.PYTORCH, device)
+    for graph in pipeline.graphs:
+        graph.module.eval()
+    graph_inputs = pipeline.trace(batch)
+    return {
+        graph.name: export_spec_for_graph(graph, graph_inputs[graph.name])
+        for graph in pipeline.graphs
     }

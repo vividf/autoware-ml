@@ -49,6 +49,7 @@ from autoware_ml.deployment.stages import (
 from autoware_ml.types.backend import Backend
 
 if TYPE_CHECKING:
+    from autoware_ml.deployment.deployed import DeployedModel, DeployedPipeline
     from autoware_ml.deployment.backends.onnx_runner import OnnxModuleRunner
     from autoware_ml.deployment.backends.tensorrt_runner import TensorRTModuleRunner
 
@@ -252,18 +253,31 @@ class StagedPipeline:
             result: Output of :meth:`infer`.
             device: Device to move the outputs to, e.g. the metrics device.
         """
-        fields: dict[str, torch.Tensor] = {}
-        for name in self.output_names:
-            tensor = result.outputs[name]
-            if device is not None:
-                tensor = tensor.to(device)
-            # Artifact runners reuse their output buffers on the next run, and a metric suite
-            # may hold the tensor past that.
-            tensor = tensor.detach().clone()
-            if tensor.is_floating_point():
-                tensor = tensor.float()
-            fields[name] = tensor.contiguous()
-        return fields
+        return assemble_outputs(result, device)
+
+
+def assemble_outputs(
+    result: PipelineResult, device: torch.device | None = None
+) -> dict[str, torch.Tensor]:
+    """Return a run's model outputs as owned fp32 copies, optionally moved to ``device``."""
+    fields: dict[str, torch.Tensor] = {}
+    for name in result.output_names:
+        tensor = result.outputs[name]
+        if device is not None:
+            tensor = tensor.to(device)
+        # Artifact runners reuse their output buffers on the next run, and a metric suite
+        # may hold the tensor past that.
+        tensor = tensor.detach().clone()
+        if tensor.is_floating_point():
+            tensor = tensor.float()
+        fields[name] = tensor.contiguous()
+    return fields
+
+
+def declared_graphs(declaration: Sequence[Stage] | DeployedModel) -> tuple[GraphStage, ...]:
+    """Return the exported graphs of either declaration form (PROTOTYPE: both coexist)."""
+    graphs = getattr(declaration, "graphs", None)
+    return tuple(graphs) if graphs is not None else graph_stages(declaration)
 
 
 class PipelineCache:
@@ -274,21 +288,31 @@ class PipelineCache:
 
     def __init__(
         self,
-        stages: Sequence[Stage],
+        stages: Sequence[Stage] | DeployedModel,
         artifacts_dir: str | Path,
         plugin_libraries: Sequence[str] = (),
     ) -> None:
-        self.stages = validate_stages(stages)
+        # PROTOTYPE: a DeployedModel (graphs + deployed_forward) runs on a DeployedPipeline.
+        self._function_form = hasattr(stages, "graphs")
+        self.stages = stages if self._function_form else validate_stages(stages)
         self.artifacts_dir = Path(artifacts_dir)
         self.plugin_libraries = tuple(plugin_libraries)
-        self._pipelines: dict[tuple[Backend, str], StagedPipeline] = {}
+        self._pipelines: dict[tuple[Backend, str], StagedPipeline | DeployedPipeline] = {}
 
-    def get(self, backend: Backend, device: str | torch.device) -> StagedPipeline:
+    def get(
+        self, backend: Backend, device: str | torch.device
+    ) -> StagedPipeline | DeployedPipeline:
         """Return the cached pipeline for ``(backend, device)``, building it on first use."""
         device = normalize_device(device)
         key = (backend, str(device))
         if key not in self._pipelines:
-            self._pipelines[key] = StagedPipeline(
+            pipeline_cls: Any = StagedPipeline
+            if self._function_form:
+                # Lazy: deployed.py imports this module.
+                from autoware_ml.deployment.deployed import DeployedPipeline
+
+                pipeline_cls = DeployedPipeline
+            self._pipelines[key] = pipeline_cls(
                 self.stages,
                 backend=backend,
                 device=device,
@@ -298,7 +322,9 @@ class PipelineCache:
         return self._pipelines[key]
 
 
-def available_backends(stages: Sequence[Stage], artifacts_dir: str | Path) -> set[Backend]:
+def available_backends(
+    stages: Sequence[Stage] | DeployedModel, artifacts_dir: str | Path
+) -> set[Backend]:
     """Return the backends whose artifacts exist for every graph stage; PyTorch always counts.
 
     An engine older than its ONNX still counts, since artifacts may be reused, but is logged
@@ -309,7 +335,7 @@ def available_backends(stages: Sequence[Stage], artifacts_dir: str | Path) -> se
     def path_of(stage: GraphStage, backend: Backend) -> Path:
         return artifact_path(artifacts_dir, stage.name, backend)
 
-    exportable = graph_stages(stages)
+    exportable = declared_graphs(stages)
     available = {Backend.PYTORCH}
     for backend in (Backend.ONNX, Backend.TENSORRT):
         if all(

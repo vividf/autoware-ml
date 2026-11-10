@@ -21,6 +21,7 @@ used by task-specific model wrappers throughout the framework.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, NamedTuple, final
 from types import MappingProxyType
@@ -36,8 +37,12 @@ from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
 from autoware_ml.datamodule.streaming_data_module import StreamingDataModule
-from autoware_ml.deployment.export_specs import build_export_specs_from_stages
-from autoware_ml.deployment.stages import Stage
+from autoware_ml.deployment.deployed import DeployedModel, Graphs
+from autoware_ml.deployment.export_specs import (
+    build_export_specs_from_deployed,
+    build_export_specs_from_stages,
+)
+from autoware_ml.deployment.stages import GraphStage, Stage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
@@ -438,6 +443,49 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
         """
         return None
 
+    # --- PROTOTYPE: deployment as graphs plus one function (autoware_ml.deployment.deployed) ---
+
+    def deploy_graphs(self) -> Sequence[GraphStage] | None:
+        """Declare the exported graphs, or return ``None`` for a model without the function form.
+
+        Same contract as the ``GraphStage`` entries of :meth:`build_stages`: every module is
+        export-ready when returned, and the method is cheap enough to call again after a
+        module is replaced.
+        """
+        return None
+
+    def deployed_forward(
+        self, multi_task_batch_inputs: ModelBatchInputs, graphs: Graphs
+    ) -> Mapping[str, torch.Tensor]:
+        """Run the deployed inference: the glue in plain code, each graph called by name.
+
+        ``graphs[name](**inputs)`` runs one declared graph, on its PyTorch module or its
+        exported artifact, and returns its outputs by name. Every declared graph is called
+        exactly once.
+
+        Args:
+            multi_task_batch_inputs: The preprocessed batch.
+            graphs: The declared graphs of this run; ``graphs.device`` is their device.
+
+        Returns:
+            The model outputs by name, as :meth:`build_deployed_eval_output` takes them.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares deploy_graphs() but not deployed_forward()."
+        )
+
+    def deployment_declaration(self) -> DeployedModel | Sequence[Stage] | None:
+        """Return what deployment runs: the function form when declared, else the stages.
+
+        ``AUTOWARE_ML_DEPLOY_DECLARATION=stages`` forces the stage list, so the two forms
+        of one model can be compared (prototype only).
+        """
+        if os.environ.get("AUTOWARE_ML_DEPLOY_DECLARATION") != "stages":
+            graphs = self.deploy_graphs()
+            if graphs is not None:
+                return DeployedModel(tuple(graphs), self.deployed_forward)
+        return self.build_stages()
+
     def build_deployed_eval_output(
         self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
     ) -> dict[str, Any]:
@@ -491,7 +539,7 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
             RuntimeError: If a stage-graph model or any submodule is in training mode:
                 tracing would update the BatchNorm running statistics.
         """
-        stages = self.build_stages()
+        stages = self.deployment_declaration()
         if stages is not None:
             # A submodule can be in training mode under a model in eval mode.
             in_training = [
@@ -503,6 +551,10 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
                     "mode: tracing the stage graph in training mode would update the "
                     f"BatchNorm running statistics. In training mode: {in_training[:3]}"
                     f"{' ...' if len(in_training) > 3 else ''}."
+                )
+            if isinstance(stages, DeployedModel):
+                return build_export_specs_from_deployed(
+                    stages, multi_task_batch_inputs, self.device
                 )
             return build_export_specs_from_stages(stages, multi_task_batch_inputs, self.device)
         # TODO(vividf): Drop this fallback with build_export_spec(). Once every model declares

@@ -155,7 +155,7 @@ class BackendVerifier:
             ref_result = ref_pipeline.infer(batch_inputs)
             test_result = test_pipeline.infer(batch_inputs)
             summary, details = compare_outputs(
-                test_pipeline.output_names,
+                test_result.output_names,
                 ref_result.ordered_outputs(),
                 test_result.ordered_outputs(),
                 tolerance=tolerance,

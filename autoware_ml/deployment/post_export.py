@@ -214,7 +214,8 @@ def run_post_export(
     """
     if not cfg.any_enabled:
         return []
-    stages = model.build_stages()
+    # PROTOTYPE: the function form (deploy_graphs + deployed_forward) when the model has it.
+    stages = getattr(model, "deployment_declaration", model.build_stages)()
     if stages is None:
         raise ValueError(
             "deploy.verification / deploy.evaluation need a stage graph, but "
