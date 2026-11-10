@@ -39,6 +39,8 @@ from autoware_ml.builders.model_builder import (
 )
 from autoware_ml.datamodule.data_module import DataModule
 from autoware_ml.deployment.deployment_export import DeploymentExport
+from autoware_ml.deployment.config import PostExportConfig
+from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.models.module_base_model import ModuleBaseModel
 from autoware_ml.utils.mlflow_helpers import (
     MlflowRunContext,
@@ -74,6 +76,7 @@ def deploy(
     output_dir: Path,
     model: ModuleBaseModel,
     export_specs: Mapping[str, ExportSpec],
+    datamodule: DataModule,
     config_name: str,
     release: str | None,
     tracker: str | None = None,
@@ -87,6 +90,7 @@ def deploy(
         model: The trained model to be deployed.
         export_specs: The model's export specifications, resolved and checked before the
             deploy run exists.
+        datamodule: Data module the post-export verification reads batches from.
         config_name: User-facing config name stamped into the ONNX metadata.
         release: ``vMAJOR.MINOR.PATCH`` stamped into the ONNX metadata, or ``None``
             for an unversioned export.
@@ -104,6 +108,16 @@ def deploy(
         run_id=run_id,
     )
     export_outputs = deployment_exporter.export()
+
+    # A no-op unless deploy.verification is enabled.
+    run_post_export(
+        PostExportConfig.from_deploy_cfg(deploy_cfg),
+        model=model,
+        datamodule=datamodule,
+        output_dir=output_dir,
+        device=deployment_exporter.device,
+        plugin_libraries=tuple(str(p) for p in (deploy_cfg.tensorrt.get("plugin_libraries") or ())),
+    )
     logger.info("Deployment completed successfully.")
     for path in export_outputs.onnx_exported_paths:
         if path.exists():
@@ -230,7 +244,7 @@ def run_deploy(cfg: DictConfig) -> None:
     )
 
     if run_context is None:
-        _export(cfg, config_name, model, export_specs, release, run_context=None)
+        _export(cfg, config_name, model, export_specs, datamodule, release, run_context=None)
         return
 
     try:
@@ -242,7 +256,7 @@ def run_deploy(cfg: DictConfig) -> None:
             checkpoint_path=checkpoint_path,
             source_checkpoints=source_checkpoints,
         )
-        _export(cfg, config_name, model, export_specs, release, run_context=run_context)
+        _export(cfg, config_name, model, export_specs, datamodule, release, run_context=run_context)
     except Exception:
         MlflowClient(tracking_uri=run_context.tracking_uri).set_terminated(
             run_context.run_id, status=RunStatus.to_string(RunStatus.FAILED)
@@ -295,6 +309,7 @@ def _export(
     config_name: str,
     model: ModuleBaseModel,
     export_specs: Mapping[str, ExportSpec],
+    datamodule: DataModule,
     release: str | None,
     run_context: MlflowRunContext | None,
 ) -> None:
@@ -305,6 +320,7 @@ def _export(
         config_name: User-facing config name.
         model: The built model.
         export_specs: The model's export specifications.
+        datamodule: Data module the post-export verification reads batches from.
         release: ``vMAJOR.MINOR.PATCH`` of the export, or ``None``.
         run_context: The deploy run, whose ``exports`` directory receives the outputs. Without
             one the outputs land in ``experiment_run_dir`` of the config.
@@ -324,6 +340,7 @@ def _export(
         output_dir=output_dir,
         model=model,
         export_specs=export_specs,
+        datamodule=datamodule,
         config_name=config_name,
         release=release,
         tracker="mlflow" if run_context is not None else None,

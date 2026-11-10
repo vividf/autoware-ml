@@ -77,6 +77,8 @@ deploy:
           attention_node_name_substring: /bbox_head/decoder
   tensorrt:
     enabled: false
+  # No verification: as in BEVFusion, the TransFusion head outputs per query after its
+  # top-k, so the raw outputs do not line up by position across backends.
 
 model:
   _target_: autoware_ml.models.detection3d.ptv3.PTv3Detection3DModel

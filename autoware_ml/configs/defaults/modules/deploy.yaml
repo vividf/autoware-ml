@@ -12,3 +12,12 @@ deploy:
     workspace_size: 4294967296
     # Shared libraries of custom TensorRT plugins, for graphs with autoware::* ops.
     plugin_libraries: []
+  # Post-export step, opt-in, for models that declare deploy_graphs(): verification
+  # compares the raw model outputs of two backends.
+  verification:
+    enabled: false
+    # Absolute, for fp32 graphs; lossy backends (fp16, int8) set a per-scenario tolerance.
+    tolerance: 0.01
+    num_verify_batches: 1
+    # - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda } }
+    scenarios: []

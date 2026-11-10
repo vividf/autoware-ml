@@ -244,6 +244,79 @@ Use for operator replacement, shape inference fixes, or custom plugin insertion.
 Modifiers run before the precision conversion and the metadata stamp, so the
 shipped file reflects them.
 
+## Deployment graphs: verification
+
+Export alone produces artifacts; it does not prove they compute what the PyTorch
+model computes. A model can opt into that proof by declaring its deployment as the
+graphs it exports (`GraphStage`, through `ModuleBaseModel.deploy_graphs()`) plus one
+function that runs them with the PyTorch glue between them
+(`ModuleBaseModel.deployed_forward()`):
+
+```python
+def deploy_graphs(self):
+    return (
+        GraphStage("pts_voxel_encoder_centerpoint", module=..., inputs=("input_features",),
+                   outputs=("pillar_features",)),
+        GraphStage("pts_backbone_neck_head_centerpoint", module=..., inputs=("spatial_features",),
+                   outputs=("heatmap", "reg", ...)),
+    )
+
+def deployed_forward(self, batch, graphs):
+    input_features = self.pts_voxel_encoder.encode(batch.voxels_data)   # glue reads the batch
+    pillar_features = graphs["pts_voxel_encoder_centerpoint"](
+        input_features=input_features)["pillar_features"]
+    spatial_features = self.pts_middle_encoder(pillar_features.squeeze(1), ...)
+    # The returned tensors are the model outputs.
+    return graphs["pts_backbone_neck_head_centerpoint"](spatial_features=spatial_features)
+```
+
+Every `GraphStage` is one `deploy.onnx.modules.<name>` entry and one `<name>.onnx` /
+`<name>.engine`; the export specs are derived from the declaration (the function runs once
+in PyTorch on the example batch and each graph is traced with the tensors the function
+passed it), so `build_export_specs()` needs no hand-written counterpart. Models without
+deployment graphs keep their existing `build_export_specs()`; nothing below applies to them.
+
+The same function runs on three backends — `pytorch` (the modules), `onnx` (ONNX
+Runtime sessions) and `tensorrt` (the engines) — with identical glue, so two backends
+differ only by what executed the exported graphs. A post-export step uses this, disabled
+by default:
+
+### Verification
+
+```yaml
+deploy:
+  verification:
+    enabled: true
+    num_verify_batches: 1
+    scenarios:
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cuda }, tolerance: 0.01 }
+      - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.5 }
+```
+
+Each scenario runs the reference and test pipelines on the first predict batches and
+compares the raw model outputs element wise; a failing scenario fails the deploy.
+Tolerances are calibrated, not guessed: lossy backends (fp16 engines, int8) set an
+explicit per-scenario `tolerance`, and a failing tensor's message suggests the gate that
+would have passed so the observed value can be recorded in the config comment. Raw-logit
+differences under fp16 are expected while the metrics below stay equal — the metrics are
+the real gate; verification catches wiring and dtype mistakes.
+
+Integer-typed outputs (class labels, indices) are decisions over the float outputs, so
+they are gated on their mismatch *ratio* (5 %) rather than element-wise: a label flips
+wherever two logits sit within backend noise of each other while the probabilities agree,
+but a swapped or mis-wired integer output still fails.
+
+Tolerances are calibrated, not guessed: lossy backends (fp16 engines, int8) set an
+explicit per-scenario `tolerance`, and a failing tensor's message suggests the gate that
+would have passed so the observed value can be recorded in the config comment. Raw-logit
+differences under fp16 are expected; verification catches wiring and dtype mistakes.
+
+Verification only makes sense for outputs whose positions mean the same thing on every
+backend (a BEV cell, a point). A graph that selects proposals with a top-k inside the
+export (BEVFusion, PTv3 detection: the TransFusion head) has no such outputs — near-tie
+scores send different proposals to the same slot on different backends — so its configs
+leave `deploy.verification` off and say why; enabling it fails on the first batch.
+
 ## Overriding at Runtime
 
 Override deployment settings from CLI:
