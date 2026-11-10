@@ -28,7 +28,11 @@ from autoware_ml.dataclasses.batch.detection3d import (
     Detection3DGTBatch,
 )
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
+from autoware_ml.deployment.deployed import DeployedModel, DeployedPipeline
+from autoware_ml.deployment.export_specs import build_export_specs_from_stages
+from autoware_ml.deployment.pipeline import StagedPipeline
 from autoware_ml.deployment.stages import GraphStage, model_output_names
+from autoware_ml.types.backend import Backend
 from autoware_ml.deployment.tests.stage_graph_fixtures import assert_stage_graph_reproduces_forward
 from autoware_ml.models.detection3d.main_modules.centerpoint import (
     CenterPointDetection3DModel,
@@ -384,6 +388,51 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         self.assertEqual(
             [name for name, module in self.centerpoint.named_modules() if module.training], []
         )
+
+    def test_deployed_forward_matches_the_stage_list(self) -> None:
+        """Test that the function form gives the stage list's outputs and export specs."""
+        self.centerpoint.eval()
+        batch = self._build_multi_task_batch_inputs()
+        # One pillar per cell: with two pillars in a cell the scatter keeps either, so two
+        # runs of the same code can differ there.
+        coords = batch.voxels_data.coords
+        coords[:, 0] = torch.arange(coords.shape[0]) % 8
+        coords[:, 1] = torch.arange(coords.shape[0]) // 8
+        coords[:, 2] = 0
+        device = next(self.centerpoint.parameters()).device
+        declaration = self.centerpoint.deployment_declaration()
+        self.assertIsInstance(declaration, DeployedModel)
+
+        staged = StagedPipeline(self.centerpoint.build_stages(), Backend.PYTORCH, device)
+        deployed = DeployedPipeline(declaration, Backend.PYTORCH, device)
+        staged_result, deployed_result = staged.infer(batch), deployed.infer(batch)
+        self.assertEqual(deployed_result.output_names, staged_result.output_names)
+        for name in staged_result.output_names:
+            # Same modules on the same inputs; only CUDA kernel-selection noise remains.
+            torch.testing.assert_close(
+                deployed_result.outputs[name],
+                staged_result.outputs[name],
+                rtol=1e-4,
+                atol=1e-3,
+                msg=name,
+            )
+
+        from_stages = build_export_specs_from_stages(self.centerpoint.build_stages(), batch, device)
+        from_function = self.centerpoint.build_export_specs(batch)
+        self.assertEqual(list(from_function), list(from_stages))
+        for name, spec in from_stages.items():
+            other = from_function[name]
+            self.assertEqual(other.input_names, spec.input_names)
+            self.assertEqual(other.output_names, spec.output_names)
+            self.assertEqual(other.dynamic_axes, spec.dynamic_axes)
+            for ours, theirs in zip(other.args, spec.args, strict=True):
+                torch.testing.assert_close(
+                    ours,
+                    theirs,
+                    rtol=1e-4,
+                    atol=1e-3,
+                    msg=lambda detail, name=name: f"{name}: {detail}",
+                )
 
     def test_stage_graph_reproduces_forward_and_names_the_deployed_modules(self) -> None:
         """Test that the stages reproduce forward() and carry the deployed module names."""

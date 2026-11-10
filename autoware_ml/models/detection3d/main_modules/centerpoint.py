@@ -39,6 +39,7 @@ from autoware_ml.dataclasses.models.detection3d.head_outputs import (
     CenterHeadOutputs,
     Detection3DHeadOutputs,
 )
+from autoware_ml.deployment.deployed import Graphs
 from autoware_ml.deployment.stages import GraphStage, RunState, Stage, TorchStage
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
@@ -295,13 +296,24 @@ class CenterPointDetection3DModel(ModuleBaseModel):
                 )
             }
 
+        voxel_encoder_graph, head_graph = self.deploy_graphs()
+        return (
+            TorchStage("decorate", run=decorate, inputs=(), outputs=("input_features",)),
+            voxel_encoder_graph,
+            TorchStage(
+                "scatter", run=scatter, inputs=("pillar_features",), outputs=("spatial_features",)
+            ),
+            head_graph,
+        )
+
+    def deploy_graphs(self) -> tuple[GraphStage, GraphStage]:
+        """Declare the two graphs the Autoware runtime loads, named like its artifacts."""
         # The graphs trace the live backbone and neck; the head is traced on its export-ready
-        # copy, so the stages are rebuilt after a module is replaced (see build_stages()).
+        # copy, so the graphs are rebuilt after a module is replaced.
         head_wrapper = _CenterPointBackboneNeckHeadExportWrapper(
             self.pts_backbone, self.pts_neck, self.bbox_head.prepare_for_export()
         )
         return (
-            TorchStage("decorate", run=decorate, inputs=(), outputs=("input_features",)),
             GraphStage(
                 "pts_voxel_encoder_centerpoint",
                 module=_CenterPointVoxelEncoderExportWrapper(self.pts_voxel_encoder),
@@ -311,9 +323,6 @@ class CenterPointDetection3DModel(ModuleBaseModel):
                     "input_features": {0: "num_voxels", 1: "num_max_points"},
                     "pillar_features": {0: "num_voxels"},
                 },
-            ),
-            TorchStage(
-                "scatter", run=scatter, inputs=("pillar_features",), outputs=("spatial_features",)
             ),
             GraphStage(
                 "pts_backbone_neck_head_centerpoint",
@@ -328,6 +337,33 @@ class CenterPointDetection3DModel(ModuleBaseModel):
                 },
             ),
         )
+
+    def deployed_forward(
+        self, multi_task_batch_inputs: ModelBatchInputs, graphs: Graphs
+    ) -> Mapping[str, torch.Tensor]:
+        """Run the deployed split: decorate, the pillar graph, scatter, the dense graph.
+
+        Pillar decoration and the BEV scatter have no learned parameters and stay out of the
+        graphs; the runtime does both itself.
+        """
+        voxels = multi_task_batch_inputs.voxels_data
+        if voxels is None:
+            raise ValueError(
+                "ModelBatchInputs must contain voxels_data to run the deployed CenterPoint."
+            )
+        input_features = self.pts_voxel_encoder.encode(voxels)
+        pillar_features = graphs["pts_voxel_encoder_centerpoint"](input_features=input_features)[
+            "pillar_features"
+        ]
+        # Sized by the batch, as in forward(): the voxel batch indices miss a sample without
+        # voxels.
+        spatial_features = self.pts_middle_encoder(
+            pillar_features=pillar_features.to(graphs.device).squeeze(1),
+            coords=voxels.coords.to(graphs.device),
+            batch_indices=voxels.batch_indices.to(graphs.device),
+            batch_size=multi_task_batch_inputs.batch_size(),
+        )
+        return graphs["pts_backbone_neck_head_centerpoint"](spatial_features=spatial_features)
 
     def build_deployed_eval_output(
         self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
