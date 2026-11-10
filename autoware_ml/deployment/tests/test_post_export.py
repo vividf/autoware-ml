@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import unittest
@@ -24,16 +25,20 @@ from pathlib import Path
 from typing import Any
 
 import lightning as L
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from autoware_ml.datamodule.data_module import DataLoaderConfig
 from autoware_ml.deployment.config import PostExportConfig
 from autoware_ml.deployment.post_export import run_post_export
 from autoware_ml.deployment.stages import GraphStage, Stage, TorchStage
 from autoware_ml.deployment.tests.toy_batch import ToyBatch
+from autoware_ml.metrics.report import MetricReport
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
+from autoware_ml.types.dataset import SplitType
 
 
 class _Encoder(nn.Module):
@@ -79,6 +84,17 @@ class _StagedModel(_ToyModel):
         del multi_task_batch_inputs
         return {"loss": outputs["plus"].sum()}
 
+    def build_deployed_eval_output(
+        self, batch_inputs: Mapping[str, Any], outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        return {"plus": outputs["plus"], "target": batch_inputs["target"]}
+
+    def get_log_batch_size(self, batch_inputs):
+        return batch_inputs["points"].shape[0]
+
+    def clone_metrics(self, stage):
+        return [_ErrorSuite()]
+
     def build_stages(self) -> Sequence[Stage]:
         return (
             TorchStage(
@@ -110,6 +126,7 @@ class _DataModule(L.LightningDataModule):
         super().__init__()
         self.points = [torch.randn(4, 2) for _ in range(num_batches)]
         self.setup_calls: list[str] = []
+        self.built_batch_sizes: list[tuple[SplitType, int]] = []
 
     def prepare_data(self) -> None:
         self.setup_calls.append("prepare_data")
@@ -119,6 +136,43 @@ class _DataModule(L.LightningDataModule):
 
     def predict_dataloader(self):
         return DataLoader([ToyBatch(points=p) for p in self.points], batch_size=None)
+
+    test_dataloader_config = DataLoaderConfig(batch_size=16)
+
+    def build_dataloader(self, split: SplitType, config: DataLoaderConfig) -> DataLoader:
+        self.built_batch_sizes.append((split, config.batch_size))
+        return DataLoader(
+            [ToyBatch(points=p, target=p.sum(dim=1, keepdim=True)) for p in self.points],
+            batch_size=None,
+        )
+
+
+class _ErrorSuite:
+    """Duck-typed metric suite."""
+
+    prefix = "toy"
+    headline_metrics = ("error",)
+
+    def __init__(self) -> None:
+        self.total, self.count = 0.0, 0
+
+    def to(self, device):
+        return self
+
+    def reset(self) -> None:
+        self.total, self.count = 0.0, 0
+
+    def required_keys(self):
+        return ("plus", "target")
+
+    def update(self, eval_out) -> None:
+        self.total += float((eval_out["plus"] - eval_out["target"]).abs().mean())
+        self.count += 1
+
+    def result(self, stage) -> MetricReport:
+        report = MetricReport()
+        report.record("error", self.total / max(self.count, 1))
+        return report
 
 
 def _export_stage_artifacts(model: _StagedModel, tmp_path) -> None:
@@ -199,6 +253,82 @@ class TestPostExportVerification(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "verification FAILED"):
             run_post_export(
                 _cfg(tolerance=0.5), model, _DataModule(), self.tmp_path, torch.device("cpu")
+            )
+
+
+def _evaluation_cfg() -> PostExportConfig:
+    return PostExportConfig.from_deploy_cfg(
+        {
+            "onnx": {"enabled": True},
+            "tensorrt": {"enabled": False},
+            "evaluation": {
+                "enabled": True,
+                "num_samples": -1,
+                "num_warmup": 1,
+                "backends": {
+                    "pytorch": {"enabled": True, "device": "cpu"},
+                    "onnx": {"enabled": True, "device": "cpu"},
+                    "tensorrt": {"enabled": True, "device": "cuda"},
+                },
+            },
+        }
+    )
+
+
+class TestPostExportEvaluation(unittest.TestCase):
+    """Unit tests for scoring every available backend and writing the results."""
+
+    def setUp(self) -> None:
+        """Give each test its own directory for the exported artifacts and the results."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp_path = Path(directory.name)
+
+    def test_evaluation_scores_every_available_backend_and_logs_metrics(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        logged: dict[str, float] = {}
+        datamodule = _DataModule()
+        results = run_post_export(
+            _evaluation_cfg(),
+            model,
+            datamodule,
+            self.tmp_path,
+            torch.device("cpu"),
+            log_metric=logged.__setitem__,
+        )
+        # tensorrt has no artifacts and is skipped.
+        self.assertEqual([r.backend.value for r in results], ["pytorch", "onnx"])
+        # deploy.evaluation.batch_size, not the split's training-time 16.
+        self.assertEqual(datamodule.built_batch_sizes, [(SplitType.TEST, 1), (SplitType.TEST, 1)])
+        self.assertEqual(results[0].num_samples, 12)
+        self.assertAlmostEqual(
+            results[0].metrics["test/pytorch/toy/error"],
+            results[1].metrics["test/onnx/toy/error"],
+            delta=1e-5,
+        )
+        self.assertIn("latency/onnx/model_graphs_mean_ms", logged)
+        self.assertIn("test/pytorch/toy/error", logged)
+
+    def test_evaluation_writes_every_metric_without_a_tracker(self) -> None:
+        torch.manual_seed(0)
+        model = _StagedModel().eval()
+        _export_stage_artifacts(model, self.tmp_path)
+        results = run_post_export(
+            _evaluation_cfg(), model, _DataModule(), self.tmp_path, torch.device("cpu")
+        )
+        entries = json.loads((self.tmp_path / "evaluation.json").read_text())["results"]
+        self.assertEqual([entry["backend"] for entry in entries], ["pytorch", "onnx"])
+        for entry, result in zip(entries, results):
+            self.assertEqual(entry["metrics"].keys(), result.metrics.keys())
+            for key, value in result.metrics.items():
+                np.testing.assert_allclose(entry["metrics"][key], value, rtol=1e-6, atol=1e-12)
+            np.testing.assert_allclose(
+                entry["latency_ms"]["model_graphs"]["mean"],
+                result.latency["model_graphs"].mean,
+                rtol=1e-6,
+                atol=1e-12,
             )
 
 
