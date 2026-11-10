@@ -1,0 +1,13 @@
+# @package _global_
+# INT8 linears + INT8 cpe sparse convolutions (ImplicitGemm plugin scales) variant.
+# An experiment composes it in place of `base_voxel012_122m_int8`, then runs `autoware-ml quantize`
+# (writes the PTQ checkpoint) and `autoware-ml deploy` with that checkpoint as `--weights`.
+#
+# The twelve cpe convolutions have 64-512 channels, where INT8 GEMMs pay off. The plugin
+# needs the INT8 build of libautoware_tensorrt_plugins (docker/tensorrt_plugins/README.md).
+defaults:
+  - base_voxel012_122m_int8
+  - _self_
+
+quantization:
+  skip_quantize: []
