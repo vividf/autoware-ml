@@ -57,6 +57,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_camera imp
 from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_lidar import BEVFusionLidar
 from autoware_ml.models.detection3d.main_modules.bevfusions.fuser import ConvFuser
 from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers import (
+    decode_packed_detections,
     export_detection3d_outputs,
 )
 from autoware_ml.models.detection3d.necks.second_fpn import SECONDFPN
@@ -663,6 +664,38 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         torch.testing.assert_close(outputs["bbox_pred"], bbox_pred)
         torch.testing.assert_close(outputs["score"], score)
         torch.testing.assert_close(outputs["label_pred"], label_pred)
+
+    def test_packed_decode_matches_the_head_on_the_same_outputs(self) -> None:
+        """
+        Test that the packed tensors decode to the head's own detections, so the deployed eval
+        output matches ``build_eval_output``.
+        """
+        self.model.eval()
+        batch_inputs = self._build_single_sample_batch_inputs()
+        with torch.no_grad():
+            outputs = self.model(batch_inputs)
+            head_outputs = outputs.detection3d().transfusion_head()
+            bbox_pred, score, label_pred = export_detection3d_outputs(
+                self.model.bbox_head, head_outputs
+            )
+        packed = {"bbox_pred": bbox_pred, "score": score, "label_pred": label_pred}
+
+        from_head = self.model.bbox_head.decode_outputs(outputs.detection3d())
+        from_packed = decode_packed_detections(self.model.bbox_head, packed)
+        self.assertEqual(len(from_packed.detection3d_predictions), 1)
+        for key in ("bboxes_3d", "scores_3d", "labels_3d"):
+            torch.testing.assert_close(
+                getattr(from_packed.detection3d_predictions[0], key),
+                getattr(from_head.detection3d_predictions[0], key),
+            )
+
+        deployed = self.model.build_deployed_eval_output(batch_inputs, packed)
+        reference = self.model.build_eval_output(batch_inputs, outputs)
+        self.assertEqual(deployed.keys(), reference.keys())
+        for key in ("bboxes_3d", "scores_3d", "labels_3d"):
+            torch.testing.assert_close(
+                deployed["predictions"][0][key], reference["predictions"][0][key]
+            )
 
     def _build_partial_model(self) -> BEVFusionDetection3DModel:
         """Build a lidar-only detector that ignores cyclists in frames flagged as not annotated."""

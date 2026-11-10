@@ -53,6 +53,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_camera imp
 from autoware_ml.models.detection3d.task_modules.partial_annotations import PartialAnnotations
 from autoware_ml.models.detection3d.heads.transfusions.transfusion_head import TransFusionHead
 from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers import (
+    decode_packed_detections,
     export_detection3d_outputs,
 )
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
@@ -547,6 +548,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
                 "bevfusion_lidar",
                 module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
                 inputs=("voxels", "coors", "num_points_per_voxel"),
+                # Decoded by build_deployed_eval_output.
                 outputs=("bbox_pred", "score", "label_pred"),
                 onnx_dynamic_axes={
                     "voxels": {0: "voxels_num"},
@@ -575,6 +577,15 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         )
         return graphs["bevfusion_lidar"](
             voxels=voxels, coors=coors, num_points_per_voxel=num_points_per_voxel
+        )
+
+    def build_deployed_eval_output(
+        self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the packed outputs through the head's post-processing, like forward()'s."""
+        return detection3d_eval_output(
+            predictions=decode_packed_detections(self.bbox_head, outputs),
+            batch_inputs=multi_task_batch_inputs,
         )
 
     def _prepare_export_model(self) -> "BEVFusionDetection3DModel":

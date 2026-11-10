@@ -4,7 +4,7 @@ Modules to save raw outputs from a detection3d head.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from jaxtyping import Bool, Float, Int64
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -147,6 +147,37 @@ class TransFusionHeadOutputs(BaseModel):
         } | {name: getattr(separate, name) for name in type(separate).model_fields}
         return _pick_export_tensors(tensors, names)
 
+    @classmethod
+    def from_export_tensors(cls, tensors: Mapping[str, torch.Tensor]) -> TransFusionHeadOutputs:
+        """
+        Rebuild the head outputs from exported tensors keyed by name.
+
+        The inverse of :meth:`export_tensors`; a branch the head does not predict (``vel``)
+        stays unset.
+
+        Args:
+            tensors: The exported tensors keyed by output name.
+
+        Returns:
+            The head outputs.
+
+        Raises:
+            ValueError: If a name is not a head output, or a required tensor is missing.
+        """
+        own = ("dense_heatmap", "query_heatmap_score", "query_labels")
+        branches = TransFusionSeparateHeadOutputs.model_fields
+        unknown = sorted(set(tensors) - set(own) - set(branches))
+        if unknown:
+            raise ValueError(f"The head has no output named {unknown}, it has {[*own, *branches]}.")
+        return cls(
+            **{name: tensors.get(name) for name in own},
+            separate_head_outputs=TransFusionSeparateHeadOutputs(
+                **_tensors_per_field(
+                    branches, {name: tensor for name, tensor in tensors.items() if name in branches}
+                )
+            ),
+        )
+
 
 class CenterHeadOutputs(BaseModel):
     """
@@ -204,6 +235,25 @@ class CenterHeadOutputs(BaseModel):
         """
         tensors = {name: getattr(self, name) for name in type(self).model_fields}
         return _pick_export_tensors(tensors, names)
+
+    @classmethod
+    def from_export_tensors(cls, tensors: Mapping[str, torch.Tensor]) -> CenterHeadOutputs:
+        """
+        Rebuild the head outputs from exported tensors keyed by name.
+
+        The inverse of :meth:`export_tensors`; a branch the head does not predict (``vel``)
+        stays unset.
+
+        Args:
+            tensors: The exported tensors keyed by output name.
+
+        Returns:
+            The head outputs.
+
+        Raises:
+            ValueError: If a name is not a head output, or a required branch is missing.
+        """
+        return cls(**_tensors_per_field(cls.model_fields, tensors))
 
 
 class StreamPETRDenoisingOutputs(BaseModel):
@@ -372,6 +422,17 @@ class Detection3DHeadOutputs(BaseModel):
                 f"got {set_fields}."
             )
         return self
+
+
+def _tensors_per_field(
+    field_names: Iterable[str], tensors: Mapping[str, torch.Tensor]
+) -> dict[str, torch.Tensor | None]:
+    """One entry per head field: the exported tensor of that name, None when none was exported."""
+    field_names = list(field_names)
+    unknown = sorted(set(tensors) - set(field_names))
+    if unknown:
+        raise ValueError(f"The head has no output named {unknown}, it has {field_names}.")
+    return {name: tensors.get(name) for name in field_names}
 
 
 def _pick_export_tensors(
