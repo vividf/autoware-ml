@@ -187,6 +187,39 @@ class SparseConvolution(SparseConvolutionBase):
             )
         indice_dict[self.indice_key] = indice_data
 
+    def _check_precomputed_reuse_valid(
+        self,
+        input_tensor: SparseConvTensor,
+        spatial_shape: list[int],
+        data: ImplicitGemmIndiceData,
+    ) -> None:
+        """Reject a precomputed rulebook that was not generated for this layer's geometry.
+
+        Mirrors spconv's ``_check_subm_reuse_valid``: with another geometry the pairs would
+        silently index the wrong neighbours.
+        """
+        del input_tensor  # the geometry below is what identifies the rulebook
+        if data.is_subm:
+            raise ValueError(
+                f"Indice key '{self.indice_key}' holds a submanifold rulebook, but this "
+                "layer down-samples; a precomputed rulebook must come from the same layer kind."
+            )
+        for attribute, expected in (
+            ("ksize", list(self.kernel_size)),
+            ("stride", list(self.stride)),
+            ("padding", list(self.padding)),
+            ("dilation", list(self.dilation)),
+            ("spatial_shape", list(spatial_shape)),
+            ("algo", self.algo),
+        ):
+            actual = getattr(data, attribute)
+            actual = list(actual) if isinstance(actual, (list, tuple)) else actual
+            if actual != expected:
+                raise ValueError(
+                    f"Precomputed rulebook for indice key '{self.indice_key}' has "
+                    f"{attribute}={actual}, this layer expects {expected}."
+                )
+
     def _finalize_output_tensor(
         self,
         out_tensor: SparseConvTensor,
@@ -354,9 +387,14 @@ class SparseConvolution(SparseConvolutionBase):
             )
 
         if self.indice_key is not None and data is not None:
-            if not self.subm:
-                raise RuntimeError("Indice reuse is only supported for subm convolutions.")
-            self._check_subm_reuse_valid(input_tensor, spatial_shape, data)
+            # A submanifold layer reuses the rulebook of the layer sharing its indice key. A
+            # down-sampling layer only finds one precomputed outside the graph
+            # (autoware_ml.ops.spconv.rulebook); reusing it drops the layer's
+            # GetIndicePairsImplicitGemm node and its data-dependent output shape.
+            if self.subm:
+                self._check_subm_reuse_valid(input_tensor, spatial_shape, data)
+            else:
+                self._check_precomputed_reuse_valid(input_tensor, spatial_shape, data)
             return _ImplicitGemmExecutionPlan(
                 outids=data.out_indices,
                 pair_fwd=data.pair_fwd,
