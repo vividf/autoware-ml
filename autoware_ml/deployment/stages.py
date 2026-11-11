@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
@@ -57,6 +56,8 @@ class GraphStage:
             argument order; they are the ONNX input names.
         outputs: ONNX output names, in the module's return order; a call of the graph returns
             its tensors under these names.
+        torch_fallback_backends: Backends that run the PyTorch module instead of the
+            artifact, for graphs they cannot execute (plugin ops on ONNX Runtime).
         onnx_dynamic_axes: Axes dynamic by construction, ``{tensor: {dim: name}}``. They
             become the spec's ``dynamic_axes``, the one declaration both ONNX exporters
             derive from.
@@ -66,6 +67,7 @@ class GraphStage:
     module: nn.Module
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
+    torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -340,42 +342,14 @@ def call_deployed_forward(
 
 
 class DeploymentRun(NamedTuple):
-    """One PyTorch run of a deployment.
+    """One tracing run of a deployment.
 
     Attributes:
         outputs: The model outputs the deployed function returned, by name.
-        graph_inputs: The positional inputs each graph ran on, by graph name: the tensors the
-            function passed, which export traces each graph on.
+        graph_inputs: The positional inputs each graph ran on, by graph name, filled by a
+            tracing run (:meth:`DeployedPipeline.trace`): the tensors the function passed, which
+            export traces each graph on.
     """
 
     outputs: dict[str, torch.Tensor]
     graph_inputs: dict[str, tuple[torch.Tensor, ...]]
-
-
-def run_deployment_in_torch(
-    deployment: DeployedModel, batch: Any, device: torch.device
-) -> DeploymentRun:
-    """Run the deployed function once in PyTorch, every graph on its own module.
-
-    Export takes its trace inputs from ``graph_inputs``, so a graph input the function modifies
-    in place after the graph ran is rejected. Modules run in their current mode; export
-    switches them to eval first.
-
-    Raises:
-        TypeError: When a graph gets a non-tensor input or returns a mapping or a non-tensor,
-            or the function returns something other than a mapping of tensors.
-        ValueError: When a graph returns another number of tensors than it declares, or a
-            graph input is modified in place.
-        RuntimeError: When the function skips a declared graph or calls one twice.
-    """
-    outputs, calls = call_deployed_forward(
-        deployment, lambda stage: partial(run_graph_stage, stage), batch, device
-    )
-    modified = {name: call.modified_inputs() for name, call in calls.items()}
-    modified = {name: names for name, names in modified.items() if names}
-    if modified:
-        raise ValueError(
-            f"deployed_forward modified graph inputs in place after the graphs ran: {modified}; "
-            "export traces each graph on the tensors it ran on."
-        )
-    return DeploymentRun(outputs, {name: call.args for name, call in calls.items()})

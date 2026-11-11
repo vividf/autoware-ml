@@ -22,12 +22,9 @@ import unittest
 
 import torch
 
-from autoware_ml.deployment.stages import (
-    DeployedModel,
-    DeploymentRun,
-    GraphStage,
-    run_deployment_in_torch,
-)
+from autoware_ml.deployment.pipeline import DeployedPipeline
+from autoware_ml.deployment.stages import DeployedModel, DeploymentRun, GraphStage
+from autoware_ml.types.backend import Backend
 
 
 class DeploymentForwardCheck(NamedTuple):
@@ -77,7 +74,7 @@ def assert_deployment_reproduces_forward(
     with torch.no_grad():
         forward_outputs = model(batch)
     reference = forward_tensors(forward_outputs)
-    run = run_deployment_in_torch(deployment, batch, device)
+    run = DeployedPipeline(deployment, Backend.PYTORCH, device).trace(batch)
     case.assertEqual(
         set(reference),
         set(run.outputs),

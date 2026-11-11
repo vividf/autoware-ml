@@ -35,11 +35,9 @@ from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.batch.detection3d import Detection3DGTBatch
 from autoware_ml.dataclasses.geometry.images import ImageGTBatch
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
-from autoware_ml.deployment.stages import (
-    GraphStage,
-    run_deployment_in_torch,
-    validate_graphs,
-)
+from autoware_ml.deployment.pipeline import DeployedPipeline
+from autoware_ml.deployment.stages import GraphStage, validate_graphs
+from autoware_ml.types.backend import Backend
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_attention import (
@@ -625,6 +623,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(graph.name, "bevfusion_lidar")
         self.assertEqual(graph.inputs, ("voxels", "coors", "num_points_per_voxel"))
         self.assertEqual(graph.outputs, ("bbox_pred", "score", "label_pred"))
+        self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
         self.assertEqual(
             graph.onnx_dynamic_axes,
             {name: {0: "voxels_num"} for name in ("voxels", "coors", "num_points_per_voxel")},
@@ -652,7 +651,9 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         deployment = self.model.deployment_declaration()
         assert deployment is not None
 
-        outputs = run_deployment_in_torch(deployment, batch_inputs, self.device).outputs
+        outputs = (
+            DeployedPipeline(deployment, Backend.PYTORCH, self.device).trace(batch_inputs).outputs
+        )
         self.assertEqual(list(outputs), ["bbox_pred", "score", "label_pred"])
         specs = self.model.build_export_specs(batch_inputs)
         with torch.no_grad():
