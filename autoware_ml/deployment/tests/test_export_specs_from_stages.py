@@ -166,6 +166,32 @@ class TestExportSpecsFromDeployment(unittest.TestCase):
         )
         self.assertEqual(specs["g"].dynamic_axes, {"x": {0: "num_points"}, "y": {0: "num_points"}})
 
+    def test_graph_onnx_transforms_land_in_the_spec_in_order(self) -> None:
+        """Test that a graph's ONNX transforms reach its spec, in declaration order."""
+
+        def fuse(path):
+            return path
+
+        def stamp(path):
+            return path
+
+        deployment = DeployedModel(
+            (
+                GraphStage(
+                    "sparse",
+                    module=nn.Identity(),
+                    inputs=("x",),
+                    outputs=("y",),
+                    onnx_transforms=(fuse, stamp),
+                ),
+            ),
+            lambda batch, graphs: graphs["sparse"](x=batch["x"]),
+        )
+        specs = build_export_specs_from_deployment(
+            deployment, {"x": torch.ones(3, 2)}, torch.device("cpu")
+        )
+        self.assertEqual(specs["sparse"].onnx_transforms, (fuse, stamp))
+
     def test_multi_input_spec_args_follow_the_declared_input_order(self) -> None:
         """Test that a spec's args and input names follow the graph's declared input order."""
 

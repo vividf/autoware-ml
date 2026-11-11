@@ -21,10 +21,9 @@ mapping from module names to :class:`ExportSpec` objects.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import inspect
 import logging
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +53,9 @@ class ExportSpec:
             the input and output names. The model declares them here, not in its config.
             The TorchScript exporter (``dynamo=False``) takes them as its ``dynamic_axes``;
             ``torch.export`` (``dynamo=True``) gets one ``Dim`` per name over the inputs.
+        onnx_transforms: Rewrites of the exported ``.onnx``, run in order before any
+            config-driven graph modifier or precision cast; each takes the path and
+            returns the path it wrote.
     """
 
     module: torch.nn.Module
@@ -61,6 +63,7 @@ class ExportSpec:
     input_names: list[str]
     output_names: list[str]
     dynamic_axes: dict[str, dict[int, str]] | None = None
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse a spec that leaves an input or every output unnamed, or an axis of no tensor.
@@ -88,6 +91,17 @@ class ExportSpec:
                 f"The export spec declares dynamic_axes for {unknown}, which are not among its "
                 f"inputs {self.input_names} or outputs {self.output_names}."
             )
+
+
+def apply_onnx_transforms(onnx_path: Path, transforms: Sequence[Callable[[Path], Path]]) -> Path:
+    """Run ``transforms`` over the exported file in order and return the resulting path."""
+    for transform in transforms:
+        name = getattr(transform, "__name__", None) or getattr(
+            getattr(transform, "func", None), "__name__", type(transform).__name__
+        )
+        logger.info("Applying ONNX transform %s to %s", name, onnx_path.name)
+        onnx_path = Path(transform(onnx_path))
+    return onnx_path
 
 
 def validate_cuda_available() -> None:

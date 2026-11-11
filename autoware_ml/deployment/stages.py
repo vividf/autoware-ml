@@ -61,6 +61,10 @@ class GraphStage:
         onnx_dynamic_axes: Axes dynamic by construction, ``{tensor: {dim: name}}``. They
             become the spec's ``dynamic_axes``, the one declaration both ONNX exporters
             derive from.
+        onnx_transforms: Rewrites of the exported ``.onnx``, in order, each taking and
+            returning the file path: fusions the deployed graph needs, such as folding a
+            bias and an activation into a plugin node. Configurable surgery belongs in
+            ``deploy.onnx.modify_graph``.
     """
 
     name: str
@@ -69,6 +73,7 @@ class GraphStage:
     outputs: tuple[str, ...]
     torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         _reject_bare_string(self, "inputs", self.inputs)
