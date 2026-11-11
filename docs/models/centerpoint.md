@@ -77,6 +77,25 @@ The export produces the two ONNX modules consumed by `autoware_universe/percepti
 
 Exports land in `mlruns/<experiment_group_name>/<experiment_name>/<run_id>/artifacts/exports/` of a dedicated deploy run linked to the training run. Every module is stamped with its provenance and the `--release` version. Omit `--release` only for throwaway exports, which are stamped `unversioned`. TensorRT engine generation is disabled in the base config (`deploy.tensorrt.enabled=false`) because the runtime builds engines itself.
 
+### Verification and evaluation
+
+CenterPoint declares its deployment graphs and deployed forward
+(`CenterPointDetection3DModel.deploy_graphs`, `deployed_forward`), so the export can be checked against the PyTorch model and scored per backend:
+
+```bash
+autoware-ml deploy \
+    --config-name detection3d/centerpoint/nuscenes/voxel020_second_secfpn_b16_30e_nuscenes_51m \
+    --weights <best.ckpt> \
+    deploy.onnx.precision=fp16 deploy.tensorrt.enabled=true \
+    deploy.verification.enabled=true deploy.evaluation.enabled=true deploy.evaluation.num_samples=100
+```
+
+Verification compares the raw head outputs of `onnx` and `tensorrt` against `pytorch` on the
+first predict batch (gates are measured values, see the base config); evaluation scores every
+backend on the test split with the model's metric suites and logs the graph and glue latencies
+(`model_graphs` is the TensorRT time of the two engines). See
+[Deployment](../user-guide/deployment.md#deployment-graphs-verification-and-evaluation).
+
 ## Implementation
 
 | Path                                                                      | Description                                      |

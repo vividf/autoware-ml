@@ -71,6 +71,11 @@ deploy:
     # 0.03 % of the labels flipped at near-ties), mIoU equal; 0.1 leaves ~4x headroom.
     scenarios:
       - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 0.1 }
+  evaluation:
+    backends:
+      # Plugin ops have no ONNX Runtime implementation, so this column would repeat PyTorch's.
+      onnx: { enabled: false }
+
 
 model:
   _target_: autoware_ml.models.segmentation3d.ptv3.PTv3Segmentation3DModel
