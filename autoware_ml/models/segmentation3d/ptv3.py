@@ -36,6 +36,7 @@ from autoware_ml.deployment.stages import GraphStage
 from autoware_ml.models.segmentation3d.heads.ptv3 import (
     PTv3Seg3DDecoderHead,
     segmentation3d_eval_output,
+    segmentation3d_eval_output_from_scores,
     segmentation3d_point_loss,
     segmentation3d_predict_outputs,
 )
@@ -160,3 +161,11 @@ class PTv3Segmentation3DModel(PTv3BaseModel):
     def deploy_graphs(self) -> Sequence[GraphStage]:
         """Declare ``ptv3_encoder`` and ``ptv3_seg3d_head``, the runtime's split."""
         return build_ptv3_graphs(self, build_seg3d_head_stage(self, self.seg3d_head))
+
+    def build_deployed_eval_output(
+        self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the seg head graph's labels and scores like forward()'s logits."""
+        return segmentation3d_eval_output_from_scores(
+            outputs["pred_labels"], outputs["pred_probs"], batch_inputs
+        )

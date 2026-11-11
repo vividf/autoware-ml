@@ -10,7 +10,7 @@ segmentation head and is not part of the detection path.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -18,7 +18,10 @@ import torch
 import torch.nn as nn
 from torch.onnx.operators import shape_as_tensor
 
-from autoware_ml.dataclasses.models.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.dataclasses.models.detection3d.head_outputs import (
+    Detection3DHeadOutputs,
+    TransFusionHeadOutputs,
+)
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
@@ -375,7 +378,8 @@ def build_det3d_head_stage(
             output_names=output_names,
         ).eval(),
         inputs=tuple(det3d_head_export_input_names(stage_count)),
-        # Named after the TransFusionHeadOutputs tensors.
+        # Named after the TransFusionHeadOutputs tensors; build_deployed_eval_output
+        # rebuilds the typed outputs by name.
         outputs=output_names,
         onnx_dynamic_axes=det3d_head_export_dynamic_axes(stage_count),
     )
@@ -507,3 +511,20 @@ class PTv3Detection3DModel(PTv3BaseModel):
     def deploy_graphs(self) -> Sequence[GraphStage]:
         """Declare ``ptv3_encoder`` and ``ptv3_det3d_head``; the deployed forward serializes first."""
         return build_ptv3_graphs(self, build_det3d_head_stage(self, self.bev_neck, self.bbox_head))
+
+    def build_deployed_eval_output(
+        self, batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
+        """Score the det head graph's tensors exactly like forward()'s head outputs.
+
+        The deployed forward returns the head's tensors only, so all of them are scored.
+        """
+        return self.build_eval_output(
+            batch_inputs,
+            ModelOutputs(
+                detection3d_head_outputs=Detection3DHeadOutputs(
+                    center_head_outputs=None,
+                    transfusion_head_outputs=TransFusionHeadOutputs.from_export_tensors(outputs),
+                )
+            ),
+        )

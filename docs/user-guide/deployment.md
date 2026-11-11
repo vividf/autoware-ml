@@ -219,7 +219,9 @@ once on the example batch in eval mode and returns one export spec per
 `GraphStage`, traced on the tensors the function passed it. Every declared graph
 is called exactly once, and a graph's inputs must not be modified in place after
 the call, since export traces the graph on them; the run rejects a function that
-breaks either rule. The model outputs are what `deployed_forward()` returns. Each
+breaks either rule. The model outputs are what `deployed_forward()` returns;
+PyTorch post-processing of the deployed outputs belongs in
+`build_deployed_eval_output()`. Each
 `GraphStage` module is export-ready as declared, the live submodule or the copy
 its `prepare_for_export()` makes; the framework never alters it, and it declares
 the graphs again after replacing a module rather than reusing an earlier

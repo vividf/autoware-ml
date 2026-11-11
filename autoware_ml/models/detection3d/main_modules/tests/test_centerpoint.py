@@ -409,6 +409,22 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         )
         self.assertEqual(list(check.run.outputs), names)
 
+        # Decode forward()'s own tensors so the comparison is exact: the noise allowed above
+        # could flip near-tie proposals in the top-k selection.
+        deployed = self.centerpoint.build_deployed_eval_output(
+            multi_task_batch_inputs, self._head_tensors(check.forward_outputs)
+        )
+        reference = self.centerpoint.build_eval_output(
+            multi_task_batch_inputs, check.forward_outputs
+        )
+        self.assertEqual(deployed.keys(), reference.keys())
+        self.assertEqual(len(deployed["predictions"]), self.batch_size)
+        for deployed_sample, reference_sample in zip(
+            deployed["predictions"], reference["predictions"], strict=True
+        ):
+            for key in ("bboxes_3d", "scores_3d", "labels_3d"):
+                torch.testing.assert_close(deployed_sample[key], reference_sample[key])
+
     def test_deployment_runs_on_deployment_inputs_without_ground_truth(self) -> None:
         """Test that voxels with an empty GT batch, as a runtime feeds them, trace both graphs."""
         self.centerpoint.eval()
@@ -475,9 +491,12 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         }
         for case, inputs in cases.items():
             with self.subTest(case=case):
-                assert_deployment_reproduces_forward(
+                check = assert_deployment_reproduces_forward(
                     self.centerpoint, inputs, self.device, self._head_tensors, rtol=1e-3, atol=1e-3
                 )
+                deployed = self.centerpoint.build_deployed_eval_output(inputs, check.run.outputs)
+                reference = self.centerpoint.build_eval_output(inputs, check.forward_outputs)
+                self.assertEqual(len(deployed["predictions"]), len(reference["predictions"]))
 
 
 if __name__ == "__main__":

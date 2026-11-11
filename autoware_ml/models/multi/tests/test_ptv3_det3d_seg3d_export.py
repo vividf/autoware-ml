@@ -63,8 +63,11 @@ JOINT_EXPORT_OUTPUT_NAMES = [
 
 
 class _DummyBBoxHead:
+    def __init__(self) -> None:
+        self.received: list[object] = []
+
     def decode_outputs(self, outputs: object) -> ModelPredictions:
-        del outputs
+        self.received.append(outputs)
         return ModelPredictions(
             detection3d_predictions=[
                 Detection3DSamplePredictions(
@@ -224,6 +227,18 @@ def test_ptv3_det3d_seg3d_eval_output_scatters_segmentation3d_to_original_points
     assert len(eval_out["predictions"]) == 1
     assert len(eval_out["gt_boxes"]) == 1
 
+    det_names = ["dense_heatmap", "query_heatmap_score", "query_labels"]
+    det_names += ["heatmap", "center", "height", "dim", "rot"]
+    logits = outputs.segmentation3d().logits
+    flat = {"pred_labels": logits.argmax(dim=1), "pred_probs": logits.softmax(dim=1)}
+    flat.update(zip(det_names, det3d_outputs.export_tensors(det_names)))
+    deployed = PTv3Det3DSeg3DModel.build_deployed_eval_output(model, batch, flat)
+    assert deployed.keys() == eval_out.keys()
+    for key, value in eval_out["seg3d_frames"][0].items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(deployed["seg3d_frames"][0][key], value)
+    assert model.bbox_head.received[-1].transfusion_head_outputs == det3d_outputs
+
 
 def _save_detection3d_checkpoint(
     checkpoint_path: Path,
@@ -321,6 +336,10 @@ def test_ptv3_det3d_seg3d_stage_graph_is_the_seg3d_and_det3d_graphs_over_one_enc
     specs = model.build_export_specs(batch)
     assert list(specs) == [ENCODER_STAGE, SEG3D_HEAD_STAGE, DET3D_HEAD_STAGE]
     assert specs[DET3D_HEAD_STAGE].output_names == JOINT_EXPORT_OUTPUT_NAMES[2:]
+
+    deployed = model.build_deployed_eval_output(batch, joint)
+    assert {"predictions", "gt_boxes", "seg3d_frames"} <= deployed.keys()
+    assert len(deployed["predictions"]) == len(deployed["seg3d_frames"]) == 1
 
 
 @pytest.mark.skipif(
