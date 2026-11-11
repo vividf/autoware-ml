@@ -47,6 +47,10 @@ IMPLICIT_GEMM_BIAS_SLOT = 6
 ACT_TYPE_ATTR = "act_type"
 INPUT_SCALE_ATTR = "input_scale"
 OUTPUT_SCALE_ATTR = "output_scale"
+#: The type a quantized node's epilogue writes. Required on the INT8 row: it is also what
+#: tells a contract graph from the INT8 layouts before it, whose slots 5 and 6 differ.
+OUTPUT_TYPE_ATTR = "output_type"
+OUTPUT_TYPE_FP16 = "f16"
 #: ``GetIndicePairsImplicitGemm`` attribute: whether the pair masks are argsorted.
 DO_SORT_ATTR = "do_sort"
 
