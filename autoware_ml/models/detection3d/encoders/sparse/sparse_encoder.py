@@ -303,6 +303,8 @@ class SparseEncoder(BEVMiddleEncoder):
             _norm(output_channels, norm_eps, norm_momentum),
             nn.ReLU(inplace=True),
         )
+        # The rulebook geometry is fixed by the layers above; deployment reads it per frame.
+        self._downsample_stages = self._describe_downsample_stages()
 
     @property
     def bev_output_shape(self) -> tuple[int, int]:
@@ -325,7 +327,16 @@ class SparseEncoder(BEVMiddleEncoder):
         return tuple(column - 1 for column in self.CONV_COORDS_PERMUTATION[1:])
 
     def downsample_stages(self) -> tuple[DownsampleStage, ...]:
-        """Describe the down-sampling layers whose rulebooks deployment precomputes.
+        """Return the down-sampling layers whose rulebooks deployment precomputes.
+
+        Described once at construction and cached: the geometry is fixed by the layers, and
+        the deployed function reads it on every frame. An export copy inherits the cache;
+        :func:`check_export_geometry` checks its layers still describe the same stages.
+        """
+        return self._downsample_stages
+
+    def _describe_downsample_stages(self) -> tuple[DownsampleStage, ...]:
+        """Describe the down-sampling stages from the layers as they are now.
 
         The spatial shapes cascade in forward order, which is the registration order
         ``modules()`` yields for this encoder.
@@ -393,3 +404,31 @@ class SparseEncoder(BEVMiddleEncoder):
         # eval() last: the freshly constructed export wrappers start in train
         # mode and are inference-only.
         return encoder.eval()
+
+
+def check_export_geometry(live: SparseEncoder, export: SparseEncoder) -> None:
+    """Check that an export copy's layers describe the rulebooks of the live encoder.
+
+    Deployment precomputes the rulebooks from the live encoder's cached geometry
+    (:meth:`SparseEncoder.downsample_stages`), sorting and coordinate order, while the exported
+    graph runs the export copy's layers. The copy inherits the cache, so this reads its layers
+    again and compares.
+
+    Raises:
+        RuntimeError: When the export copy's layers, sorting or coordinate order differ from
+            the live encoder's.
+    """
+    differences = {
+        name: (expected, actual)
+        for name, expected, actual in (
+            ("downsample_stages", live.downsample_stages(), export._describe_downsample_stages()),
+            ("export_do_sort", live.export_do_sort, export.export_do_sort),
+            ("coors_permutation", live.coors_permutation, export.coors_permutation),
+        )
+        if expected != actual
+    }
+    if differences:
+        raise RuntimeError(
+            "The export copy of the sparse encoder describes other rulebook geometry than the "
+            f"live encoder the deployed function precomputes the rulebooks with: {differences}."
+        )

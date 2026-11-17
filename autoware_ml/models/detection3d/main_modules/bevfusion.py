@@ -47,6 +47,7 @@ from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
 from autoware_ml.metrics.eval_output import EvalOutput
 from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import (
     SparseEncoder,
+    check_export_geometry,
     fold_sparse_encoder_bn,
 )
 from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_lidar import (
@@ -632,24 +633,26 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
             return None
         export_model = self._prepare_export_model(fold_sparse_bn=True)
         middle_encoder = self.lidar_network.pts_middle_encoder
-        # The graph runs the export copy's layers, whose algorithm and sorting the rulebooks need.
-        export_encoder = export_model.lidar_network.pts_middle_encoder
         precompute = (
-            isinstance(export_encoder, SparseEncoder) and export_encoder.export_precompute_rulebooks
+            isinstance(middle_encoder, SparseEncoder) and middle_encoder.export_precompute_rulebooks
         )
-        rulebook_stages = export_encoder.downsample_stages() if precompute else ()
+        rulebook_stages: tuple[DownsampleStage, ...] = ()
         transforms: list[Callable[..., Any]] = [
             fuse_sparse_graph,
             # No-op unless the checkpoint carries calibrated sparse quantizers.
             partial(sparse_int8_transform, module=middle_encoder),
         ]
         if precompute:
+            # The rulebooks follow the live encoder's geometry, which deployed_forward reads on
+            # every frame, while the graph runs the export copy's layers: the two have to agree.
+            check_export_geometry(middle_encoder, export_model.lidar_network.pts_middle_encoder)
+            rulebook_stages = middle_encoder.downsample_stages()
             transforms.append(
                 partial(
                     embed_rulebook_metadata,
                     stages=rulebook_stages,
-                    coors_permutation=export_encoder.coors_permutation,
-                    do_sort=export_encoder.export_do_sort,
+                    coors_permutation=middle_encoder.coors_permutation,
+                    do_sort=middle_encoder.export_do_sort,
                 )
             )
         return (
@@ -681,7 +684,8 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         """Run ``bevfusion_lidar`` on the voxels of the batch's only sample.
 
         A graph that takes the down-sampling rulebooks gets them computed here from the same
-        coordinates, with the export copy's encoder the graph runs.
+        coordinates, with the live encoder's cached geometry; :meth:`deployment_graphs` checked that
+        the export copy the graph runs agrees with it.
 
         Raises:
             ValueError: On a batch of more than one sample; the graph is single-sample.
@@ -694,16 +698,14 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         voxels, coors, num_points_per_voxel = self._first_sample_voxel_inputs(
             multi_task_batch_inputs
         )
-        graph = executors["bevfusion_lidar"]
-        wrapper = graph.stage.module
+        encoder = self.lidar_network.pts_middle_encoder
         rulebooks: Mapping[str, torch.Tensor] = {}
-        if wrapper.rulebook_stages:
-            export_encoder = wrapper.model.lidar_network.pts_middle_encoder
-            coords = export_encoder.conv_coords(_runtime_coors_to_batch_zyx(coors))
+        if isinstance(encoder, SparseEncoder) and encoder.export_precompute_rulebooks:
+            coords = encoder.conv_coords(_runtime_coors_to_batch_zyx(coors))
             rulebooks = precompute_rulebooks(
-                coords, 1, wrapper.rulebook_stages, do_sort=export_encoder.export_do_sort
+                coords, 1, encoder.downsample_stages(), do_sort=encoder.export_do_sort
             )
-        return graph.run(
+        return executors["bevfusion_lidar"].run(
             voxels=voxels, coors=coors, num_points_per_voxel=num_points_per_voxel, **rulebooks
         )
 
