@@ -267,6 +267,9 @@ class MetricSuite(torchmetrics.Metric, ABC, Generic[StateT]):
     """
 
     prefix: str = ""
+    #: Metric names a compact report leads with, spelled as the components report them;
+    #: ``mAP`` also matches ``mAP_0m_121m``.
+    headline_metrics: tuple[str, ...] = ()
 
     full_state_update: bool = False
 

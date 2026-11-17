@@ -75,6 +75,8 @@ class Detection3DMetricSuite(MetricSuite[Detection3DState]):
     """
 
     prefix = "det3d"
+    # Nds reports map_based_nds, not NDS.
+    headline_metrics = ("mAP", "map_based_nds")
 
     def __init__(
         self,

@@ -18,6 +18,7 @@ This script wires Hydra configuration, Lightning runtime setup, MLflow
 integration, and model deployment execution.
 """
 
+from collections.abc import Callable
 import logging
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -81,6 +82,7 @@ def deploy(
     release: str | None,
     tracker: str | None = None,
     run_id: str | None = None,
+    log_metric: Callable[[str, float], None] | None = None,
 ) -> None:
     """Deploy the trained model for inference.
 
@@ -90,12 +92,13 @@ def deploy(
         model: The trained model to be deployed.
         export_specs: The model's export specifications, resolved and checked before the
             deploy run exists.
-        datamodule: Data module the post-export verification reads batches from.
+        datamodule: Data module the post-export verification and evaluation read batches from.
         config_name: User-facing config name stamped into the ONNX metadata.
         release: ``vMAJOR.MINOR.PATCH`` stamped into the ONNX metadata, or ``None``
             for an unversioned export.
         tracker: Active experiment tracker name recorded in the stamp, if any.
         run_id: Deploy run id recorded in the stamp, if any.
+        log_metric: Called with ``(key, value)`` for every evaluation metric and mean latency.
     """
     deployment_exporter = DeploymentExport(
         deploy_cfg=deploy_cfg,
@@ -109,7 +112,7 @@ def deploy(
     )
     export_outputs = deployment_exporter.export()
 
-    # A no-op unless deploy.verification is enabled.
+    # A no-op unless deploy.verification or deploy.evaluation is enabled.
     run_post_export(
         PostExportConfig.from_deploy_cfg(deploy_cfg),
         model=model,
@@ -117,6 +120,7 @@ def deploy(
         output_dir=output_dir,
         device=deployment_exporter.device,
         plugin_libraries=tuple(str(p) for p in (deploy_cfg.tensorrt.get("plugin_libraries") or ())),
+        log_metric=log_metric,
     )
     logger.info("Deployment completed successfully.")
     for path in export_outputs.onnx_exported_paths:
@@ -320,7 +324,7 @@ def _export(
         config_name: User-facing config name.
         model: The built model.
         export_specs: The model's export specifications.
-        datamodule: Data module the post-export verification reads batches from.
+        datamodule: Data module the post-export verification and evaluation read batches from.
         release: ``vMAJOR.MINOR.PATCH`` of the export, or ``None``.
         run_context: The deploy run, whose ``exports`` directory receives the outputs. Without
             one the outputs land in ``experiment_run_dir`` of the config.
@@ -335,6 +339,9 @@ def _export(
         )
     logger.info("Output directory for deployment: %s", output_dir)
 
+    mlflow_client = (
+        MlflowClient(tracking_uri=run_context.tracking_uri) if run_context is not None else None
+    )
     deploy(
         deploy_cfg=cfg.deploy,
         output_dir=output_dir,
@@ -345,6 +352,11 @@ def _export(
         release=release,
         tracker="mlflow" if run_context is not None else None,
         run_id=run_context.run_id if run_context is not None else None,
+        log_metric=(
+            (lambda key, value: mlflow_client.log_metric(run_context.run_id, key, value))
+            if mlflow_client is not None and run_context is not None
+            else None
+        ),
     )
 
 

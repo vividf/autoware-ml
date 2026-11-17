@@ -57,6 +57,11 @@ deploy:
     scenarios:
       - { ref: { backend: pytorch, device: cuda }, test: { backend: onnx, device: cpu }, tolerance: 12.0 }
       - { ref: { backend: pytorch, device: cuda }, test: { backend: tensorrt, device: cuda }, tolerance: 10.0 }
+  evaluation:
+    backends:
+      # Same ONNX Runtime limitation; the CPU provider is too slow for a whole split.
+      onnx: { enabled: false }
+
 
 model:
   _target_: autoware_ml.models.detection3d.main_modules.centerpoint.CenterPointDetection3DModel
