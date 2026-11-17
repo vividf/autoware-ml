@@ -33,8 +33,23 @@ class MyModel(ModuleBaseModel):
     ) -> ModelPredictions:
         ...
 
-    # Deployment
+    # Deployment: one exported graph ...
     def build_export_spec(self, multi_task_batch_inputs: ModelBatchInputs) -> ExportSpec:
+        ...
+
+    # ... or several graphs with PyTorch glue between them: the graphs, and the function
+    # that runs them
+    def deployment_graphs(self) -> Sequence[DeploymentGraph] | None:
+        ...
+
+    def deployment_forward(
+        self, multi_task_batch_inputs: ModelBatchInputs, executors: GraphExecutors
+    ) -> Mapping[str, torch.Tensor]:
+        ...
+
+    def build_deployed_eval_output(
+        self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, Any]:
         ...
 ```
 
@@ -504,6 +519,18 @@ autoware-ml deploy \
     --config-name my_task/my_model/my_config \
     --weights mlruns/<experiment_group_name>/<experiment_name>/<run_id>/artifacts/checkpoints/last.ckpt
 ```
+
+### Declaring the deployment graphs
+
+A model with a single exportable graph implements `build_export_spec()` and `deploy`
+exports it as `end_to_end`. A model whose deployment is several graphs with PyTorch glue
+between them (pillar decoration, BEV scatter, point serialization ...) declares the graphs
+in `deployment_graphs()` (one ONNX / TensorRT artifact each, a `DeploymentGraph` with named input
+and output tensors) and runs them in `deployment_forward(batch, executors)`, the glue as plain
+code. The export specs are derived from it, `build_deployed_eval_output()` scores what the
+function returns with the model's own metrics, and the same function is what cross-backend
+verification, per-backend evaluation and quantization run on. See [Deployment › Deployment graphs](../user-guide/deployment.md#deployment-graphs-verification-and-evaluation);
+`autoware_ml/models/detection3d/main_modules/centerpoint.py` is the smallest real example.
 
 ## Common Patterns
 
