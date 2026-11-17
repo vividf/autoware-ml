@@ -52,6 +52,25 @@ Without `PLUGINS_SRC` the script fetches the `PLUGINS_REPO` / `PLUGINS_REF` pinn
 top of `build_plugin.sh` (a commit SHA); override them, with a branch, tag or SHA, to build
 a different source (a feature branch for an A/B build, say).
 
+### Sparse INT8
+
+A deploy config whose sparse tower is quantized (BEVFusion `*_int8_sparse`, PTv3
+`*_int8_sparse`) exports `ImplicitGemm` nodes in the quantized form of the contract shared
+with t4sparse: INT8 features from a `QuantizeLinear`, INT8 filters, the per-channel
+`weight_scale` and the bias in slots 5 and 6, `input_scale` and `output_type = "f16"`.
+Upstream `main` has no INT8 path in that plugin yet; autoware_universe#13369 adds it, and the
+revision pinned in `build_plugin.sh` is on that PR's branch, so the default build has it. To
+build the PR branch as it stands instead of the pinned revision:
+
+```bash
+PLUGINS_REPO=https://github.com/vividf/autoware.universe.git \
+PLUGINS_REF=pr/tensorrt-plugins-implicit-gemm-int8 \
+  bash docker/tensorrt_plugins/build_plugin.sh
+```
+
+The same graph builds against t4sparse's `libt4sparse_trt_plugins.so` as well. t4sparse has
+no FP32 kernels, so deploy it with `deploy.onnx.precision: fp16`.
+
 ## Four traps worth knowing
 
 1. **Header/runtime version match.** The pip TensorRT wheels ship libraries but no C++
