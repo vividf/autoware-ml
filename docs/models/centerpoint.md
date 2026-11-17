@@ -96,6 +96,28 @@ backend on the test split with the model's metric suites and logs the graph and 
 (`model_graphs` is the TensorRT time of the two engines). See
 [Deployment](../user-guide/deployment.md#deployment-graphs-verification-and-evaluation).
 
+### INT8
+
+The `base_voxel024_120m_int8` T4 base quantizes the SECOND backbone (except its first stage),
+the FPN neck and the dense head with explicit Q/DQ; the pillar feature net stays fp16. An
+experiment composes it in place of `base_voxel024_120m` (see
+[Configuration](../user-guide/configuration.md#external-configs-and-scenario-lists)).
+Post-training quantization calibrates on 400 validation samples and writes a self-describing
+checkpoint that `deploy` and `test` take like any other `--weights`:
+
+```bash
+autoware-ml quantize \
+    --config-name detection3d/centerpoint/t4dataset/my_experiment_int8 \
+    --weights <best.ckpt>
+autoware-ml deploy \
+    --config-name detection3d/centerpoint/t4dataset/my_experiment_int8 \
+    --weights <checkpoints/ptq.ckpt of the quantize run>
+```
+
+`quantization.dry_run=true` prints the precision placement (which module gets which
+transform and why) without weights or a GPU. Engines build strongly typed: INT8 comes from the
+Q/DQ nodes in the ONNX, the un-quantized stages run fp16, and the graph I/O stays fp32.
+
 ## Implementation
 
 | Path                                                                      | Description                                      |
@@ -112,6 +134,7 @@ backend on the test split with the model's metric suites and logs the graph and 
 | `autoware_ml/datamodule/common/detection3d.py`                            | 3D boxes of a record                             |
 | `autoware_ml/configs/datamodule/`                                         | Datamodule, dataset and transform configurations |
 | `autoware_ml/configs/tasks/detection3d/centerpoint/`                      | Experiment configurations                        |
+| `autoware_ml/quantization/`                                               | PTQ engine and plan                              |
 
 ## Acknowledgment
 
