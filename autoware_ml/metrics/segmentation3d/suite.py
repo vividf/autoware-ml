@@ -42,6 +42,7 @@ class Segmentation3DConfusionMatrixMetricSuite(MetricSuite[ConfusionState]):
     """Confusion-matrix segmentation suite over (filter, range) buckets."""
 
     prefix = "seg3d"
+    headline_metrics = ("mIoU", "fwIoU")
 
     def __init__(
         self,

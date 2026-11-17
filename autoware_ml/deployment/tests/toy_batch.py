@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dict batch for the toy deployed models of the deployment tests."""
+"""Dict batch and duck-typed suite parts for the toy deployed models of the deployment tests."""
 
 from __future__ import annotations
 
@@ -24,3 +24,16 @@ class ToyBatch(dict):
 
     def to_device(self, device: torch.device) -> ToyBatch:
         return ToyBatch({name: tensor.to(device) for name, tensor in self.items()})
+
+
+class ToyRequirements:
+    """The requirements of a toy suite: it reads the toy model's dict eval output, never a typed part.
+
+    The evaluator passes a model's eval output to its suites untouched; the typed
+    :class:`~autoware_ml.metrics.eval_output.EvalOutput` contract is checked by the models' own
+    tests.
+    """
+
+    def check_requirements(self, eval_output: object) -> list[str]:
+        """Return no missing part."""
+        return []
