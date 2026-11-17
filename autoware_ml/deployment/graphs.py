@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import NamedTuple
 
 from jaxtyping import Shaped
@@ -67,6 +68,10 @@ class DeploymentGraph:
             become the spec's ``dynamic_axes``, the one declaration both ONNX exporters
             derive from. One name is one size: an output whose axis differs from an
             input's gets another name.
+        onnx_transforms: Rewrites of the exported ``.onnx``, in order, each taking and
+            returning the file path: fusions the deployed graph needs, such as folding a
+            bias and an activation into a plugin node. Configurable surgery belongs in
+            ``deploy.onnx.modify_graph``.
     """
 
     name: str
@@ -75,6 +80,7 @@ class DeploymentGraph:
     output_names: tuple[str, ...]
     torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
+    onnx_transforms: tuple[Callable[[Path], Path], ...] = ()
 
     def __post_init__(self) -> None:
         # The exporter renames a repeated name (``x`` -> ``x.1``), so the artifact would not
@@ -418,8 +424,9 @@ def export_spec_for_graph(graph: DeploymentGraph, args: tuple[GraphTensor, ...])
     """Build one graph's spec from the tensors it ran on.
 
     The trace inputs are ``args``, the tensors the deployed function passed the graph. The spec
-    takes the graph's declared input and output names. Its ``dynamic_axes`` are the graph's
-    ``onnx_dynamic_axes``, or ``None`` when the graph declares none.
+    takes the graph's declared input and output names and its ``onnx_transforms``. Its
+    ``dynamic_axes`` are the graph's ``onnx_dynamic_axes``, or ``None`` when the graph declares
+    none.
     """
     dynamic_axes = (
         {name: dict(axes) for name, axes in graph.onnx_dynamic_axes.items()}
@@ -434,6 +441,7 @@ def export_spec_for_graph(graph: DeploymentGraph, args: tuple[GraphTensor, ...])
         input_names=list(graph.input_names),
         output_names=list(graph.output_names),
         dynamic_axes=dynamic_axes,
+        onnx_transforms=tuple(graph.onnx_transforms),
     )
 
 
