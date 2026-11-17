@@ -30,7 +30,10 @@ from autoware_ml.dataclasses.batch.detection3d import (
 )
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTBatch
 from autoware_ml.deployment.graphs import DeploymentGraph
-from autoware_ml.deployment.tests.deployment_assertions import assert_deployment_reproduces_forward
+from autoware_ml.deployment.tests.deployment_assertions import (
+    assert_deployment_reproduces_forward,
+    assert_eval_outputs_close,
+)
 from autoware_ml.models.detection3d.main_modules.centerpoint import (
     CenterPointDetection3DModel,
     _CenterPointBackboneNeckHeadExportWrapper,
@@ -415,6 +418,17 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         )
         self.assertEqual(list(check.deployment_result.outputs), names)
 
+        # Decode forward()'s own tensors so the comparison is exact: the noise allowed above
+        # could flip near-tie proposals in the top-k selection.
+        deployed = self.centerpoint.build_deployed_eval_output(
+            multi_task_batch_inputs, self._head_tensors(check.forward_outputs)
+        )
+        reference = self.centerpoint.build_eval_output(
+            multi_task_batch_inputs, check.forward_outputs
+        )
+        assert_eval_outputs_close(deployed, reference)
+        self.assertEqual(len(deployed.detection3d.frames), self.batch_size)
+
     def test_deployment_reproduces_forward_without_the_velocity_branch(self) -> None:
         """Test that a head without velocity reproduces forward() with five model outputs."""
         centerpoint = self._build_centerpoint(self._build_bbox_head(use_velocity=False)).eval()
@@ -496,8 +510,15 @@ class TestCenterPointDetection3DModel(unittest.TestCase):
         }
         for case, inputs in cases.items():
             with self.subTest(case=case):
-                assert_deployment_reproduces_forward(
+                check = assert_deployment_reproduces_forward(
                     self.centerpoint, inputs, self.device, self._head_tensors, rtol=1e-3, atol=1e-3
+                )
+                deployed = self.centerpoint.build_deployed_eval_output(
+                    inputs, check.deployment_result.outputs
+                )
+                reference = self.centerpoint.build_eval_output(inputs, check.forward_outputs)
+                self.assertEqual(
+                    len(deployed.detection3d.frames), len(reference.detection3d.frames)
                 )
 
 

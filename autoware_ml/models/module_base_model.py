@@ -44,6 +44,7 @@ from autoware_ml.deployment.graphs import (
 )
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.eval_mixin import MetricEvalMixin
+from autoware_ml.metrics.eval_output import EvalOutput
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.types.dataset import SplitType
 from autoware_ml.utils.deploy import ExportSpec
@@ -468,6 +469,29 @@ class ModuleBaseModel(MetricEvalMixin, L.LightningModule, ABC):
         if graphs is None:
             return None
         return DeploymentDeclaration(tuple(graphs), self.deployment_forward)
+
+    def build_deployed_eval_output(
+        self,
+        multi_task_batch_inputs: ModelBatchInputs,
+        outputs: Mapping[str, Shaped[torch.Tensor, "*shape"]],
+    ) -> EvalOutput:
+        """Map a deployed run's model outputs to what :meth:`build_eval_output` returns.
+
+        The model outputs are what :meth:`deployment_forward` returns. They can differ from
+        ``forward()``'s (decoded boxes, or labels and scores instead of logits), so each
+        model maps them itself.
+
+        Args:
+            multi_task_batch_inputs: Model inputs the run started from.
+            outputs: The model outputs, keyed by name.
+
+        Returns:
+            The eval output the attached metric suites read.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement build_deployed_eval_output(), so the "
+            "outputs of its deployed graphs cannot be scored."
+        )
 
     def build_export_specs(
         self, multi_task_batch_inputs: ModelBatchInputs

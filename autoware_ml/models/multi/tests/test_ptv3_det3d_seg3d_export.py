@@ -27,6 +27,7 @@ from autoware_ml.deployment.graphs import (
     run_deployment_in_torch,
     validate_graphs,
 )
+from autoware_ml.deployment.tests.deployment_assertions import assert_eval_outputs_close
 
 from autoware_ml.dataclasses.batch.segmentation3d import Segmentation3DGTBatch
 from autoware_ml.dataclasses.geometry.voxels import VoxelsData
@@ -79,8 +80,11 @@ JOINT_EXPORT_OUTPUT_NAMES = [
 
 
 class _DummyBBoxHead:
+    def __init__(self) -> None:
+        self.received: list[object] = []
+
     def decode_outputs(self, outputs: object) -> ModelPredictions:
-        del outputs
+        self.received.append(outputs)
         return ModelPredictions(
             detection3d_predictions=[
                 Detection3DSamplePredictions(
@@ -239,6 +243,15 @@ def test_ptv3_det3d_seg3d_eval_output_scatters_segmentation3d_to_original_points
     assert frame.gt_boxes is not None and frame.gt_boxes.shape == (0, 9)
     assert len(eval_out.detection3d.frames) == 1
 
+    det_names = ["dense_heatmap", "query_heatmap_score", "query_labels"]
+    det_names += ["heatmap", "center", "height", "dim", "rot"]
+    logits = outputs.segmentation3d().logits
+    flat = {"pred_labels": logits.argmax(dim=1), "pred_probs": logits.softmax(dim=1)}
+    flat.update(zip(det_names, det3d_outputs.export_tensors(det_names)))
+    deployed = PTv3Det3DSeg3DModel.build_deployed_eval_output(model, batch, flat)
+    assert_eval_outputs_close(deployed, eval_out)
+    assert model.bbox_head.received[-1].transfusion_head_outputs == det3d_outputs
+
 
 def _save_detection3d_checkpoint(
     checkpoint_path: Path,
@@ -336,6 +349,10 @@ def test_ptv3_det3d_seg3d_deployment_is_the_seg3d_and_det3d_graphs_over_one_enco
     specs = model.build_export_specs(batch)
     assert list(specs) == [ENCODER_GRAPH, SEG3D_HEAD_GRAPH, DET3D_HEAD_GRAPH]
     assert specs[DET3D_HEAD_GRAPH].output_names == JOINT_EXPORT_OUTPUT_NAMES[2:]
+
+    deployed = model.build_deployed_eval_output(batch, joint)
+    assert deployed.detection3d is not None and deployed.segmentation3d is not None
+    assert len(deployed.detection3d.frames) == len(deployed.segmentation3d.frames) == 1
 
 
 @pytest.mark.skipif(

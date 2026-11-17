@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Assertions the deployed models' tests share: the deployment reproduces ``forward()``."""
+"""Checks the deployed models' tests share: the deployment reproduces ``forward()``, and its
+eval output matches the one ``forward()``'s outputs give."""
 
 from __future__ import annotations
 
@@ -21,11 +22,16 @@ from typing import NamedTuple
 import unittest
 
 from jaxtyping import Shaped
+from pydantic import BaseModel
 import torch
 
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
-from autoware_ml.deployment.graphs import DeploymentResult, run_deployment_in_torch
+from autoware_ml.deployment.graphs import (
+    DeploymentResult,
+    run_deployment_in_torch,
+)
+from autoware_ml.metrics.eval_output import EvalOutput
 from autoware_ml.models.module_base_model import ModuleBaseModel
 
 
@@ -95,3 +101,37 @@ def assert_deployment_reproduces_forward(
             msg=lambda detail, name=name: f"Model output {name!r} differs from forward(): {detail}",
         )
     return DeploymentForwardCheck(forward_outputs, result)
+
+
+def assert_eval_outputs_close(actual: EvalOutput, expected: EvalOutput) -> None:
+    """Assert that two eval outputs hold the same parts and frames, their tensors close.
+
+    Args:
+        actual: The eval output under test, e.g. ``build_deployed_eval_output()``'s.
+        expected: The reference, e.g. ``build_eval_output()``'s on ``forward()``'s outputs.
+    """
+    case = unittest.TestCase()
+    for part in ("detection3d", "segmentation3d"):
+        got, want = getattr(actual, part), getattr(expected, part)
+        case.assertEqual(got is None, want is None, f"{part} is set in only one output")
+        if want is None:
+            continue
+        case.assertEqual(len(got.frames), len(want.frames), f"{part} frames")
+        for index, (got_frame, want_frame) in enumerate(zip(got.frames, want.frames, strict=True)):
+            _assert_fields_close(case, got_frame, want_frame, f"{part}.frames[{index}]")
+
+
+def _assert_fields_close(
+    case: unittest.TestCase, actual: BaseModel, expected: BaseModel, path: str
+) -> None:
+    """Compare every field of two models: tensors with ``assert_close``, nested models field by field."""
+    for name in type(expected).model_fields:
+        got, want, where = getattr(actual, name), getattr(expected, name), f"{path}.{name}"
+        if isinstance(want, torch.Tensor):
+            torch.testing.assert_close(
+                got, want, msg=lambda message, where=where: f"{where}: {message}"
+            )
+        elif isinstance(want, BaseModel):
+            _assert_fields_close(case, got, want, where)
+        else:
+            case.assertEqual(got, want, where)
