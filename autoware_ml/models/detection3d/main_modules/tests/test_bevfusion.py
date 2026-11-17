@@ -40,6 +40,7 @@ from autoware_ml.deployment.graphs import (
     run_deployment_in_torch,
     validate_graphs,
 )
+from autoware_ml.types.backend import Backend
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_attention import (
@@ -626,6 +627,7 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
         self.assertEqual(graph.name, "bevfusion_lidar")
         self.assertEqual(graph.input_names, ("voxels", "coors", "num_points_per_voxel"))
         self.assertEqual(graph.output_names, ("bbox_pred", "score", "label_pred"))
+        self.assertEqual(graph.torch_fallback_backends, (Backend.ONNX,))
         self.assertEqual(
             graph.onnx_dynamic_axes,
             {name: {0: "voxels_num"} for name in ("voxels", "coors", "num_points_per_voxel")},

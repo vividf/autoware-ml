@@ -41,6 +41,7 @@ import torch
 from torch import nn
 
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
 
 #: A graph input or output: any dtype and shape, fixed by the graph's module.
@@ -60,6 +61,8 @@ class DeploymentGraph:
             module's argument order; they are the ONNX input names.
         output_names: ONNX output names, in the module's return order; a run of the graph
             returns its tensors under these names.
+        torch_fallback_backends: Backends that run the PyTorch module instead of the
+            artifact, for graphs they cannot execute (plugin ops on ONNX Runtime).
         onnx_dynamic_axes: Axes dynamic by construction, ``{tensor: {dim: name}}``. They
             become the spec's ``dynamic_axes``, the one declaration both ONNX exporters
             derive from. One name is one size: an output whose axis differs from an
@@ -70,6 +73,7 @@ class DeploymentGraph:
     module: nn.Module
     input_names: tuple[str, ...]
     output_names: tuple[str, ...]
+    torch_fallback_backends: tuple[Backend, ...] = ()
     onnx_dynamic_axes: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -423,6 +427,8 @@ def export_spec_for_graph(graph: DeploymentGraph, args: tuple[GraphTensor, ...])
         else None
     )
     return ExportSpec(
+        # BatchNorm stays a graph node (see utils/bn_fusion.py); a path that needs folded
+        # weights folds its own copy before it gets here.
         module=graph.module,
         args=args,
         input_names=list(graph.input_names),

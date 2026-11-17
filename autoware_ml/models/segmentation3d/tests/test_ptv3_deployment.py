@@ -41,6 +41,7 @@ from autoware_ml.models.segmentation3d.ptv3_base import (
     serialize_points,
 )
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
+from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import export_to_onnx
 
 REQUIRES_SPARSE_CUDA = unittest.skipUnless(
@@ -58,6 +59,7 @@ class TestSeg3dDeployment(unittest.TestCase):
         self.assertEqual([graph.name for graph in graphs], [ENCODER_GRAPH, SEG3D_HEAD_GRAPH])
         encoder, head = graphs
         self.assertEqual(encoder.input_names[:5], ENCODER_EXPORT_INPUT_NAMES)
+        self.assertEqual(encoder.torch_fallback_backends, (Backend.ONNX,))
         self.assertFalse(any(name.endswith("_cluster") for name in encoder.input_names))
         self.assertEqual(head.output_names, ("pred_labels", "pred_probs"))
         # The serialized points hold every graph input the encoder does not produce.

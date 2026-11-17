@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping, Sequence
 import logging
+import os
 from pathlib import Path
 from types import MappingProxyType
 
@@ -30,8 +31,8 @@ from autoware_ml.utils.deploy import (
     export_to_onnx,
     should_modify_graph,
     modify_onnx_graph,
-    build_tensorrt_engine,
 )
+from autoware_ml.deployment.backends.tensorrt_builder import build_engine_from_config
 from autoware_ml.utils.mlflow_helpers import get_git_sha
 from autoware_ml.utils.onnx_meta import stamp_onnx_meta
 from autoware_ml.utils.onnx_precision import (
@@ -104,7 +105,10 @@ class DeploymentExport:
 
         for module_name, export_spec in export_specs.items():
             module_onnx_cfg = merge_module_onnx_cfg(self.deploy_cfg.onnx, module_name)
-            module_onnx_path = self.output_dir / f"{module_name}.onnx"
+            # The artifact the runtime and the backends load; a graph modifier may write the
+            # graph under another name on the way.
+            onnx_artifact_path = self.output_dir / f"{module_name}.onnx"
+            module_onnx_path = onnx_artifact_path
             module_engine_path = self.output_dir / f"{module_name}.engine"
 
             if should_export_stage(self.deploy_cfg.onnx):
@@ -137,7 +141,9 @@ class DeploymentExport:
                     tracker=self.tracker,
                     run_id=self.run_id,
                 )
-                # Recorded after the modifiers, which may write to a different path.
+                if module_onnx_path != onnx_artifact_path:
+                    os.replace(module_onnx_path, onnx_artifact_path)
+                    module_onnx_path = onnx_artifact_path
                 onnx_exported_paths.append(module_onnx_path)
                 logger.info(
                     "Stamped %s metadata: release=%s, commit=%s",
@@ -152,12 +158,11 @@ class DeploymentExport:
                         f"ONNX file not found: {module_onnx_path}. "
                         "TensorRT export requires a valid ONNX model."
                     )
-                build_tensorrt_engine(
+                build_engine_from_config(
                     module_onnx_path, self.deploy_cfg, module_engine_path, module_name
                 )
                 tensorrt_exported_paths.append(module_engine_path)
 
-        # Implement the export logic here
         logger.info("Model export completed.")
         return DeploymentExportOutputs(
             onnx_exported_paths=onnx_exported_paths,
