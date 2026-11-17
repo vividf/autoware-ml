@@ -1,0 +1,20 @@
+# @package _global_
+# INT8 dense + INT8 sparse tower (ImplicitGemm plugin scales) variant.
+# An experiment composes it in place of `base_lidar_voxel0170_120m_int8`, then runs `autoware-ml quantize`
+# (writes the PTQ checkpoint) and `autoware-ml deploy` with that checkpoint as `--weights`.
+defaults:
+  - base_lidar_voxel0170_120m_int8
+  - _self_
+
+quantization:
+  # The early, high-resolution sparse layers lose the most accuracy and run slower in INT8
+  # (per-layer GEMM speedup 0.45-0.82x below stage 3, 1.4-1.55x in stage 4), so they stay
+  # fp16 and stage 3.1 onwards is quantized.
+  skip_quantize:
+    - bbox_head.decoder
+    - lidar_network.pts_neck.blocks.0
+    - lidar_network.pts_backbone.blocks.0
+    - lidar_network.pts_middle_encoder.conv_input
+    - lidar_network.pts_middle_encoder.encoder_layers.encoder_layer1
+    - lidar_network.pts_middle_encoder.encoder_layers.encoder_layer2
+    - lidar_network.pts_middle_encoder.encoder_layers.encoder_layer3.0
