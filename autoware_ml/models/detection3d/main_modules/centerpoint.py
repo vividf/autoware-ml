@@ -34,7 +34,10 @@ from torch.optim.lr_scheduler import LRScheduler
 from autoware_ml.dataclasses.models.model_batch_inputs import ModelBatchInputs
 from autoware_ml.dataclasses.models.model_predictions import ModelPredictions
 from autoware_ml.dataclasses.models.model_outputs import ModelOutputs
-from autoware_ml.dataclasses.models.detection3d.head_outputs import Detection3DHeadOutputs
+from autoware_ml.dataclasses.models.detection3d.head_outputs import (
+    CenterHeadOutputs,
+    Detection3DHeadOutputs,
+)
 from autoware_ml.deployment.graphs import DeploymentGraph, GraphExecutors
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
@@ -270,7 +273,8 @@ class CenterPointDetection3DModel(ModuleBaseModel):
                 "pts_backbone_neck_head_centerpoint",
                 module=head_wrapper,
                 input_names=("spatial_features",),
-                # Named after the CenterHeadOutputs fields.
+                # Named after the CenterHeadOutputs fields; build_deployed_eval_output
+                # rebuilds the typed outputs by name.
                 output_names=tuple(head_wrapper.output_names),
                 # One axis name is one size: the head maps are the canvas down-sampled by
                 # out_size_factor, so they do not share the canvas's H and W.
@@ -314,4 +318,18 @@ class CenterPointDetection3DModel(ModuleBaseModel):
         )
         return executors["pts_backbone_neck_head_centerpoint"].run(
             spatial_features=spatial_features
+        )
+
+    def build_deployed_eval_output(
+        self, multi_task_batch_inputs: ModelBatchInputs, outputs: Mapping[str, torch.Tensor]
+    ) -> EvalOutput:
+        """Score the deployed head maps exactly like forward()'s."""
+        return self.build_eval_output(
+            multi_task_batch_inputs,
+            ModelOutputs(
+                detection3d_head_outputs=Detection3DHeadOutputs(
+                    center_head_outputs=CenterHeadOutputs.from_export_tensors(outputs),
+                    transfusion_head_outputs=None,
+                )
+            ),
         )

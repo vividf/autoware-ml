@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from jaxtyping import Float, Int
 import torch
 import torch.nn as nn
 
@@ -435,17 +436,38 @@ def segmentation3d_eval_output(
     Returns:
         The segmentation frames of the batch.
     """
+    return segmentation3d_eval_output_from_scores(
+        seg3d_logits.argmax(dim=1), torch.softmax(seg3d_logits, dim=1), batch_inputs
+    )
+
+
+def segmentation3d_eval_output_from_scores(
+    pred_labels: Int[torch.Tensor, " num_voxels"],
+    scores: Float[torch.Tensor, "num_voxels num_classes"],
+    batch_inputs: ModelBatchInputs,
+) -> Segmentation3DEvalOutput:
+    """Same as :func:`segmentation3d_eval_output`, from per-voxel labels and softmax scores.
+
+    These are what the deployed segmentation graph emits (``pred_labels`` / ``pred_probs``).
+
+    Args:
+        pred_labels: Predicted class of every voxel.
+        scores: Softmax scores of every voxel.
+        batch_inputs: Model inputs with the points, the voxels and the point labels.
+
+    Returns:
+        The segmentation frames of the batch.
+    """
     point_batch, voxels_data, label_batch = voxelized_points(batch_inputs)
     points = point_batch.points
     point_voxel_indices = voxels_data.point_voxel_indices
     current = current_frame_mask(points, point_batch.timestamp_difference_dim)
     scored = current & assigned_point_mask(point_voxel_indices)
-    point_logits = gather_point_logits(seg3d_logits, point_voxel_indices, scored)
     return segmentation3d_frames_eval_output(
         coord=points[scored, :3],
-        pred_labels=point_logits.argmax(dim=1),
+        pred_labels=gather_point_logits(pred_labels.long(), point_voxel_indices, scored),
         target_labels=_point_labels(label_batch).long()[scored],
-        scores=torch.softmax(point_logits, dim=1),
+        scores=gather_point_logits(scores, point_voxel_indices, scored),
         frame_ids=point_batch.batch_indices.long()[scored],
         num_frames=point_batch.batch_size,
         batch_inputs=batch_inputs,
