@@ -25,6 +25,7 @@ The sparse grid order is ``(Y, X, Z)`` (= the``SparseEncoder`` "(H, W, D)") so t
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from copy import deepcopy
 
@@ -37,6 +38,9 @@ from spconv.pytorch.modules import SparseModule
 
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
+from autoware_ml.utils.bn_fusion import fuse_model_bn
+
+logger = logging.getLogger(__name__)
 
 
 def _copy_sparse_convolution_weights(
@@ -51,7 +55,7 @@ def _copy_sparse_convolution_weights(
         target.bias.data.copy_(source.bias.data)
 
 
-def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
+def _convert_sparse_convolution(module: nn.Module, do_sort: bool) -> nn.Module:
     """Convert one native spconv layer into the export-aware equivalent."""
     if isinstance(module, SubMConv3d):
         converted = ExportableSubMConv3d(
@@ -69,6 +73,7 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     if isinstance(module, SparseConv3d):
@@ -92,22 +97,49 @@ def _convert_sparse_convolution(module: nn.Module) -> nn.Module:
             large_kernel_fast_algo=getattr(module, "large_kernel_fast_algo", False),
         )
         _copy_sparse_convolution_weights(module, converted)
+        converted.export_do_sort = do_sort
         return converted.to(device=module.weight.device, dtype=module.weight.dtype)
 
     return module
 
 
-def _replace_sparse_convolutions(module: nn.Module) -> None:
+def fold_sparse_encoder_bn(encoder: nn.Module) -> int:
+    """Fold every (sparse convolution, BatchNorm1d) pair of an export copy in place.
+
+    TensorRT fuses the BatchNorm of a dense graph itself but cannot fuse one into a plugin
+    node, so the plugin graph has to carry folded weights. Call it on an eval-mode copy
+    before :meth:`SparseEncoder.prepare_for_export`, which then builds the wrappers with the
+    bias the fold introduces. The pairs come from :func:`fuse_model_bn`, which quantization
+    folds the same way.
+
+    Returns:
+        Number of folded pairs.
+
+    Raises:
+        RuntimeError: If a BatchNorm1d is left: a norm the module structure does not pair
+            with a convolution (see ``bn_fusion_pairs``).
     """
-    Recursively replace native sparse convolution children
-    in-place on an export copy.
-    """
+    fused = len(fuse_model_bn(encoder))
+    remaining = [name for name, m in encoder.named_modules() if isinstance(m, nn.BatchNorm1d)]
+    if remaining:
+        raise RuntimeError(
+            f"{len(remaining)} BatchNorm1d layer(s) survived the export fold "
+            f"({fused} pair(s) folded): {remaining[:5]}. The deployed sparse graph must "
+            "carry no BatchNormalization node; a convolution and its norm must be adjacent "
+            "children of an in-order container or declared in bn_fusion_pairs."
+        )
+    logger.info("Folded %d sparse Conv-BN pair(s) into the export copy.", fused)
+    return fused
+
+
+def _replace_sparse_convolutions(module: nn.Module, do_sort: bool) -> None:
+    """Replace native sparse convolution children in-place on an export copy."""
     for name, child in list(module.named_children()):
-        converted = _convert_sparse_convolution(child)
+        converted = _convert_sparse_convolution(child, do_sort)
         if converted is not child:
             module.add_module(name, converted)
         else:
-            _replace_sparse_convolutions(child)
+            _replace_sparse_convolutions(child, do_sort)
 
 
 def _norm(channels: int, eps: float, momentum: float) -> nn.BatchNorm1d:
@@ -170,6 +202,11 @@ class SparseEncoder(BEVMiddleEncoder):
         dense_output_shapes: Dense output shape ``(Y, X, Z)`` after ``conv_out``.
         norm_eps: BatchNorm epsilon.
         norm_momentum: BatchNorm momentum.
+        export_do_sort: Whether the exported pair-mask generation argsorts its result.
+            Sorting only changes memory locality, so this is a per-target latency choice:
+            on a Blackwell workstation (BEVFusion j6gen2, 100 frames, FP16 dense + FP32
+            sparse) sorting is faster, 6.70 vs 7.13 ms/frame, while other targets can be
+            faster without it. Export copy only; training uses spconv's default.
     """
 
     def __init__(
@@ -188,9 +225,11 @@ class SparseEncoder(BEVMiddleEncoder):
         dense_output_shapes: Sequence[int] = (180, 180, 2),
         norm_eps: float = 1e-3,
         norm_momentum: float = 0.01,
+        export_do_sort: bool = True,
     ) -> None:
         super().__init__()
         self.sparse_shape = list(sparse_shape)
+        self.export_do_sort = export_do_sort
         self.output_channels = output_channels
         self.dense_output_shapes = list(dense_output_shapes)
         num_stages = len(encoder_channels)
@@ -261,6 +300,13 @@ class SparseEncoder(BEVMiddleEncoder):
         """Return the expected ``(height, width)`` of the dense BEV output."""
         return self.dense_output_shapes[0], self.dense_output_shapes[1]
 
+    #: Voxel columns ``[batch, z, y, x]`` -> ``[batch, y, x, z]``, the ``sparse_shape`` order.
+    CONV_COORDS_PERMUTATION: tuple[int, ...] = (0, 2, 3, 1)
+
+    def conv_coords(self, coords: torch.Tensor) -> torch.Tensor:
+        """Reorder ``[batch, z, y, x]`` voxel coordinates into the convolutions' column order."""
+        return coords[:, list(self.CONV_COORDS_PERMUTATION)].contiguous().int()
+
     def forward(
         self,
         voxel_features: Float32[torch.Tensor, "num_voxels num_voxel_channels"],
@@ -280,8 +326,7 @@ class SparseEncoder(BEVMiddleEncoder):
             Dense BEV feature map of shape
             ``(batch_size, output_channels * Z, Y, X)``.
         """
-        # Reorder [batch_idx, z, y, x] -> [batch_idx, y, x, z] to match sparse_shape (Y, X, Z).
-        coords = coords[:, [0, 2, 3, 1]].contiguous().int()
+        coords = self.conv_coords(coords)
         sp_tensor = SparseConvTensor(voxel_features, coords, self.sparse_shape, batch_size)
         x = self.conv_input(sp_tensor)
         x = self.encoder_layers(x)
@@ -308,10 +353,11 @@ class SparseEncoder(BEVMiddleEncoder):
 
         Returns:
             Deep copy of the encoder with native spconv layers replaced by the
-            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`.
+            deployment-aware wrappers from :mod:`autoware_ml.ops.spconv`. BatchNorm is not
+            folded (see :func:`fold_sparse_encoder_bn`).
         """
         encoder = deepcopy(self)
-        _replace_sparse_convolutions(encoder)
+        _replace_sparse_convolutions(encoder, self.export_do_sort)
         # eval() last: the freshly constructed export wrappers start in train
         # mode and are inference-only.
         return encoder.eval()

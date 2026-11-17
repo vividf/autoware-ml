@@ -44,6 +44,10 @@ from autoware_ml.deployment.graphs import DeploymentGraph, GraphExecutors
 from autoware_ml.metrics.base import MetricSuite
 from autoware_ml.metrics.detection3d.eval_output import detection3d_eval_output
 from autoware_ml.metrics.eval_output import EvalOutput
+from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import (
+    SparseEncoder,
+    fold_sparse_encoder_bn,
+)
 from autoware_ml.models.detection3d.main_modules.bevfusions.bevfusion_lidar import (
     BEVFusionLidar,
 )
@@ -59,6 +63,7 @@ from autoware_ml.models.detection3d.main_modules.bevfusions.export_wrappers impo
 )
 from autoware_ml.preprocessing.data_preprocessor import DataPreprocessor
 from autoware_ml.models.module_base_model import LogDictConfigs, ModuleBaseModel
+from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
 from autoware_ml.types.backend import Backend
 from autoware_ml.utils.deploy import ExportSpec
@@ -546,10 +551,11 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         """
         if self.camera_network is not None or self.lidar_network is None:
             return None
+        export_model = self._prepare_export_model(fold_sparse_bn=True)
         return (
             DeploymentGraph(
                 "bevfusion_lidar",
-                module=_BEVFusionLidarExportWrapper(self._prepare_export_model()),
+                module=_BEVFusionLidarExportWrapper(export_model),
                 input_names=("voxels", "coors", "num_points_per_voxel"),
                 # Decoded by build_deployed_eval_output.
                 output_names=("bbox_pred", "score", "label_pred"),
@@ -558,6 +564,7 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
                     "coors": {0: "voxels_num"},
                     "num_points_per_voxel": {0: "voxels_num"},
                 },
+                onnx_transforms=(fuse_sparse_graph,),
                 torch_fallback_backends=(Backend.ONNX,),
             ),
         )
@@ -593,8 +600,12 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
             )
         )
 
-    def _prepare_export_model(self) -> "BEVFusionDetection3DModel":
+    def _prepare_export_model(self, fold_sparse_bn: bool = False) -> "BEVFusionDetection3DModel":
         """Return an export-ready model copy with exportable submodules.
+
+        Args:
+            fold_sparse_bn: Fold the sparse encoder's BatchNorm into its convolutions, for a
+                graph whose sparse convolutions become plugin nodes.
 
         Returns:
             Deep copy of the model with the sparse middle encoder and the
@@ -602,6 +613,8 @@ class BEVFusionDetection3DModel(ModuleBaseModel):
         """
         model = deepcopy(self).eval()
         if model.lidar_network is not None:
+            if fold_sparse_bn and isinstance(model.lidar_network.pts_middle_encoder, SparseEncoder):
+                fold_sparse_encoder_bn(model.lidar_network.pts_middle_encoder)
             model.lidar_network.prepare_for_export()
         model.bbox_head = model.bbox_head.prepare_for_export()
         return model
