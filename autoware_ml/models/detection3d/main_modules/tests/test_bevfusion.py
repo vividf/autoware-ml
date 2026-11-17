@@ -27,6 +27,8 @@ import unittest
 from unittest import mock
 
 from jaxtyping import Float32, Int32
+from spconv.core import ConvAlgo
+from spconv.pytorch.conv import SparseConvolution
 import torch
 import torch.nn as nn
 
@@ -43,7 +45,10 @@ from autoware_ml.deployment.graphs import (
 from autoware_ml.deployment.tests.deployment_assertions import assert_eval_outputs_close
 from autoware_ml.types.backend import Backend
 from autoware_ml.models.detection3d.encoders.bev_middle_encoder import BEVMiddleEncoder
-from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import SparseEncoder
+from autoware_ml.models.detection3d.encoders.sparse.sparse_encoder import (
+    SparseEncoder,
+    check_export_geometry,
+)
 from autoware_ml.models.detection3d.backbones.second import SECONDBackbone
 from autoware_ml.models.detection3d.heads.transfusions.exportable_multi_head_attention import (
     ExportableMultiheadAttention,
@@ -81,6 +86,7 @@ from autoware_ml.models.detection3d.view_transforms.depth_lss import DepthLSSTra
 from autoware_ml.ops.spconv.availability import IS_SPCONV_AVAILABLE
 from autoware_ml.ops.spconv.onnx_fusion import fuse_sparse_graph
 from autoware_ml.ops.spconv.onnx_int8 import sparse_int8_transform
+from autoware_ml.ops.spconv.rulebook import embed_rulebook_metadata, rulebook_input_names
 from autoware_ml.ops.spconv.sparse_conv import ExportableSparseConv3d, ExportableSubMConv3d
 from autoware_ml.models.module_base_model import LogDictConfigs
 from autoware_ml.ops.voxelization.voxelization import VoxelsData
@@ -679,6 +685,110 @@ class TestBEVFusionDetection3DModelLidarOnly(_BEVFusionDetection3DModelTestCase)
                 for m in model.lidar_network.pts_middle_encoder.modules()
             )
         )
+
+    @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
+    def test_rulebook_precompute_is_an_opt_in_that_adds_graph_inputs(self) -> None:
+        """
+        Test that opting into the rulebook precompute adds the rulebooks as graph inputs with
+        dynamic axes, in the order of the wrapper's layers, and the metadata transform last.
+        """
+        model = self._build_rulebook_precompute_model()
+
+        (graph,) = validate_graphs(model.deployment_graphs())
+        stages = model.lidar_network.pts_middle_encoder.downsample_stages()
+        expected = rulebook_input_names(stages)
+        self.assertTrue(expected)
+        # The wrapper and the metadata carry the live encoder's cached geometry, the one the
+        # deployed function precomputes the rulebooks with.
+        self.assertIs(graph.module.rulebook_stages, stages)
+        self.assertEqual(tuple(graph.input_names[3:]), expected)
+        self.assertEqual(set(graph.onnx_dynamic_axes), set(graph.input_names))
+        self.assertIs(graph.onnx_transforms[-1].func, embed_rulebook_metadata)
+        self.assertIs(graph.onnx_transforms[-1].keywords["stages"], stages)
+        (plain,) = validate_graphs(self.model.eval().deployment_graphs())
+        self.assertEqual(plain.input_names, ("voxels", "coors", "num_points_per_voxel"))
+        self.assertEqual(set(plain.onnx_dynamic_axes), set(plain.input_names))
+
+    @unittest.skipUnless(
+        IS_SPCONV_AVAILABLE and torch.cuda.is_available(), "spconv kernels need CUDA"
+    )
+    def test_precomputed_rulebooks_leave_the_graph_outputs_unchanged(self) -> None:
+        """Test that precomputed rulebooks leave the packed outputs bit-identical."""
+        model = self._build_rulebook_precompute_model()
+        batch_inputs = self._build_single_sample_batch_inputs()
+
+        with_rulebooks = run_deployment_in_torch(
+            model.deployment_declaration(), batch_inputs, self.device
+        )
+        model.lidar_network.pts_middle_encoder.export_precompute_rulebooks = False
+        plain = run_deployment_in_torch(model.deployment_declaration(), batch_inputs, self.device)
+
+        self.assertGreater(len(with_rulebooks.graph_inputs["bevfusion_lidar"]), 3)
+        self.assertEqual(len(plain.graph_inputs["bevfusion_lidar"]), 3)
+        for key in ("bbox_pred", "score", "label_pred"):
+            torch.testing.assert_close(
+                with_rulebooks.outputs[key], plain.outputs[key], rtol=0, atol=0
+            )
+
+    @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
+    def test_downsample_stages_are_cached_and_the_export_copy_describes_the_same(self) -> None:
+        """
+        Test that the encoder describes its down-sampling stages once, and that the export
+        copy's converted and BN-folded layers still describe the same stages, sorting and
+        coordinate order.
+        """
+        model = self._build_rulebook_precompute_model()
+        live = model.lidar_network.pts_middle_encoder
+        export = model._prepare_export_model(fold_sparse_bn=True).lidar_network.pts_middle_encoder
+
+        self.assertIs(live.downsample_stages(), live.downsample_stages())
+        self.assertTrue(live.downsample_stages())
+        check_export_geometry(live, export)
+
+    @unittest.skipUnless(IS_SPCONV_AVAILABLE, "The sparse encoder is built on spconv.")
+    def test_an_export_copy_with_other_rulebook_geometry_is_rejected(self) -> None:
+        """
+        Test that declaring the graphs is refused when the export copy's sorting or a layer's
+        algorithm differ from the live encoder's, since the rulebooks are precomputed from the
+        live encoder.
+        """
+        model = self._build_rulebook_precompute_model()
+        live = model.lidar_network.pts_middle_encoder
+        export = model._prepare_export_model(fold_sparse_bn=True).lidar_network.pts_middle_encoder
+
+        export.export_do_sort = not live.export_do_sort
+        with self.assertRaisesRegex(RuntimeError, "other rulebook geometry.*export_do_sort"):
+            check_export_geometry(live, export)
+
+        export.export_do_sort = live.export_do_sort
+        (down_layer,) = [
+            module
+            for module in export.modules()
+            if isinstance(module, SparseConvolution) and not module.subm
+        ]
+        down_layer.algo = ConvAlgo.Native
+        with self.assertRaisesRegex(RuntimeError, "other rulebook geometry.*downsample_stages"):
+            check_export_geometry(live, export)
+
+    def _build_rulebook_precompute_model(self) -> BEVFusionDetection3DModel:
+        """Build a lidar-only model whose sparse encoder precomputes rulebooks.
+
+        One submanifold stage, so ``conv_out`` is the only down-sampling layer; its
+        ``(1, 1, 3)`` kernel collapses the three z cells and keeps the 16x16 BEV grid the
+        backbone and head are built for.
+        """
+        lidar_network = self._build_lidar_network()
+        lidar_network.pts_middle_encoder = SparseEncoder(
+            in_channels=self.middle_channels,
+            sparse_shape=[*self.bev_shape, 3],
+            base_channels=8,
+            encoder_channels=((8, 8),),
+            encoder_paddings=((0, 0),),
+            output_channels=self.middle_channels,
+            dense_output_shapes=[*self.bev_shape, 1],
+            export_precompute_rulebooks=True,
+        ).to(self.device)
+        return self._build_model(lidar_network=lidar_network, camera_network=None).eval()
 
     def test_quantization_rules_are_the_model_declaration(self) -> None:
         """Test that the rules name the lidar branch's towers by their dotted paths."""
