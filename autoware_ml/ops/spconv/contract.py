@@ -53,3 +53,9 @@ DO_SORT_ATTR = "do_sort"
 #: ``ImplicitGemm.act_type`` values; the plugin mirrors cumm's ``tv::gemm::Activation``.
 ACT_NONE = 0
 ACT_RELU = 1
+
+#: Slots 5 and 6 of the seven-input form are read by both plugins as ``float*``. A precision
+#: cast must leave them fp32 whatever it does to the rest of the graph.
+IMPLICIT_GEMM_FP32_INPUT_SLOTS: dict[int, tuple[int, ...]] = {
+    IMPLICIT_GEMM_INPUTS: (IMPLICIT_GEMM_WEIGHT_SCALE_SLOT, IMPLICIT_GEMM_BIAS_SLOT)
+}
