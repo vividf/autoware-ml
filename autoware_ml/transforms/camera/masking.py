@@ -161,10 +161,12 @@ class EgoVehicleRegions:
             when the frame has no region at all.
 
         Raises:
-            ValueError: If a camera with a polygon already carries an image augmentation. The
-                polygon is drawn on the raw image, so it would cover the wrong pixels. A padding
-                leaves the augmentation matrix as it is, so a padded image is not detected: the
-                transform must run before the padding too.
+            ValueError: If a camera with a polygon already carries an image augmentation other
+                than a resize of the whole image. The polygon is drawn on the raw image, so it
+                would cover the wrong pixels; a resize of the whole image, as a loader decoding
+                at a reduced size, keeps the normalized polygon on the same part of the image. A
+                padding leaves the augmentation matrix as it is, so a padded image is not
+                detected: the transform must run before the padding too.
         """
         if model_gt_sample.frame_meta is None or model_gt_sample.camera_image_data is None:
             return None
@@ -189,12 +191,19 @@ class EgoVehicleRegions:
             4, dtype=augmentation_matrices.dtype, device=augmentation_matrices.device
         )
         for index, name in cameras:
-            if not torch.allclose(augmentation_matrices[index], identity):
+            # A resize of the whole image is a positive scale of each axis without rotation,
+            # shear or translation; every other augmentation moves the polygon off its pixels.
+            matrix = augmentation_matrices[index]
+            scale = matrix.diagonal()[:2]
+            resize = identity.clone()
+            resize[0, 0], resize[1, 1] = scale[0], scale[1]
+            if not (bool((scale > 0).all()) and torch.allclose(matrix, resize)):
                 raise ValueError(
-                    f"{user} must run before any image-space transform, but camera {name!r} "
-                    "already carries an image augmentation. Its ego vehicle polygon is drawn on "
-                    f"the raw image, so move {user} ahead of the undistortion, resize, crop, flip, "
-                    "rotation and padding in the pipeline."
+                    f"{user} must run before any image-space transform but a resize of the whole "
+                    f"image, and camera {name!r} already carries another image augmentation. Its "
+                    "ego vehicle polygon is drawn on the whole raw image, so move "
+                    f"{user} ahead of the undistortion, crop, flip, rotation and padding in the "
+                    "pipeline."
                 )
         return group, cameras
 
@@ -223,10 +232,11 @@ class MaskEgoVehicle(BaseTransform):
 
     Every pixel inside the polygon of a camera, see :class:`EgoVehicleRegions`, is set to
     ``fill_value``. The polygons are drawn on the raw images, so the transform must run before
-    any image-space transform, the undistortion and the padding included. It raises when a camera
-    it masks already carries an image augmentation, but a padding, which leaves the augmentation
-    matrix as it is, goes undetected. The region then follows the pixels through the later resize,
-    crop, flip and rotation.
+    any image-space transform, the undistortion and the padding included, except a resize of the
+    whole image, such as a loader decoding at a reduced size, which keeps a normalized polygon on
+    the same pixels. It raises when a camera it masks already carries another image augmentation,
+    but a padding, which leaves the augmentation matrix as it is, goes undetected. The region then
+    follows the pixels through the later resize, crop, flip and rotation.
 
     Required keys:
         - camera_image_data: the loaded images of every camera.
@@ -265,7 +275,8 @@ class MaskEgoVehicle(BaseTransform):
             The sample with the ego vehicle regions painted with ``fill_value``.
 
         Raises:
-            ValueError: If a camera to mask already carries an image augmentation.
+            ValueError: If a camera to mask already carries an image augmentation other than a
+                resize of the whole image.
         """
         found = self.regions.cameras_of(model_gt_sample, type(self).__name__)
         if found is None:
@@ -349,8 +360,9 @@ class BBoxesEgoVehicleFilter(BaseTransform):
     kept, it is not the ego vehicle that hides it.
 
     The regions are drawn on the raw images, so the transform must run before any image-space
-    transform, like :class:`MaskEgoVehicle`, and it raises when a camera with a region already
-    carries an image augmentation. Dropping the boxes before ``LoadAnnotations2DFromBoxes3D``
+    transform but a resize of the whole image, like :class:`MaskEgoVehicle`, and it raises when a
+    camera with a region already carries another image augmentation. Dropping the boxes before
+    ``LoadAnnotations2DFromBoxes3D``
     also keeps them out of the 2D targets.
 
     Required keys:
@@ -384,7 +396,8 @@ class BBoxesEgoVehicleFilter(BaseTransform):
             The sample with the hidden boxes removed, in place.
 
         Raises:
-            ValueError: If a camera with a region already carries an image augmentation.
+            ValueError: If a camera with a region already carries an image augmentation other
+                than a resize of the whole image.
         """
         # This is checked in the _validate_required_keys()
         bboxes: BaseBBoxes3D = (

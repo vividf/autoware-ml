@@ -91,8 +91,9 @@ datasets:
           _convert_: all
 
         # The polygons are drawn on the raw images, so both run before the image augmentation;
-        # they match the cameras by name, so the shuffle above does not matter. The boxes are
-        # dropped before the 2D projection, so the 2D head does not learn them either.
+        # they are normalized, so the downscale of the loader keeps them on the same pixels. They
+        # match the cameras by name, so the shuffle above does not matter. The boxes are dropped
+        # before the 2D projection, so the 2D head does not learn them either.
         - _target_: autoware_ml.transforms.camera.masking.MaskEgoVehicle
           _convert_: all
 

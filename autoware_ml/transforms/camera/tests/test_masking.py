@@ -23,6 +23,7 @@ import torch
 
 from autoware_ml.dataclasses.batch.frame_meta import FrameMetaSample
 from autoware_ml.dataclasses.batch.sample_batch import ModelGTSample
+from autoware_ml.transforms.camera.distortion import UndistortImage
 from autoware_ml.transforms.camera.masking import (
     BBoxesEgoVehicleFilter,
     MaskEgoVehicle,
@@ -30,6 +31,7 @@ from autoware_ml.transforms.camera.masking import (
     normalize_polygon,
     rasterize_polygon,
 )
+from autoware_ml.transforms.camera.resize import ResizeMultiviewImages
 from autoware_ml.transforms.camera.tests.pinhole_camera_test_case import PinholeCameraTestCase
 
 # The left half of the image: columns 0 to 2 of a 5 pixel wide image, every row.
@@ -103,10 +105,17 @@ class MaskEgoVehicleTestCase(PinholeCameraTestCase):
     HEIGHT = 4
     WIDTH = 5
 
-    def build_frame(self, scene_token: str | None, num_cameras: int = 2) -> ModelGTSample:
-        """A sample of mid-gray cameras CAM_0, CAM_1... recorded in the given scene."""
+    def build_frame(
+        self, scene_token: str | None, num_cameras: int = 2, scale: int = 1
+    ) -> ModelGTSample:
+        """A sample of mid-gray cameras CAM_0, CAM_1... recorded in the given scene.
+
+        The cameras are ``scale`` times the size of the class, ``HEIGHT`` x ``WIDTH``.
+        """
         camera_image_data = self.build_pinhole_images(
-            [self.LIDAR2CAM_FORWARD] * num_cameras, width=self.WIDTH, height=self.HEIGHT
+            [self.LIDAR2CAM_FORWARD] * num_cameras,
+            width=self.WIDTH * scale,
+            height=self.HEIGHT * scale,
         )
         camera_image_data = camera_image_data.model_copy(
             update={"images": torch.full_like(camera_image_data.images, 0.5)}
@@ -259,6 +268,83 @@ class TestMaskEgoVehicle(MaskEgoVehicleTestCase):
         ).camera_image_data.images
         self.assertTrue(torch.all(images[0, :, :, :3] == 0.0))
 
+    def test_paints_a_camera_resized_as_a_whole(self) -> None:
+        """
+        Input: a frame of 8x10 cameras resized as a whole to 4x5 (ResizeMultiviewImages, as a
+        loader that decodes at a reduced size) and a left-half polygon for CAM_1.
+        Expected: a normalized polygon covers the same part of the resized image, so the resize
+        is accepted and CAM_1 is painted as a 4x5 camera that was never resized.
+        Check: the painted images against the expected images.
+        """
+        sample = ResizeMultiviewImages(target_size=[self.HEIGHT, self.WIDTH])(
+            self.build_frame("db_j6gen2_v3/uuid/0", scale=2)
+        )
+        transform = MaskEgoVehicle(polygons={"db_j6gen2": {"CAM_1": LEFT_HALF}})
+
+        masked = transform(sample)
+
+        expected = torch.full((2, 3, self.HEIGHT, self.WIDTH), 0.5)
+        expected[1, :, :, :3] = 0.0
+        torch.testing.assert_close(masked.camera_image_data.images, expected)
+
+    def test_rejects_a_resize_combined_with_another_augmentation(self) -> None:
+        """
+        Input: a frame whose CAM_1 was halved and shifted by two pixels, as a resize followed by
+        a crop, and one whose CAM_1 was mirrored about its first column.
+        Expected: only a positive scale of each axis, without a translation, keeps the polygon
+        on its pixels, so masking CAM_1 raises in both cases.
+        Check: ValueError for each.
+        """
+        for augmentation, (scale_x, shift_x) in {
+            "resize and crop": (0.5, -2.0),
+            "mirror": (-1.0, 0.0),
+        }.items():
+            with self.subTest(augmentation=augmentation):
+                sample = self.build_frame("db_j6gen2_v1/uuid/0")
+                augmentation_matrices = sample.camera_image_data.image_augmentation_matrices.clone()
+                augmentation_matrices[1, 0, 0] = scale_x
+                augmentation_matrices[1, 1, 1] = abs(scale_x)
+                augmentation_matrices[1, 0, 3] = shift_x
+                sample = sample._replace(
+                    camera_image_data=sample.camera_image_data.model_copy(
+                        update={"image_augmentation_matrices": augmentation_matrices}
+                    )
+                )
+
+                with self.assertRaises(ValueError):
+                    MaskEgoVehicle(polygons={"db_j6gen2": {"CAM_1": LEFT_HALF}})(sample)
+
+    def test_rejects_an_undistorted_camera(self) -> None:
+        """
+        Input: a frame of 64x80 cameras whose CAM_1 has a barrel distortion, run through
+        UndistortImage.
+        Expected: the undistortion resamples CAM_1 through a non-linear map, which its
+        augmentation matrix records only as the change of the pinhole calibration, a scale with
+        a shift of the principal point. That is not a resize of the whole image, so masking
+        CAM_1 raises; CAM_0, without distortion, is served as loaded and is masked.
+        Check: ValueError for CAM_1, a painted CAM_0 otherwise.
+        """
+        sample = self.build_frame("db_j6gen2_v1/uuid/0", scale=16)
+        sample = sample._replace(
+            camera_image_data=sample.camera_image_data.model_copy(
+                update={
+                    "distortion_models": ["plumb_bob", "plumb_bob"],
+                    "distortion_coefficients": [
+                        torch.zeros(5),
+                        torch.tensor([-0.3, 0.1, 0.0, 0.0, 0.0]),
+                    ],
+                }
+            )
+        )
+        undistorted = UndistortImage()(sample)
+
+        with self.assertRaises(ValueError):
+            MaskEgoVehicle(polygons={"db_j6gen2": {"CAM_1": LEFT_HALF}})(undistorted)
+        images = MaskEgoVehicle(polygons={"db_j6gen2": {"CAM_0": LEFT_HALF}})(
+            undistorted
+        ).camera_image_data.images
+        self.assertTrue(torch.all(images[0, :, :, :40] == 0.0))
+
 
 # The middle of the image: pixels 80 to 119 of a 200 pixel wide image, 30 to 69 of 100 rows.
 CENTER = [0.4, 0.3, 0.6, 0.3, 0.6, 0.7, 0.4, 0.7]
@@ -375,16 +461,39 @@ class TestBBoxesEgoVehicleFilter(PinholeCameraTestCase):
         sample = self.build_frame(rows, scene_token="db_largebus_v1/uuid/0")
         self.assertEqual(self.kept_labels(transform(sample)), [0])
 
+    def test_drops_the_same_box_on_a_camera_resized_as_a_whole(self) -> None:
+        """
+        Input: the frame of test_drops_a_box_hidden_where_it_is_seen with its camera resized as
+        a whole to 50x100 (ResizeMultiviewImages, as a loader that decodes at a reduced size).
+        Expected: the region and the projections scale together, so the resize is accepted and
+        the same box is dropped.
+        Check: the labels of the kept boxes.
+        """
+        rows = [
+            [10.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+            [10.0, 3.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+            [10.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+            [-10.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+        ]
+        sample = ResizeMultiviewImages(target_size=[self.HEIGHT // 2, self.WIDTH // 2])(
+            self.build_frame(rows)
+        )
+        transform = BBoxesEgoVehicleFilter(polygons={"db_j6gen2": {"CAM_0": CENTER}})
+
+        self.assertEqual(self.kept_labels(transform(sample)), [1, 2, 3])
+
     def test_rejects_a_camera_that_was_already_augmented(self) -> None:
         """
-        Input: a frame whose camera with a region already carries an image augmentation.
+        Input: a frame whose camera with a region already carries an image augmentation (a
+        horizontal flip).
         Expected: the region is drawn on the raw image, so the filter raises instead of testing
         the boxes against the wrong pixels.
         Check: ValueError.
         """
         sample = self.build_frame([[10.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0]])
         augmentation_matrices = sample.camera_image_data.image_augmentation_matrices.clone()
-        augmentation_matrices[0, 0, 0] = 0.5
+        augmentation_matrices[0, 0, 0] = -1.0
+        augmentation_matrices[0, 0, 3] = self.WIDTH - 1
         sample = sample._replace(
             camera_image_data=sample.camera_image_data.model_copy(
                 update={"image_augmentation_matrices": augmentation_matrices}
